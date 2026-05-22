@@ -1,0 +1,129 @@
+input_image: assets/sample_elevator.jpg
+mod_panel: assets/mod_panel.png
+run_dir: runs/sample_run
+
+preprocessing:
+  enabled: true
+  auto_correct: true
+  max_roll_degrees: 12.0
+  max_horizontal_shift_ratio: 0.035
+
+detection:
+  enabled: true
+  model_id: groundingdino_swint_ogc
+  device: auto
+  box_threshold: 0.25
+  text_threshold: 0.20
+  score_threshold: 0.25
+  nms_iou: 0.65
+  max_detections: 50
+  min_box_area_ratio: 0.00005
+  max_box_area_ratio: 0.90
+  labels:
+    - elevator door
+    - elevator wall
+    - elevator panel
+    - elevator ceiling
+    - elevator floor
+    - elevator button panel
+    - call button
+    - floor indicator display
+    - handrail
+    - mirror
+    - emergency phone
+    - safety sign
+    - weight limit sign
+    - ventilation grille
+    - door frame
+    - light fixture
+    - security camera
+    - speaker
+    - card reader
+    - threshold plate
+    - door track
+
+segmentation:
+  enabled: true
+  device: auto
+  sam2_repo: ../sam2_src
+  sam2_config: configs/sam2.1/sam2.1_hiera_l.yaml
+  sam2_weights: ../weights/sam2.1_hiera_large.pt
+  mask_dilate: 2
+  fill_holes: true
+  fallback_to_boxes: true
+
+geometry:
+  enabled: true
+  depth_model_id: depth-anything/Depth-Anything-V2-Base-hf
+  known_door_width_mm: 900
+  min_plane_inlier_ratio: 0.60
+  max_plane_residual: 0.05
+
+removal:
+  # These detections become the LaMa mask. Tune this list per job.
+  target_keywords:
+    - elevator panel
+    - elevator button panel
+    - call button
+    - speaker
+  mask_padding_px: 10
+  box_mask_padding_px: 2
+  mask_dilate_iterations: 2
+  cleanup_engine: auto       # auto, lama, wall_patch, or opencv
+  wall_sample_margin_px: 55
+  cleanup_feather_px: 2
+
+inpainting:
+  engine: lama              # lama or opencv
+  lama_repo: third_party/lama
+  lama_model_dir: third_party/lama/big-lama
+  device: auto
+  fallback_to_opencv: false
+  inpaint_crop_padding: 384
+  blend_feather: 24
+  lama_max_side: 1024
+
+insertion:
+  # Preferred placement source: detection, manual_box, or auto_left_wall.
+  placement: detection
+  target_keywords:
+    - elevator panel
+    - elevator button panel
+    - call button
+    - speaker
+  manual_box_xyxy: null     # Example: [95, 415, 140, 560]
+  fallback_box_ratio_xyxy: [0.145, 0.39, 0.255, 0.61]
+  size_mode: fit_box         # fit_box, preserve_asset, or fixed_height
+  fixed_height_px: null
+  allow_upscale: false
+  native_reference_width_px: 600
+  native_reference_height_px: 800
+  target_height_multiplier: 1.55
+  scale_multiplier: 1.0
+  top_shrink: 0.015
+  side_skew: 0.008
+  shadow_strength: 0.12
+  texture_strength: 0.04
+  max_shadow_radius_px: 18
+
+refinement:
+  enabled: false
+  model_id: runwayml/stable-diffusion-inpainting
+  strength: 0.22
+  guidance_scale: 6.5
+  steps: 28
+  prompt: ultra realistic commercial elevator wall panel, natural indoor lighting, subtle shadows, photorealistic
+  negative_prompt: blurry, distorted, low quality, cartoon, cgi, warped geometry
+
+video:
+  enabled: true
+  action: auto              # auto, open, or close
+  cycle: true               # true = animate to the opposite state and back
+  open_reference_image: null   # optional: image showing the elevator interior/cabin when doors are open
+  closed_reference_image: null # optional: image showing the closed elevator doors/exterior
+  fps: 30
+  bitrate: 10000k
+  no_audio: false
+
+monitoring:
+  interval_s: 1.0

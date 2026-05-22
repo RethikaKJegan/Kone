@@ -1,0 +1,53 @@
+[
+  
+  {
+    "input_image": "tests/images/side1.jpg",
+    "open_reference_image": "tests/images/Sample2_open_interior.jpg",
+    "closed_reference_image": "tests/images/Sample2_closed_exterior.jpg",
+    "mod_panel": "tests/panels/mod_up.png",
+    "prompt": "replace the floor indicator display with the mod panel"
+  },
+  {
+    "input_image": "tests/images/Sample11.jpg",
+    "open_reference_image": "tests/images/Sample2_open_interior.jpg",
+    "closed_reference_image": "tests/images/Sample2_closed_exterior.jpg",
+    "mod_panel": "tests/panels/mod_panel.png",
+    "prompt": "replace the elevator button panel with the mod panel"  
+  },
+  {
+    "input_image": "tests/images/Sample10.jpg",
+    "open_reference_image": "tests/images/Sample2_open_interior.jpg",
+    "closed_reference_image": "tests/images/Sample2_closed_exterior.jpg",
+    "mod_panel": "tests/panels/panel_mod.png",
+    "prompt": "replace the elevator button panel with the mod panel"  
+  },
+  {
+    "input_image": "tests/images/Sample9.jpg",
+    "open_reference_image": "tests/images/Sample2_open_interior.jpg",
+    "closed_reference_image": "tests/images/Sample2_closed_exterior.jpg",
+    "mod_panel": "tests/panels/mod_long.png",
+    "prompt": "replace the elevator button panel with the mod panel"
+  },
+  {
+    "input_image": "tests/images/Sample5.jpg",
+    "open_reference_image": "tests/images/Sample2_open_interior.jpg",
+    "closed_reference_image": "tests/images/Sample2_closed_exterior.jpg",
+    "mod_panel": "tests/panels/mod_panel.png",
+    "prompt": "replace the elevator button panel with the mod panel"
+  },
+  {
+    "input_image": "tests/images/Sample7.jpg",
+    "open_reference_image": "tests/images/Sample2_open_interior.jpg",
+    "closed_reference_image": "tests/images/Sample2_closed_exterior.jpg",
+    "mod_panel": "tests/panels/mod_panel.png",
+    "prompt": "replace the elevator button panel with the mod panel"
+  },
+  {
+    "input_image": "tests/images/Sample6.jpg",
+    "open_reference_image": "tests/images/Sample2_open_interior.jpg",
+    "closed_reference_image": "tests/images/Sample2_closed_exterior.jpg",
+    "mod_panel": "tests/panels/mod_long.png",
+    "prompt": "replace the elevator button panel with the mod panel"
+  }
+  
+]

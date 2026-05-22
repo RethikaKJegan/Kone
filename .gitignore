@@ -1,0 +1,60 @@
+# Python cache/build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Local environments
+venv/
+.venv/
+env/
+.env
+.env.*
+
+# Local caches
+.cache/
+*.cache
+
+# Model weights, checkpoints, and downloaded model bundles
+weights/
+bert-base-uncased/
+big-lama/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.bin
+*.zip
+
+# External cloned dependencies; clone/install these separately
+GroundingDINO/
+lama/
+sam2_src/
+segment-anything/
+
+# Generated outputs and media
+runs/
+outputs/
+tests/outputs/
+Video/
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Nested cloned repositories should not be embedded as git metadata
+**/.git/
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

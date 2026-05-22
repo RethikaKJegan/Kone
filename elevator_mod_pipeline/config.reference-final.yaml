@@ -1,0 +1,71 @@
+input_image: assets/sample_elevator.jpg
+mod_panel: assets/mod_panel.png
+run_dir: runs/reference_final
+
+detection:
+  enabled: false
+  existing_json: assets/elevator_detections.reference.json
+  labels: []
+  model_id: google/owlv2-base-patch16-ensemble
+  score_threshold: 0.15
+  nms_iou: 0.50
+
+segmentation:
+  enabled: false
+  sam2_repo: third_party/sam2
+  sam2_config: configs/sam2.1/sam2.1_hiera_l.yaml
+  sam2_weights: weights/sam2.1_hiera_large.pt
+  fallback_to_boxes: true
+
+geometry:
+  enabled: false
+  depth_model_id: depth-anything/Depth-Anything-V2-Base-hf
+  known_door_width_mm: 900
+  min_plane_inlier_ratio: 0.60
+  max_plane_residual: 0.05
+
+removal:
+  target_keywords:
+    - emergency phone
+  mask_padding_px: 1
+  mask_dilate_iterations: 1
+  cleanup_engine: wall_patch
+  wall_sample_margin_px: 55
+  cleanup_feather_px: 1
+
+inpainting:
+  # Use the verified LaMa-cleaned background provided by the user.
+  # Remove this line to run LaMa/wall_patch cleanup from the original image.
+  cleaned_background: assets/cleaned_reference.jpeg
+  engine: lama
+  lama_repo: third_party/lama
+  lama_model_dir: third_party/lama/big-lama
+  device: auto
+  fallback_to_opencv: true
+
+insertion:
+  placement: manual_box
+  target_keywords:
+    - emergency phone
+  # This controls placement center only when size_mode=fixed_height.
+  manual_box_xyxy: [88, 378, 154, 498]
+  fallback_box_ratio_xyxy: [0.145, 0.39, 0.255, 0.61]
+  size_mode: fixed_height
+  fixed_height_px: 112
+  allow_upscale: false
+  target_height_multiplier: 1.0
+  scale_multiplier: 1.0
+  top_shrink: 0.006
+  side_skew: 0.004
+  shadow_strength: 0.08
+  texture_strength: 0.015
+  max_shadow_radius_px: 10
+
+refinement:
+  enabled: false
+  model_id: runwayml/stable-diffusion-inpainting
+  strength: 0.18
+  guidance_scale: 6.0
+  steps: 24
+  prompt: ultra realistic commercial elevator wall panel, natural indoor lighting, subtle shadows, photorealistic
+  negative_prompt: blurry, distorted, low quality, cartoon, cgi, warped geometry
