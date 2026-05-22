@@ -4,6 +4,7 @@ import os
 import sys
 import argparse
 import importlib.util
+import json
 from pathlib import Path
 from typing import Any
 
@@ -53,8 +54,180 @@ def build_removal_mask(image: np.ndarray, detections: dict[str, Any], cfg: dict[
         padded[y1:y2, x1:x2] = 255
         mask = np.maximum(mask, np.maximum(det_mask, padded))
 
+    if cfg.get("removal", {}).get("merge_nearby_control_modules", True):
+        mask, merge_debug = merge_nearby_component_modules(image, detections, cfg, mask)
+        write_component_merge_debug(cfg, merge_debug)
+
     mask = dilate_mask(mask, int(cfg["removal"]["mask_dilate_iterations"]))
     return _preserve_saturated_background(image, mask)
+
+
+def merge_nearby_component_modules(
+    image: np.ndarray,
+    detections: dict[str, Any],
+    cfg: dict[str, Any],
+    mask: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    height, width = image.shape[:2]
+    gap = int(cfg["removal"].get("control_module_merge_gap_px", 45))
+    x_tol = int(cfg["removal"].get("control_module_horizontal_tolerance_px", 40))
+    keywords = [k.lower() for k in cfg["removal"].get("target_keywords", [])]
+    dets = detections.get("detections", [])
+    debug: dict[str, Any] = {
+        "merged_button_panel_modules": [],
+        "merged_emergency_phone_modules": [],
+        "floor_indicator_candidates": floor_indicator_candidates(dets, height),
+    }
+
+    out = mask.copy()
+    target_boxes = [
+        det_box(det)
+        for det in dets
+        if any(k in str(det.get("phrase", "")).lower() for k in ("elevator button panel", "elevator panel", "call button"))
+    ]
+    emergency_boxes = [det_box(det) for det in dets if "emergency phone" in str(det.get("phrase", "")).lower() or "emergency button" in str(det.get("phrase", "")).lower()]
+
+    if any(k in {"elevator panel", "elevator button panel", "call button"} for k in keywords):
+        for box in target_boxes:
+            for module_box, reason in candidate_control_modules(image, dets, box, gap, x_tol, width, height):
+                add_box_to_mask(out, module_box, pad=max(2, int(cfg["removal"].get("box_mask_padding_px", 2))))
+                debug["merged_button_panel_modules"].append({"box": module_box, "reason": reason, "target_box": box})
+
+    if any("emergency" in k for k in keywords):
+        for box in emergency_boxes:
+            for module_box, reason in candidate_attached_modules(dets, box, gap, x_tol, width, height):
+                add_box_to_mask(out, module_box, pad=max(1, int(cfg["removal"].get("box_mask_padding_px", 2))))
+                debug["merged_emergency_phone_modules"].append({"box": module_box, "reason": reason, "target_box": box})
+
+    return out, debug
+
+
+def write_component_merge_debug(cfg: dict[str, Any], debug: dict[str, Any]) -> None:
+    run_dir = cfg.get("run_dir")
+    if not run_dir:
+        return
+    path = Path(run_dir) / "component_merge_debug.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
+
+
+def floor_indicator_candidates(detections: list[dict[str, Any]], height: int) -> list[dict[str, Any]]:
+    labels = (
+        "floor indicator display",
+        "floor indicator",
+        "elevator floor indicator",
+        "indicator display",
+        "digital floor display",
+        "elevator display",
+        "display panel above elevator",
+    )
+    out = []
+    for det in detections:
+        phrase = str(det.get("phrase", "")).lower()
+        if not any(label in phrase for label in labels):
+            continue
+        x1, y1, x2, y2 = det_box(det)
+        out.append(
+            {
+                "box": [x1, y1, x2, y2],
+                "phrase": phrase,
+                "score": float(det.get("score", 0.0)),
+                "preferred_top_band": (y1 + y2) * 0.5 < height * 0.35,
+            }
+        )
+    return out
+
+
+def candidate_control_modules(
+    image: np.ndarray,
+    detections: list[dict[str, Any]],
+    target_box: list[int],
+    gap: int,
+    x_tol: int,
+    width: int,
+    height: int,
+) -> list[tuple[list[int], str]]:
+    tx1, ty1, tx2, ty2 = target_box
+    tcx = (tx1 + tx2) * 0.5
+    modules: list[tuple[list[int], str]] = []
+    for det in detections:
+        phrase = str(det.get("phrase", "")).lower()
+        if not any(term in phrase for term in ("call button", "button", "card reader", "elevator panel", "control module")):
+            continue
+        box = det_box(det)
+        if box == target_box:
+            continue
+        x1, y1, x2, y2 = box
+        cx = (x1 + x2) * 0.5
+        if abs(cx - tcx) <= x_tol and 0 <= ty1 - y2 <= gap:
+            modules.append((box, "detected small control module above button panel"))
+
+    for box in red_black_modules_above(image, target_box, gap, x_tol):
+        modules.append((box, "red/black visual control module above button panel"))
+    return [([max(0, x1), max(0, y1), min(width, x2), min(height, y2)], reason) for [x1, y1, x2, y2], reason in modules]
+
+
+def candidate_attached_modules(
+    detections: list[dict[str, Any]],
+    target_box: list[int],
+    gap: int,
+    x_tol: int,
+    width: int,
+    height: int,
+) -> list[tuple[list[int], str]]:
+    tx1, ty1, tx2, ty2 = target_box
+    tcx = (tx1 + tx2) * 0.5
+    out: list[tuple[list[int], str]] = []
+    for det in detections:
+        phrase = str(det.get("phrase", "")).lower()
+        if "emergency phone" in phrase or "emergency button" in phrase:
+            continue
+        if not any(term in phrase for term in ("button", "panel", "display", "speaker", "card reader", "safety sign")):
+            continue
+        x1, y1, x2, y2 = det_box(det)
+        cx = (x1 + x2) * 0.5
+        vertical_gap = min(abs(ty1 - y2), abs(y1 - ty2))
+        if abs(cx - tcx) <= x_tol and vertical_gap <= gap:
+            out.append(([max(0, x1), max(0, y1), min(width, x2), min(height, y2)], "vertically attached emergency module"))
+    return out
+
+
+def red_black_modules_above(image: np.ndarray, target_box: list[int], gap: int, x_tol: int) -> list[list[int]]:
+    tx1, ty1, tx2, _ = target_box
+    height, width = image.shape[:2]
+    x1 = max(0, min(tx1, tx2) - x_tol)
+    x2 = min(width, max(tx1, tx2) + x_tol)
+    y1 = max(0, ty1 - gap)
+    y2 = max(0, ty1)
+    if x2 <= x1 or y2 <= y1:
+        return []
+    crop = image[y1:y2, x1:x2]
+    hsv = cv2.cvtColor(crop, cv2.COLOR_RGB2HSV)
+    red = ((hsv[:, :, 0] < 10) | (hsv[:, :, 0] > 170)) & (hsv[:, :, 1] > 70) & (hsv[:, :, 2] > 35)
+    black = hsv[:, :, 2] < 55
+    candidate = (red | black).astype(np.uint8) * 255
+    candidate = cv2.morphologyEx(candidate, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    contours, _ = cv2.findContours(candidate, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    boxes: list[list[int]] = []
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if w * h < 18 or w > (x2 - x1) * 0.75 or h > (y2 - y1) * 0.85:
+            continue
+        boxes.append([x1 + x, y1 + y, x1 + x + w, y1 + y + h])
+    return boxes
+
+
+def det_box(det: dict[str, Any]) -> list[int]:
+    return [int(round(v)) for v in det.get("box_xyxy", [0, 0, 0, 0])]
+
+
+def add_box_to_mask(mask: np.ndarray, box: list[int], pad: int = 0) -> None:
+    h, w = mask.shape[:2]
+    x1, y1, x2, y2 = box
+    x1, y1 = max(0, x1 - pad), max(0, y1 - pad)
+    x2, y2 = min(w, x2 + pad), min(h, y2 + pad)
+    if x2 > x1 and y2 > y1:
+        mask[y1:y2, x1:x2] = 255
 
 def inpaint_background(image_path: str | Path, mask: np.ndarray, cfg: dict[str, Any], out_path: str | Path) -> np.ndarray:
     image = load_image_rgb(image_path)

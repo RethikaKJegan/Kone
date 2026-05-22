@@ -42,17 +42,53 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
     if ins.get("manual_box_xyxy"):
         return [int(v) for v in ins["manual_box_xyxy"]]
     if ins["placement"] == "detection":
-        det = (
-            _select_long_panel_detection(detections["detections"], ins["target_keywords"], mod_hw)
-            or select_middle_floor_indicator_display(detections["detections"], ins["target_keywords"], height)
-            or select_detection(detections["detections"], ins["target_keywords"])
-        )
+        det = select_valid_component_detection(detections["detections"], ins["target_keywords"], height, width, mod_hw)
         if det:
             detection_box = [int(round(v)) for v in det["box_xyxy"]]
             erased_box = _select_erased_long_panel_box(removal_mask, detection_box, cfg, mod_hw)
             return erased_box or detection_box
     rx1, ry1, rx2, ry2 = ins["fallback_box_ratio_xyxy"]
     return [int(width * rx1), int(height * ry1), int(width * rx2), int(height * ry2)]
+
+
+def select_valid_component_detection(
+    detections: list[dict[str, Any]],
+    keywords: list[str],
+    height: int,
+    width: int,
+    mod_hw: tuple[int, int] | None,
+) -> dict[str, Any] | None:
+    ordered = [
+        _select_long_panel_detection(detections, keywords, mod_hw),
+        select_middle_floor_indicator_display(detections, keywords, height),
+        select_detection(detections, keywords),
+    ]
+    candidates = [det for det in ordered if det is not None]
+    if not candidates:
+        return None
+    valid = [det for det in candidates if _valid_component_detection(det, keywords, width, height)]
+    return max(valid or candidates, key=lambda det: float(det.get("score", 0.0)))
+
+
+def _valid_component_detection(det: dict[str, Any], keywords: list[str], width: int, height: int) -> bool:
+    phrase = str(det.get("phrase", "")).lower()
+    x1, y1, x2, y2 = [float(v) for v in det.get("box_xyxy", [0, 0, 0, 0])]
+    bw, bh = max(1.0, x2 - x1), max(1.0, y2 - y1)
+    area_ratio = (bw * bh) / max(width * height, 1)
+    cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+    target_text = " ".join(k.lower() for k in keywords)
+
+    if "floor indicator" in target_text or "display" in target_text:
+        return cy < height * 0.42 and area_ratio < 0.08 and bw > 6 and bh > 4
+    if "button panel" in target_text or "elevator panel" in target_text or "call button" in target_text:
+        if "mod panel" in phrase or "panel" == phrase:
+            return False
+        aspect = bh / bw
+        near_side_wall = cx < width * 0.42 or cx > width * 0.58
+        return 0.00004 <= area_ratio <= 0.16 and 0.45 <= aspect <= 8.5 and near_side_wall
+    if "emergency" in target_text:
+        return area_ratio <= 0.18 and bh / bw <= 5.5
+    return area_ratio <= 0.25
 
 
 def _select_long_panel_detection(detections: list[dict[str, Any]], keywords: list[str], mod_hw: tuple[int, int] | None) -> dict[str, Any] | None:

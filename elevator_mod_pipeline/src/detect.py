@@ -58,6 +58,11 @@ def run_detection(image_path: str | Path, cfg: dict[str, Any], out_json: str | P
         min_area_ratio=float(cfg["detection"].get("min_box_area_ratio", 0.00005)),
     )
     detections = [_detection_to_dict(det, idx, labels) for idx, det in enumerate(chosen)]
+    if bool(cfg["detection"].get("enable_geometry_validation", True)):
+        detections = _apply_cross_label_nms(
+            detections,
+            iou_threshold=float(cfg["detection"].get("cross_label_nms_iou", 0.35)),
+        )
     _ensure_elevator_door_detection(image_np, detections)
 
     output = {
@@ -186,6 +191,47 @@ def _canonical_phrase(phrase: str, labels: list[str]) -> str:
         return lower
     matches = [label.lower() for label in labels if label.lower() in lower or lower in label.lower()]
     return max(matches, key=len) if matches else lower or "elevator component"
+
+
+def _apply_cross_label_nms(detections: list[dict[str, Any]], iou_threshold: float) -> list[dict[str, Any]]:
+    if not detections:
+        return detections
+    kept: list[dict[str, Any]] = []
+    for det in sorted(detections, key=lambda item: float(item.get("score", 0.0)), reverse=True):
+        phrase = str(det.get("phrase", "")).lower()
+        suppress = False
+        for existing in kept:
+            existing_phrase = str(existing.get("phrase", "")).lower()
+            if _component_group(phrase) != _component_group(existing_phrase):
+                continue
+            if _box_iou(det["box_xyxy"], existing["box_xyxy"]) >= iou_threshold:
+                suppress = True
+                break
+        if not suppress:
+            det["id"] = len(kept)
+            kept.append(det)
+    return kept
+
+
+def _component_group(phrase: str) -> str:
+    if any(term in phrase for term in ("floor indicator", "display")):
+        return "floor_indicator"
+    if any(term in phrase for term in ("button", "control", "card reader", "elevator panel")):
+        return "control_panel"
+    if any(term in phrase for term in ("door", "frame", "opening", "interior")):
+        return "elevator_opening"
+    if "emergency" in phrase:
+        return "emergency"
+    return phrase
+
+
+def _box_iou(a: list[float], b: list[float]) -> float:
+    ax1, ay1, ax2, ay2 = [float(v) for v in a]
+    bx1, by1, bx2, by2 = [float(v) for v in b]
+    inter = max(0.0, min(ax2, bx2) - max(ax1, bx1)) * max(0.0, min(ay2, by2) - max(ay1, by1))
+    area_a = max(1.0, (ax2 - ax1) * (ay2 - ay1))
+    area_b = max(1.0, (bx2 - bx1) * (by2 - by1))
+    return inter / max(1.0, area_a + area_b - inter)
 
 
 def _ensure_elevator_door_detection(image_rgb: np.ndarray, detections: list[dict[str, Any]]) -> None:

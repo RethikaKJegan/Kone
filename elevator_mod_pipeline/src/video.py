@@ -30,11 +30,14 @@ def render_elevator_video(
     bitrate = str(video_cfg.get("bitrate", "10000k"))
     no_audio = bool(video_cfg.get("no_audio", False))
     cycle = bool(video_cfg.get("cycle", True))
+    refine_roi = bool(video_cfg.get("refine_elevator_roi", True))
+    preserve_outside_roi = bool(video_cfg.get("preserve_static_wall_outside_roi", refine_roi))
 
     img = load_image_bgr(image_path)
     depth = load_depth(depth_path, img.shape[:2]) if depth_path else None
     best_detection = select_best_elevator_detection(detections)
-    box = detect_door_box(img, detections, geometry)
+    roi_debug: dict[str, Any] = {}
+    box = detect_door_box(img, detections, geometry, depth, cfg, roi_debug)
     state, state_debug = classify_elevator_state(detections, depth, box, img)
     first_action = action if action in {"open", "close"} else ("close" if state == "open" else "open")
     actions = [(first_action, ACTION_SECONDS[first_action])]
@@ -51,6 +54,17 @@ def render_elevator_video(
             "used_closed_reference_image": source_policy["closed_reference_image_used"] == "true",
         }
     )
+    roi_debug.update(
+        {
+            "selected_elevator_roi": box,
+            "depth_state": state,
+            "depth_dark_ratio": state_debug.get("depth_dark_ratio"),
+            "depth_contrast": state_debug.get("depth_contrast"),
+            "used_open_reference_image": state_debug["used_open_reference_image"],
+            "used_closed_reference_image": state_debug["used_closed_reference_image"],
+        }
+    )
+    write_elevator_roi_debug(out_path, img, depth, roi_debug)
     panels = build_panel_texture(closed_state_img, box, "closed", depth)
     reveal_scene = build_reveal_scene(img, open_state_img, box, "open", first_action, depth)
     mid_hold_frames = max(4, int(fps * MID_HOLD_SECONDS))
@@ -64,14 +78,40 @@ def render_elevator_video(
         for i in range(action_frames):
             t = i / max(action_frames - 1, 1)
             progress = motor_profile(t, segment_action)
-            frames.append(render_frame(img, box, panels, reveal_scene, progress, segment_action, frame_index, previous, depth))
+            frames.append(
+                render_frame(
+                    img,
+                    box,
+                    panels,
+                    reveal_scene,
+                    progress,
+                    segment_action,
+                    frame_index,
+                    previous,
+                    depth,
+                    preserve_outside_roi,
+                )
+            )
             previous = progress
             frame_index += 1
 
         hold_progress = 1.0
         hold_count = mid_hold_frames if segment_index == 0 else end_hold_frames
         for _ in range(hold_count):
-            frames.append(render_frame(img, box, panels, reveal_scene, hold_progress, segment_action, frame_index, previous, depth))
+            frames.append(
+                render_frame(
+                    img,
+                    box,
+                    panels,
+                    reveal_scene,
+                    hold_progress,
+                    segment_action,
+                    frame_index,
+                    previous,
+                    depth,
+                    preserve_outside_roi,
+                )
+            )
             previous = hold_progress
             frame_index += 1
 
@@ -213,6 +253,38 @@ def write_state_debug(meta_path: Path, state_debug: dict[str, Any]) -> None:
     meta_path.write_text(json.dumps(state_debug, indent=2), encoding="utf-8")
 
 
+def write_elevator_roi_debug(out_path: str | Path, image_bgr: np.ndarray, depth: np.ndarray | None, debug: dict[str, Any]) -> None:
+    out = Path(out_path)
+    out_dir = out.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "elevator_roi_debug.json").write_text(json.dumps(debug, indent=2), encoding="utf-8")
+
+    selected = debug.get("selected_elevator_roi")
+    if selected:
+        overlay = image_bgr.copy()
+        x1, y1, x2, y2 = [int(v) for v in selected]
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 3)
+        cv2.imwrite(str(out_dir / "selected_elevator_roi.png"), overlay)
+        cv2.imwrite(str(out_dir / "refined_animation_roi.png"), overlay)
+
+    rejected_overlay = image_bgr.copy()
+    for cand in debug.get("rejected_candidates", []):
+        box = cand.get("box")
+        if not box:
+            continue
+        x1, y1, x2, y2 = [int(v) for v in box]
+        cv2.rectangle(rejected_overlay, (x1, y1), (x2, y2), (0, 0, 255), 2)
+    cv2.imwrite(str(out_dir / "rejected_elevator_candidates.png"), rejected_overlay)
+
+    if depth is not None:
+        depth_vis = normalize_depth_roi(depth)
+        depth_vis = cv2.applyColorMap(np.clip(depth_vis, 0, 255).astype(np.uint8), cv2.COLORMAP_INFERNO)
+        if selected:
+            x1, y1, x2, y2 = [int(v) for v in selected]
+            cv2.rectangle(depth_vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.imwrite(str(out_dir / "depth_state_debug.png"), depth_vis)
+
+
 def load_image_bgr(path: str | Path) -> np.ndarray:
     img = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if img is None:
@@ -350,19 +422,244 @@ def scaled_box(box: list[float], src_w: int, src_h: int, dst_w: int, dst_h: int)
     ]
 
 
-def detect_door_box(img: np.ndarray, detections: dict[str, Any], geometry: dict[str, Any]) -> list[int]:
+def detect_door_box(
+    img: np.ndarray,
+    detections: dict[str, Any],
+    geometry: dict[str, Any],
+    depth_map: np.ndarray | None = None,
+    cfg: dict[str, Any] | None = None,
+    debug: dict[str, Any] | None = None,
+) -> list[int]:
+    selected, roi_debug = select_best_elevator_roi(img, detections, depth_map, geometry, cfg)
+    if debug is not None:
+        debug.update(roi_debug)
+    if selected is not None:
+        return selected
+
     h, w = img.shape[:2]
+    inferred = infer_elevator_box_from_image(img, detections, geometry)
+    return clamp_box(inferred or fallback_door_box(img), w, h)
+
+
+def select_best_elevator_roi(
+    image: np.ndarray,
+    detections: dict[str, Any],
+    depth_map: np.ndarray | None = None,
+    geometry: dict[str, Any] | None = None,
+    cfg: dict[str, Any] | None = None,
+) -> tuple[list[int] | None, dict[str, Any]]:
+    h, w = image.shape[:2]
+    geometry = geometry or {}
     meta = detections.get("metadata", {})
     src_w = int(meta.get("image_width", geometry.get("metadata", {}).get("image_width", w)))
     src_h = int(meta.get("image_height", geometry.get("metadata", {}).get("image_height", h)))
+    center_hint = _door_center_hint(w, detections, geometry)
+    labels = (
+        "elevator door",
+        "elevator doors",
+        "door frame",
+        "elevator frame",
+        "elevator opening",
+        "elevator interior",
+        "lift entrance",
+        "elevator wall",
+    )
+    raw_candidates: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    scored: list[tuple[float, list[int], dict[str, Any], str]] = []
 
-    best_det = select_best_elevator_detection(detections)
-    if best_det is not None:
-        box = clamp_box(scaled_box(best_det["box_xyxy"], src_w, src_h, w, h), w, h)
-        return correct_open_elevator_box_top(box, detections, geometry, w, h)
+    for det in detections.get("detections", []):
+        phrase = str(det.get("phrase", "")).lower()
+        if not any(label in phrase for label in labels):
+            continue
+        box = clamp_box(scaled_box(det["box_xyxy"], src_w, src_h, w, h), w, h)
+        candidate = {
+            "box": box,
+            "phrase": phrase,
+            "score": float(det.get("score", 0.0)),
+        }
+        raw_candidates.append(candidate)
+        valid, reason = validate_elevator_candidate(box, phrase, w, h, center_hint)
+        edge_score, refined = edge_alignment_score_and_refined_roi(image, box, cfg)
+        candidate["edge_score"] = edge_score
+        candidate["refined_box"] = refined
+        if not valid:
+            candidate["reason"] = reason
+            rejected.append(candidate)
+            continue
+        depth_score = depth_roi_score(depth_map, refined) if depth_map is not None else 0.0
+        interior_score = interior_overlap_score(refined, detections, src_w, src_h, w, h)
+        x1, y1, x2, y2 = refined
+        bw, bh = x2 - x1, y2 - y1
+        aspect_score = min(1.0, max(0.0, (bh / max(bw, 1) - 1.15) / 2.2))
+        center_score = 1.0 - min(1.0, abs(((x1 + x2) * 0.5) - center_hint) / max(w * 0.35, 1.0))
+        area_ratio = (bw * bh) / max(w * h, 1)
+        area_score = 1.0 - min(1.0, abs(area_ratio - 0.34) / 0.34)
+        score = (
+            float(det.get("score", 0.0)) * 1.4
+            + edge_score * 1.25
+            + center_score * 0.75
+            + aspect_score * 0.55
+            + area_score * 0.35
+            + depth_score * 0.40
+            + interior_score * 0.50
+        )
+        scored.append((score, refined, candidate, "geometry_validated_detection"))
 
-    inferred = infer_elevator_box_from_image(img, detections, geometry)
-    return clamp_box(inferred or fallback_door_box(img), w, h)
+    inferred = infer_elevator_box_from_image(image, detections, geometry)
+    if inferred is not None:
+        inferred = clamp_box(inferred, w, h)
+        edge_score, refined = edge_alignment_score_and_refined_roi(image, inferred, cfg)
+        score = 1.10 + edge_score * 1.35 + depth_roi_score(depth_map, refined) * 0.30
+        scored.append(
+            (
+                score,
+                refined,
+                {
+                    "box": inferred,
+                    "phrase": "image_structure_fallback",
+                    "score": score,
+                    "edge_score": edge_score,
+                    "refined_box": refined,
+                },
+                "image_edges_fallback",
+            )
+        )
+
+    if not scored:
+        return None, {"raw_candidates": raw_candidates, "rejected_candidates": rejected}
+
+    selected_score, selected_box, selected_candidate, selected_reason = max(scored, key=lambda item: item[0])
+    return selected_box, {
+        "raw_candidates": raw_candidates,
+        "rejected_candidates": rejected,
+        "selected_elevator_roi": selected_box,
+        "selected_score": float(selected_score),
+        "selected_reason": selected_reason,
+        "selected_candidate": selected_candidate,
+    }
+
+
+def validate_elevator_candidate(box: list[int], phrase: str, width: int, height: int, center_hint: float) -> tuple[bool, str]:
+    x1, y1, x2, y2 = box
+    bw, bh = x2 - x1, y2 - y1
+    area_ratio = (bw * bh) / max(width * height, 1)
+    if bw < width * 0.14 or bh < height * 0.32:
+        return False, "too small for elevator opening"
+    if bw > width * 0.72:
+        return False, "too wide compared to visible opening"
+    if area_ratio > 0.68:
+        return False, "too much wall / oversized area"
+    if y1 < height * 0.02 and "ceiling" not in phrase:
+        return False, "starts too high above elevator opening"
+    if y2 > height * 0.98:
+        return False, "extends too far below threshold"
+    if abs(((x1 + x2) * 0.5) - center_hint) > width * 0.36:
+        return False, "too far left/right from expected opening"
+    if bh / max(bw, 1) < 1.05:
+        return False, "not a vertical/tall elevator ROI"
+    return True, "valid"
+
+
+def edge_alignment_score_and_refined_roi(
+    image: np.ndarray,
+    box: list[int],
+    cfg: dict[str, Any] | None = None,
+) -> tuple[float, list[int]]:
+    h, w = image.shape[:2]
+    x1, y1, x2, y2 = clamp_box(box, w, h)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    sx = np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3))
+    sy = np.abs(cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3))
+    bw, bh = x2 - x1, y2 - y1
+    search_pad_x = max(8, int(bw * 0.16))
+    search_pad_y = max(8, int(bh * 0.10))
+    y_a, y_b = max(0, y1 + int(bh * 0.08)), min(h, y2 - int(bh * 0.05))
+    left_range = (max(0, x1 - search_pad_x), min(w, x1 + search_pad_x))
+    right_range = (max(0, x2 - search_pad_x), min(w, x2 + search_pad_x))
+    left_x = _best_projection_index(sx[y_a:y_b].mean(axis=0), left_range[0], left_range[1], x1)
+    right_x = _best_projection_index(sx[y_a:y_b].mean(axis=0), right_range[0], right_range[1], x2)
+    if right_x - left_x < max(12, int(w * 0.08)):
+        left_x, right_x = x1, x2
+
+    x_a, x_b = max(0, left_x + int((right_x - left_x) * 0.08)), min(w, right_x - int((right_x - left_x) * 0.08))
+    top_y = _best_projection_index(sy[:, x_a:x_b].mean(axis=1), max(0, y1 - search_pad_y), min(h, y1 + search_pad_y * 2), y1)
+    bottom_y = _best_projection_index(sy[:, x_a:x_b].mean(axis=1), max(0, y2 - search_pad_y * 2), min(h, y2 + search_pad_y), y2)
+    refined = clamp_box([left_x, top_y, right_x, bottom_y], w, h)
+    if cfg:
+        max_wall_fraction = float(cfg.get("video", {}).get("max_wall_fraction_in_roi", 0.15))
+        refined = shrink_oversized_roi(gray, refined, max_wall_fraction)
+
+    rx1, ry1, rx2, ry2 = refined
+    v_edge = float(sx[max(0, ry1):min(h, ry2), [max(0, rx1), min(w - 1, rx2 - 1)]].mean()) if ry2 > ry1 else 0.0
+    h_edge = float(sy[[max(0, ry1), min(h - 1, ry2 - 1)], max(0, rx1):min(w, rx2)].mean()) if rx2 > rx1 else 0.0
+    global_edge = float(np.mean(sx) + np.mean(sy) + 1e-6)
+    return float(np.clip((v_edge + h_edge) / global_edge / 7.5, 0.0, 1.0)), refined
+
+
+def _best_projection_index(projection: np.ndarray, start: int, end: int, default: int) -> int:
+    start = max(0, min(len(projection) - 1, int(start)))
+    end = max(start + 1, min(len(projection), int(end)))
+    local = projection[start:end]
+    if local.size == 0 or float(local.max()) <= 0:
+        return int(default)
+    return int(start + np.argmax(local))
+
+
+def shrink_oversized_roi(gray: np.ndarray, box: list[int], max_wall_fraction: float) -> list[int]:
+    del max_wall_fraction
+    h, w = gray.shape[:2]
+    x1, y1, x2, y2 = box
+    bw = x2 - x1
+    if bw <= 12:
+        return box
+    crop = gray[y1:y2, x1:x2]
+    if crop.size == 0:
+        return box
+    sx = np.abs(cv2.Sobel(crop, cv2.CV_32F, 1, 0, ksize=3)).mean(axis=0)
+    if sx.size < 10:
+        return box
+    threshold = max(float(np.percentile(sx, 78)), float(sx.mean() + sx.std() * 0.25))
+    strong = np.where(sx >= threshold)[0]
+    if len(strong) >= 2:
+        left = int(strong[0])
+        right = int(strong[-1])
+        if right - left >= bw * 0.55:
+            x1 = max(0, x1 + left)
+            x2 = min(w, x1 + (right - left))
+    return clamp_box([x1, y1, x2, y2], w, h)
+
+
+def depth_roi_score(depth_map: np.ndarray | None, box: list[int]) -> float:
+    if depth_map is None:
+        return 0.0
+    state, dbg = classify_elevator_state_from_depth(depth_map, box)
+    if state == "open":
+        return 1.0
+    contrast = abs(float(dbg.get("depth_contrast") or 0.0))
+    return float(np.clip(contrast / 42.0, 0.0, 0.7))
+
+
+def interior_overlap_score(box: list[int], detections: dict[str, Any], src_w: int, src_h: int, width: int, height: int) -> float:
+    interior_terms = ("elevator ceiling", "elevator wall", "elevator floor", "handrail", "mirror", "ventilation grille", "light fixture")
+    best = 0.0
+    for det in detections.get("detections", []):
+        phrase = str(det.get("phrase", "")).lower()
+        if not any(term in phrase for term in interior_terms):
+            continue
+        det_box = scaled_box(det["box_xyxy"], src_w, src_h, width, height)
+        best = max(best, box_iou(box, det_box))
+    return float(np.clip(best * 2.0, 0.0, 1.0))
+
+
+def box_iou(a: list[int], b: list[int]) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    inter = max(0, min(ax2, bx2) - max(ax1, bx1)) * max(0, min(ay2, by2) - max(ay1, by1))
+    area_a = max(1, (ax2 - ax1) * (ay2 - ay1))
+    area_b = max(1, (bx2 - bx1) * (by2 - by1))
+    return inter / max(1, area_a + area_b - inter)
 
 
 def correct_open_elevator_box_top(box: list[int], detections: dict[str, Any], geometry: dict[str, Any], width: int, height: int) -> list[int]:
@@ -423,14 +720,6 @@ def classify_elevator_state(
         "depth_contrast": None,
     }
 
-    if depth_map is not None:
-        depth_state, depth_debug = classify_elevator_state_from_depth(depth_map, scaled_door_box)
-        debug.update(depth_debug)
-        if depth_state in {"open", "closed"}:
-            debug["elevator_state"] = depth_state
-            debug["state_source"] = "depth"
-            return depth_state, debug
-
     detections = elevator_json.get("detections", [])
     interior_labels = {
         "elevator ceiling",
@@ -443,16 +732,68 @@ def classify_elevator_state(
         "speaker",
         "security camera",
     }
-    has_interior_detection = any(str(det.get("phrase", "")).strip().lower() in interior_labels for det in detections)
+    has_interior_detection = any(
+        _is_reliable_interior_detection(det, elevator_json, scaled_door_box, img.shape[:2], interior_labels)
+        for det in detections
+    )
+
+    image_state = classify_state(img, scaled_door_box)
+    if depth_map is not None:
+        depth_state, depth_debug = classify_elevator_state_from_depth(depth_map, scaled_door_box)
+        debug.update(depth_debug)
+        if depth_state == "open":
+            debug["elevator_state"] = depth_state
+            debug["state_source"] = "depth"
+            return depth_state, debug
+        if depth_state == "closed" and not (
+            has_interior_detection and image_state == "open" and abs(float(depth_debug.get("depth_contrast") or 0.0)) < 6.0
+        ):
+            debug["elevator_state"] = depth_state
+            debug["state_source"] = "depth"
+            return depth_state, debug
+
     if has_interior_detection:
         debug["elevator_state"] = "open"
         debug["state_source"] = "interior_detection_fallback"
         return "open", debug
 
-    image_state = classify_state(img, scaled_door_box)
     debug["elevator_state"] = image_state
     debug["state_source"] = "image_fallback" if best_det is not None else "image_fallback_no_detection"
     return image_state, debug
+
+
+def _scaled_detection_box(det: dict[str, Any], detections: dict[str, Any], fallback_box: list[int], hw: tuple[int, int]) -> list[int]:
+    if "box_xyxy" not in det:
+        return fallback_box
+    h, w = hw
+    meta = detections.get("metadata", {})
+    src_w = int(meta.get("image_width", w))
+    src_h = int(meta.get("image_height", h))
+    return scaled_box(det["box_xyxy"], src_w, src_h, w, h)
+
+
+def _is_reliable_interior_detection(
+    det: dict[str, Any],
+    detections: dict[str, Any],
+    roi: list[int],
+    hw: tuple[int, int],
+    interior_labels: set[str],
+) -> bool:
+    phrase = str(det.get("phrase", "")).strip().lower()
+    if phrase not in interior_labels:
+        return False
+    box = _scaled_detection_box(det, detections, roi, hw)
+    if box_iou(box, roi) <= 0.05:
+        return False
+    rx1, ry1, rx2, ry2 = roi
+    bx1, by1, bx2, by2 = box
+    roi_area = max(1, (rx2 - rx1) * (ry2 - ry1))
+    box_area = max(1, (bx2 - bx1) * (by2 - by1))
+    if "elevator wall" in phrase and box_area > roi_area * 0.65:
+        return False
+    cx = (bx1 + bx2) * 0.5
+    cy = (by1 + by2) * 0.5
+    return rx1 <= cx <= rx2 and ry1 <= cy <= ry2
 
 
 def classify_elevator_state_from_depth(
@@ -516,9 +857,16 @@ def classify_elevator_state_from_depth(
         }
     )
 
-    if dark_ratio >= dark_ratio_threshold and contrast >= contrast_threshold:
+    reverse_dark_ratio = float(np.mean(center >= float(np.percentile(roi, 75))))
+    abs_contrast = abs(contrast)
+    debug["depth_reverse_dark_ratio"] = reverse_dark_ratio
+    debug["depth_abs_contrast"] = abs_contrast
+
+    if (dark_ratio >= dark_ratio_threshold and contrast >= contrast_threshold) or (
+        reverse_dark_ratio >= dark_ratio_threshold and contrast <= -contrast_threshold
+    ):
         return "open", debug
-    if dark_ratio < dark_ratio_threshold * 0.65 and contrast < contrast_threshold * 0.45:
+    if dark_ratio < dark_ratio_threshold * 0.90 and reverse_dark_ratio < dark_ratio_threshold * 0.90:
         return "closed", debug
     return "unknown", debug
 
@@ -839,6 +1187,7 @@ def render_frame(
     frame_index: int,
     previous_progress: float,
     depth: np.ndarray | None,
+    preserve_outside_roi: bool = True,
 ) -> np.ndarray:
     x1, y1, x2, y2 = box
     door_w = x2 - x1
@@ -871,6 +1220,10 @@ def render_frame(
     frame = apply_reflection_sweep(frame, box, progress, action)
     frame = apply_environment_reaction(frame, box, progress, action)
     frame = add_camera_imperfections(frame, frame_index)
+    if preserve_outside_roi:
+        restored = base.copy()
+        restored[y1:y2, x1:x2] = frame[y1:y2, x1:x2]
+        frame = restored
     return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
 

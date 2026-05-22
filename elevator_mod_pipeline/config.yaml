@@ -16,6 +16,9 @@ detection:
   text_threshold: 0.20
   score_threshold: 0.25
   nms_iou: 0.65
+  cross_label_nms_iou: 0.35
+  enable_geometry_validation: true
+  enable_depth_state_detection: true
   max_detections: 50
   min_box_area_ratio: 0.00005
   max_box_area_ratio: 0.90
@@ -28,6 +31,12 @@ detection:
     - elevator button panel
     - call button
     - floor indicator display
+    - floor indicator
+    - elevator floor indicator
+    - indicator display
+    - digital floor display
+    - elevator display
+    - display panel above elevator
     - handrail
     - mirror
     - emergency phone
@@ -72,6 +81,9 @@ removal:
   cleanup_engine: auto       # auto, lama, wall_patch, or opencv
   wall_sample_margin_px: 55
   cleanup_feather_px: 2
+  merge_nearby_control_modules: true
+  control_module_merge_gap_px: 45
+  control_module_horizontal_tolerance_px: 40
 
 inpainting:
   engine: lama              # lama or opencv
@@ -124,6 +136,10 @@ video:
   fps: 30
   bitrate: 10000k
   no_audio: false
+  refine_elevator_roi: true
+  rectify_tilted_elevator: true
+  max_wall_fraction_in_roi: 0.15
+  preserve_static_wall_outside_roi: true
 
 monitoring:
   interval_s: 1.0
