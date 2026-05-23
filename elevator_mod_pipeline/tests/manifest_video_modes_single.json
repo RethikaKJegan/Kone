@@ -1,0 +1,17 @@
+[
+  {
+    "input_image": "tests/images/Sample5.jpg",
+    "open_reference_image": "tests/images/Sample2_open_interior.jpg",
+    "closed_reference_image": "tests/images/Sample2_closed_exterior.jpg",
+    "mod_panel": "tests/panels/mod_panel.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "run_dir": "tests/outputs/video_mode_demo_Sample5",
+    "existing_json": "tests/outputs/002_Sample5/elevator_detections.json",
+    "video_modes": [
+      "panel_lr",
+      "panel_rl",
+      "door_functionality",
+      "zoom_in"
+    ]
+  }
+]

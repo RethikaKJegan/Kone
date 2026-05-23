@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import subprocess
 import wave
@@ -14,6 +15,15 @@ import numpy as np
 ACTION_SECONDS = {"open": 1.25, "close": 1.75}
 MID_HOLD_SECONDS = 0.7
 END_HOLD_SECONDS = 0.9
+LOGGER = logging.getLogger(__name__)
+MOTION_STYLES = {"zoom_in", "pan_l_r", "pan_r_l", "pan_t_b", "pan_b_t"}
+DOOR_FUNCTIONALITY = {"open", "close"}
+QUALITY_SIZES = {
+    "360p": (640, 360),
+    "480p": (854, 480),
+    "720p": (1280, 720),
+    "1080p": (1920, 1080),
+}
 
 
 def render_elevator_video(
@@ -26,10 +36,31 @@ def render_elevator_video(
 ) -> Path:
     video_cfg = cfg.get("video", {})
     fps = int(video_cfg.get("fps", 30))
+    if fps <= 0:
+        raise ValueError(f"Video fps must be positive, got {fps}")
+    quality = normalize_video_quality(video_cfg.get("quality", "1080p"))
+    duration = float(video_cfg.get("duration_seconds", video_cfg.get("duration", 3.0)))
+    if duration <= 0:
+        duration = 3.0
+    mode_request = normalize_video_mode_request(video_cfg)
+    LOGGER.info(
+        "[VIDEO] Requested motion_style=%s door_functionality=%s",
+        mode_request["requested_motion_style"],
+        mode_request["requested_door_functionality"],
+    )
+    LOGGER.info("[VIDEO] Normalized video mode: %s", mode_request["normalized_video_mode"])
+    LOGGER.info("[VIDEO] Output settings: quality=%s fps=%s duration=%.3f", quality, fps, duration)
+    if mode_request["requested_door_functionality"]:
+        LOGGER.info("[VIDEO] Door functionality selected; camera motion disabled")
+    elif mode_request["requested_motion_style"]:
+        return render_motion_style_video(image_path, cfg, out_path, fps, duration, quality, mode_request)
+
     action = video_cfg.get("action", "auto")
+    if mode_request["requested_door_functionality"]:
+        action = mode_request["requested_door_functionality"]
     bitrate = str(video_cfg.get("bitrate", "10000k"))
     no_audio = bool(video_cfg.get("no_audio", False))
-    cycle = bool(video_cfg.get("cycle", True))
+    cycle = bool(video_cfg.get("cycle", True)) and not mode_request["requested_door_functionality"]
     refine_roi = bool(video_cfg.get("refine_elevator_roi", True))
     preserve_outside_roi = bool(video_cfg.get("preserve_static_wall_outside_roi", refine_roi))
 
@@ -37,13 +68,27 @@ def render_elevator_video(
     depth = load_depth(depth_path, img.shape[:2]) if depth_path else None
     best_detection = select_best_elevator_detection(detections)
     roi_debug: dict[str, Any] = {}
+    LOGGER.info("[ROI] Scoring elevator candidates")
     box = detect_door_box(img, detections, geometry, depth, cfg, roi_debug)
     state, state_debug = classify_elevator_state(detections, depth, box, img)
-    first_action = action if action in {"open", "close"} else ("close" if state == "open" else "open")
-    actions = [(first_action, ACTION_SECONDS[first_action])]
-    if cycle:
-        second_action = "close" if first_action == "open" else "open"
-        actions.append((second_action, ACTION_SECONDS[second_action]))
+    LOGGER.info("[ROI] Selected elevator ROI: %s score=%s", box, roi_debug.get("selected_score"))
+    for rejected in roi_debug.get("rejected_candidates", []):
+        LOGGER.info("[ROI] Rejected candidate: %s reason=%s", rejected.get("box"), rejected.get("reason"))
+    LOGGER.info("[STATE] Elevator state detected: %s", state)
+    if mode_request["requested_door_functionality"]:
+        requested_action = mode_request["requested_door_functionality"]
+        LOGGER.info("[VIDEO] Using existing door-%s animation pipeline", requested_action)
+        if requested_action == "open":
+            actions = [("open", ACTION_SECONDS["open"])] if state == "closed" else [("close", ACTION_SECONDS["close"]), ("open", ACTION_SECONDS["open"])]
+        else:
+            actions = [("close", ACTION_SECONDS["close"])] if state == "open" else [("open", ACTION_SECONDS["open"]), ("close", ACTION_SECONDS["close"])]
+        first_action = actions[0][0]
+    else:
+        first_action = action if action in {"open", "close"} else ("close" if state == "open" else "open")
+        actions = [(first_action, ACTION_SECONDS[first_action])]
+        if cycle:
+            second_action = "close" if first_action == "open" else "open"
+            actions.append((second_action, ACTION_SECONDS[second_action]))
 
     open_state_img, closed_state_img, source_policy = select_state_images(img, cfg, state, box)
     source_policy.update(reference_usage_debug(source_policy))
@@ -65,6 +110,17 @@ def render_elevator_video(
         }
     )
     write_elevator_roi_debug(out_path, img, depth, roi_debug)
+    LOGGER.info("[ANIMATION] Refining animation ROI")
+    if state == "open":
+        LOGGER.info("[ANIMATION] Final image already contains open elevator; using final image as open state")
+        LOGGER.info("[ANIMATION] Open reference image disabled for open-state final image")
+        LOGGER.info("[ANIMATION] Building closed-door state from closed_reference_image")
+        LOGGER.info("[ANIMATION] Rendering open \u2192 close \u2192 open sequence")
+        animation_mode = "open_close_open_from_existing_interior"
+    else:
+        animation_mode = "opening" if first_action == "open" else "closing"
+    LOGGER.info("[ANIMATION] Choosing animation mode: %s", animation_mode)
+    LOGGER.info("[ANIMATION] Generating frames")
     panels = build_panel_texture(closed_state_img, box, "closed", depth)
     reveal_scene = build_reveal_scene(img, open_state_img, box, "open", first_action, depth)
     mid_hold_frames = max(4, int(fps * MID_HOLD_SECONDS))
@@ -117,10 +173,31 @@ def render_elevator_video(
 
     if state == "closed":
         enforce_closed_branch_endpoints(frames, img, actions, fps)
+    elif state == "open":
+        if actions and actions[0][0] == "close" and actions[-1][0] == "open":
+            enforce_open_branch_endpoints(frames, img, actions, fps)
+            validate_open_branch_motion(frames, img, closed_state_img, box, fps)
+        else:
+            validate_roi_motion(frames, box, min_diff=3.0)
 
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    audio_debug = write_video(out, frames, fps, bitrate, no_audio, actions, state, video_cfg)
+    video_write_cfg = dict(video_cfg)
+    video_write_cfg["_quality_resize_mode"] = "contain"
+    audio_debug = write_video(out, frames, fps, bitrate, no_audio, actions, state, video_write_cfg)
+    audio_debug["animation_mode"] = animation_mode
+    audio_debug.update(mode_request)
+    if audio_debug.get("requested_video_mode") in {"door", "door_functionality", "door_fuctionality"} and not audio_debug.get("normalized_video_mode"):
+        audio_debug["normalized_video_mode"] = f"door_{first_action}"
+    audio_debug.update(
+        {
+            "video_source": "door_animation_pipeline",
+            "door_animation_used": True,
+            "camera_motion_used": False,
+            "open_reference_image_used": state_debug["used_open_reference_image"],
+            "closed_reference_image_used": state_debug["used_closed_reference_image"],
+        }
+    )
     state_debug.update(audio_debug)
     write_metadata(out.with_suffix(".json"), image_path, out, box, state, [action for action, _ in actions], fps, depth_path, source_policy, state_debug, audio_debug)
     write_state_debug(out.with_name("elevator_state_debug.json"), state_debug)
@@ -138,7 +215,11 @@ def write_video(
     video_cfg: dict[str, Any],
 ) -> dict[str, Any]:
     frames = normalize_video_frames(frames)
+    quality = normalize_video_quality(video_cfg.get("quality", "1080p"))
+    frames = resize_frames_for_quality(frames, quality, str(video_cfg.get("_quality_resize_mode", "cover")))
     height, width = frames[0].shape[:2]
+    if fps <= 0:
+        raise ValueError(f"Video fps must be positive, got {fps}")
     out.parent.mkdir(parents=True, exist_ok=True)
     add_audio = bool(video_cfg.get("add_audio", False)) and not no_audio
     video_out = out.with_name(out.stem + ".silent.mp4") if add_audio else out
@@ -153,6 +234,7 @@ def write_video(
     if writer is None:
         raise RuntimeError(f"Could not open an MP4 writer for {video_out}")
     try:
+        LOGGER.info("[VIDEO] Writing video: %s", video_out)
         for frame in frames:
             writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
     finally:
@@ -160,17 +242,576 @@ def write_video(
 
     duration = len(frames) / float(fps)
     if not add_audio:
+        validation = validate_video_output(video_out, fps, len(frames), duration)
         return {
             "audio_enabled": False,
             "audio_sample_rate": int(video_cfg.get("audio_sample_rate", 44100)),
             "audio_layers": [],
             "audio_duration_seconds": 0.0,
             "video_duration_seconds": duration,
+            "video_path": str(video_out),
+            "fps": fps,
+            "frame_count": len(frames),
+            "duration_seconds": duration,
+            "video_validation_status": validation["status"],
+            "video_validation": validation,
+            "quality": quality,
         }
 
     audio_debug = mux_generated_audio(video_out, out, duration, actions, elevator_state, video_cfg)
     safe_unlink(video_out)
+    validation = validate_video_output(out, fps, len(frames), duration)
+    audio_debug.update(
+        {
+            "video_path": str(out),
+            "fps": fps,
+            "frame_count": len(frames),
+            "duration_seconds": duration,
+            "video_validation_status": validation["status"],
+            "video_validation": validation,
+            "quality": quality,
+        }
+    )
     return audio_debug
+
+
+def normalize_video_quality(value: Any) -> str:
+    quality = str(value or "1080p").lower()
+    if quality not in QUALITY_SIZES:
+        raise ValueError(f"Unsupported video quality: {value}. Expected one of {sorted(QUALITY_SIZES)}")
+    return quality
+
+
+def normalize_video_mode_request(video_cfg: dict[str, Any]) -> dict[str, Any]:
+    requested_video_mode = video_cfg.get("mode")
+    if requested_video_mode is not None:
+        requested_video_mode = str(requested_video_mode).strip().lower()
+    motion_style = video_cfg.get("motion_style")
+    door_functionality = video_cfg.get("door_functionality")
+    if motion_style is not None:
+        motion_style = str(motion_style).strip().lower()
+        if motion_style not in MOTION_STYLES:
+            raise ValueError(f"Unsupported motion_style: {motion_style}")
+    if door_functionality is not None:
+        door_functionality = str(door_functionality).strip().lower()
+        if door_functionality not in DOOR_FUNCTIONALITY:
+            raise ValueError(f"Unsupported door_functionality: {door_functionality}")
+    conflict_resolution = None
+    if door_functionality:
+        normalized = f"door_{door_functionality}"
+        if motion_style:
+            conflict_resolution = "door_functionality_preferred"
+    else:
+        normalized = motion_style
+    return {
+        "requested_video_mode": requested_video_mode,
+        "requested_motion_style": motion_style,
+        "requested_door_functionality": door_functionality,
+        "normalized_video_mode": normalized,
+        "video_mode_conflict_resolution": conflict_resolution,
+    }
+
+
+def resize_frames_for_quality(frames: list[np.ndarray], quality: str, mode: str = "cover") -> list[np.ndarray]:
+    target_w, target_h = QUALITY_SIZES[quality]
+    if mode == "contain":
+        return [resize_contain_rgb(frame, target_w, target_h) for frame in frames]
+    return [resize_cover_rgb(frame, target_w, target_h) for frame in frames]
+
+
+def resize_cover_rgb(frame: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
+    h, w = frame.shape[:2]
+    scale = max(target_w / max(w, 1), target_h / max(h, 1))
+    resized = cv2.resize(frame, (max(1, int(round(w * scale))), max(1, int(round(h * scale)))), interpolation=cv2.INTER_AREA)
+    rh, rw = resized.shape[:2]
+    x1 = max(0, (rw - target_w) // 2)
+    y1 = max(0, (rh - target_h) // 2)
+    crop = resized[y1 : y1 + target_h, x1 : x1 + target_w]
+    if crop.shape[:2] != (target_h, target_w):
+        crop = cv2.resize(crop, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    return np.ascontiguousarray(crop)
+
+
+def resize_contain_rgb(frame: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
+    h, w = frame.shape[:2]
+    background = resize_cover_rgb(frame, target_w, target_h)
+    background = cv2.GaussianBlur(background, (0, 0), 18)
+    scale = min(target_w / max(w, 1), target_h / max(h, 1))
+    resized_w = max(1, int(round(w * scale)))
+    resized_h = max(1, int(round(h * scale)))
+    foreground = cv2.resize(frame, (resized_w, resized_h), interpolation=cv2.INTER_AREA)
+    x1 = (target_w - resized_w) // 2
+    y1 = (target_h - resized_h) // 2
+    background[y1 : y1 + resized_h, x1 : x1 + resized_w] = foreground
+    return np.ascontiguousarray(background)
+
+
+def render_motion_style_video(
+    image_path: str | Path,
+    cfg: dict[str, Any],
+    out_path: str | Path,
+    fps: int,
+    duration: float,
+    quality: str,
+    mode_request: dict[str, Any],
+) -> Path:
+    img_bgr = load_image_bgr(image_path)
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    target_w, target_h = motion_output_size(img_rgb, quality, cfg)
+    focus, focus_source = motion_focus_point(cfg, img_rgb.shape[:2])
+    motion_style = mode_request["requested_motion_style"]
+    if motion_style == "zoom_in":
+        LOGGER.info("[VIDEO] Generating centered zoom-in from final output image")
+    elif motion_style == "pan_l_r":
+        LOGGER.info("[VIDEO] Generating panorama pan L-R from final output image")
+        LOGGER.info("[VIDEO] Pan uses crop-window viewport; no blank borders")
+    elif motion_style == "pan_r_l":
+        LOGGER.info("[VIDEO] Generating panorama pan R-L from final output image")
+        LOGGER.info("[VIDEO] Pan uses crop-window viewport; no blank borders")
+    elif motion_style == "pan_t_b":
+        LOGGER.info("[VIDEO] Generating vertical panorama pan T-B from final output image")
+        LOGGER.info("[VIDEO] Pan uses crop-window viewport; no blank borders")
+    elif motion_style == "pan_b_t":
+        LOGGER.info("[VIDEO] Generating vertical panorama pan B-T from final output image")
+        LOGGER.info("[VIDEO] Pan uses crop-window viewport; no blank borders")
+    pan_axis, pan_direction = pan_metadata(motion_style)
+    frame_count = max(2, int(round(fps * duration)))
+    if motion_style in {"zoom_in", "pan_l_r", "pan_r_l"}:
+        ffmpeg_debug = render_ffmpeg_camera_motion(
+            img_rgb,
+            Path(image_path),
+            Path(out_path),
+            fps,
+            frame_count,
+            duration,
+            quality,
+            motion_style,
+            mode_request,
+            focus_source,
+            pan_axis,
+            pan_direction,
+            cfg,
+        )
+        if ffmpeg_debug is not None:
+            write_motion_metadata(Path(out_path).with_suffix(".json"), image_path, Path(out_path), ffmpeg_debug)
+            return Path(out_path)
+
+    frames = [
+        render_motion_style_frame(img_rgb, target_w, target_h, focus, motion_style, i / max(frame_count - 1, 1))
+        for i in range(frame_count)
+    ]
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    audio_debug = write_video(out, frames, fps, str(cfg.get("video", {}).get("bitrate", "10000k")), True, [], "none", cfg.get("video", {}))
+    audio_debug.update(
+        {
+            **mode_request,
+            "video_source": "final_output_image",
+            "door_animation_used": False,
+            "camera_motion_used": True,
+            "open_reference_image_used": False,
+            "closed_reference_image_used": False,
+            "focus_point_source": focus_source,
+            "pan_axis": pan_axis,
+            "pan_direction": pan_direction,
+            "video_generated": True,
+        }
+    )
+    write_motion_metadata(out.with_suffix(".json"), image_path, out, audio_debug)
+    return out
+
+
+def render_ffmpeg_camera_motion(
+    img_rgb: np.ndarray,
+    image_path: Path,
+    out_path: Path,
+    fps: int,
+    frame_count: int,
+    duration: float,
+    quality: str,
+    motion_style: str,
+    mode_request: dict[str, Any],
+    focus_source: str,
+    pan_axis: str | None,
+    pan_direction: str | None,
+    cfg: dict[str, Any],
+) -> dict[str, Any] | None:
+    target_w, target_h = motion_output_size(img_rgb, quality, cfg)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    base_path = out_path.with_name(out_path.stem + ".ffmpeg_input.png")
+    try:
+        if motion_style == "zoom_in":
+            return render_stable_cpu_zoom_motion(
+                img_rgb,
+                out_path,
+                fps,
+                frame_count,
+                duration,
+                quality,
+                target_w,
+                target_h,
+                mode_request,
+                focus_source,
+                cfg,
+            )
+
+        base = build_ffmpeg_pan_base(img_rgb, target_w, target_h, axis="x")
+        ease = ffmpeg_smoothstep_expr(frame_count, "n")
+        if motion_style == "pan_l_r":
+            x_expr = f"(iw-ow)*({ease})"
+        else:
+            x_expr = f"(iw-ow)*(1-({ease}))"
+        filter_expr = (
+            f"fps={fps},crop={target_w}:{target_h}:x='{x_expr}':y='(ih-oh)/2',"
+            f"trim=duration={duration:.6f},setpts=PTS-STARTPTS,"
+            f"{ffmpeg_finish_filters(cfg)}"
+        )
+
+        cv2.imwrite(str(base_path), cv2.cvtColor(base, cv2.COLOR_RGB2BGR))
+        cmd = [
+            find_ffmpeg_executable(),
+            "-y",
+            "-loop",
+            "1",
+            "-framerate",
+            str(fps),
+            "-i",
+            str(base_path),
+            "-frames:v",
+            str(frame_count),
+            "-vf",
+            filter_expr,
+            "-r",
+            str(fps),
+            "-fps_mode",
+            "cfr",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "slow",
+            "-crf",
+            str((cfg.get("video", {}) or {}).get("ffmpeg_crf", 18)),
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(out_path),
+        ]
+        LOGGER.info("[VIDEO] Rendering camera motion with FFmpeg: %s", motion_style)
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        validation = validate_video_output(out_path, fps, frame_count, duration)
+        return {
+            **mode_request,
+            "video_source": "final_output_image",
+            "video_renderer": "ffmpeg_cinematic_cpu",
+            "door_animation_used": False,
+            "camera_motion_used": True,
+            "open_reference_image_used": False,
+            "closed_reference_image_used": False,
+            "focus_point_source": focus_source,
+            "pan_axis": pan_axis,
+            "pan_direction": pan_direction,
+            "video_generated": True,
+            "audio_enabled": False,
+            "video_path": str(out_path),
+            "fps": fps,
+            "frame_count": frame_count,
+            "duration_seconds": duration,
+            "video_duration_seconds": duration,
+            "quality": quality,
+            "output_width": target_w,
+            "output_height": target_h,
+            "video_validation_status": validation["status"],
+            "video_validation": validation,
+        }
+    except Exception as exc:
+        LOGGER.warning("[VIDEO] FFmpeg camera-motion render failed; falling back to OpenCV renderer: %s", exc)
+        return None
+    finally:
+        safe_unlink(base_path)
+
+
+def render_stable_cpu_zoom_motion(
+    img_rgb: np.ndarray,
+    out_path: Path,
+    fps: int,
+    frame_count: int,
+    duration: float,
+    quality: str,
+    target_w: int,
+    target_h: int,
+    mode_request: dict[str, Any],
+    focus_source: str,
+    cfg: dict[str, Any],
+) -> dict[str, Any]:
+    video_settings = cfg.get("video", {}) or {}
+    zoom_amount = float(video_settings.get("ffmpeg_zoom_amount", 0.22))
+    focus_x = float(np.clip(float(video_settings.get("ffmpeg_zoom_focus_x", 0.50)), 0.05, 0.95))
+    focus_y = float(np.clip(float(video_settings.get("ffmpeg_zoom_focus_y", 0.50)), 0.05, 0.95))
+    base = resize_contain_rgb(img_rgb, target_w, target_h)
+    frames: list[np.ndarray] = []
+    den = max(frame_count - 1, 1)
+    for idx in range(frame_count):
+        t = idx / den
+        eased = t * t * (3.0 - 2.0 * t)
+        zoom = 1.0 + zoom_amount * eased
+        crop_w = max(2, int(round(target_w / zoom)))
+        crop_h = max(2, int(round(target_h / zoom)))
+        cx = target_w * focus_x
+        cy = target_h * focus_y
+        x1 = int(np.clip(round(cx - crop_w * 0.5), 0, max(0, target_w - crop_w)))
+        y1 = int(np.clip(round(cy - crop_h * 0.5), 0, max(0, target_h - crop_h)))
+        crop = base[y1 : y1 + crop_h, x1 : x1 + crop_w]
+        frame = cv2.resize(crop, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
+        if bool(video_settings.get("ffmpeg_sharpen", True)):
+            blur = cv2.GaussianBlur(frame, (0, 0), 0.9)
+            frame = cv2.addWeighted(frame, 1.12, blur, -0.12, 0)
+        frames.append(np.ascontiguousarray(np.clip(frame, 0, 255).astype(np.uint8)))
+
+    video_debug = write_frames_mp4(
+        out_path,
+        frames,
+        fps,
+        str(video_settings.get("ffmpeg_crf", 18)),
+        renderer="stable_cpu_zoom",
+    )
+    validation = validate_video_output(out_path, fps, frame_count, duration)
+    video_debug.update(
+        {
+            **mode_request,
+            "video_source": "final_output_image",
+            "video_renderer": "stable_cpu_zoom",
+            "door_animation_used": False,
+            "camera_motion_used": True,
+            "open_reference_image_used": False,
+            "closed_reference_image_used": False,
+            "focus_point_source": focus_source,
+            "pan_axis": None,
+            "pan_direction": None,
+            "video_generated": True,
+            "audio_enabled": False,
+            "duration_seconds": duration,
+            "video_duration_seconds": duration,
+            "quality": quality,
+            "output_width": target_w,
+            "output_height": target_h,
+            "video_validation_status": validation["status"],
+            "video_validation": validation,
+        }
+    )
+    return video_debug
+
+
+def write_frames_mp4(out_path: Path, frames: list[np.ndarray], fps: int, crf: str, renderer: str) -> dict[str, Any]:
+    del crf, renderer
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    height, width = frames[0].shape[:2]
+    writer = None
+    for codec in ("mp4v", "avc1", "H264"):
+        candidate = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*codec), float(fps), (width, height))
+        if candidate.isOpened():
+            writer = candidate
+            break
+        candidate.release()
+    if writer is None:
+        raise RuntimeError(f"Could not open an MP4 writer for {out_path}")
+    try:
+        for frame in frames:
+            writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+    finally:
+        writer.release()
+    return {
+        "video_path": str(out_path),
+        "fps": fps,
+        "frame_count": len(frames),
+    }
+
+
+def build_ffmpeg_pan_base(img_rgb: np.ndarray, target_w: int, target_h: int, axis: str) -> np.ndarray:
+    h, w = img_rgb.shape[:2]
+    if axis == "x":
+        desired_w = int(round(target_w * 1.18))
+        scale = max(desired_w / max(w, 1), target_h / max(h, 1))
+    else:
+        desired_h = int(round(target_h * 1.18))
+        scale = max(target_w / max(w, 1), desired_h / max(h, 1))
+    resized_w = max(target_w + 2, int(round(w * scale)))
+    resized_h = max(target_h + 2, int(round(h * scale)))
+    return cv2.resize(img_rgb, (resized_w, resized_h), interpolation=cv2.INTER_LANCZOS4)
+
+
+def motion_output_size(img_rgb: np.ndarray, quality: str, cfg: dict[str, Any]) -> tuple[int, int]:
+    target_w, target_h = QUALITY_SIZES[quality]
+    if not bool((cfg.get("video", {}) or {}).get("preserve_source_aspect", False)):
+        return target_w, target_h
+    h, w = img_rgb.shape[:2]
+    if h <= 0 or w <= 0:
+        return target_w, target_h
+    if h >= w:
+        out_h = target_h
+        out_w = int(round(out_h * w / h))
+    else:
+        out_w = target_w
+        out_h = int(round(out_w * h / w))
+    out_w = max(2, out_w - out_w % 2)
+    out_h = max(2, out_h - out_h % 2)
+    return out_w, out_h
+
+
+def ffmpeg_smoothstep_expr(frame_count: int, variable: str = "on") -> str:
+    den = max(frame_count - 1, 1)
+    p = f"({variable}/{den})"
+    return f"({p}*{p}*(3-2*{p}))"
+
+
+def ffmpeg_finish_filters(cfg: dict[str, Any]) -> str:
+    video_settings = cfg.get("video", {}) or {}
+    filters = []
+    if bool(video_settings.get("ffmpeg_temporal_smoothing", False)):
+        filters.append("tmix=frames=3:weights='1 2 1'")
+    if bool(video_settings.get("ffmpeg_sharpen", True)):
+        filters.append("unsharp=5:5:0.25:3:3:0.08")
+    if bool(video_settings.get("ffmpeg_add_grain", False)):
+        filters.append("noise=alls=0.35:allf=t+u")
+    return ",".join(filters) if filters else "null"
+
+
+def motion_focus_point(cfg: dict[str, Any], hw: tuple[int, int]) -> tuple[tuple[float, float], str]:
+    h, w = hw
+    return (w * 0.5, h * 0.5), "image_center"
+
+
+def render_motion_style_frame(
+    img_rgb: np.ndarray,
+    target_w: int,
+    target_h: int,
+    focus: tuple[float, float],
+    motion_style: str,
+    t: float,
+) -> np.ndarray:
+    if motion_style == "zoom_in":
+        return render_zoom_in_frame(img_rgb, target_w, target_h, t)
+    if motion_style in {"pan_l_r", "pan_r_l", "pan_t_b", "pan_b_t"}:
+        return render_pan_frame(img_rgb, target_w, target_h, motion_style, t)
+    raise ValueError(f"Unsupported motion_style: {motion_style}")
+
+
+def render_zoom_in_frame(img_rgb: np.ndarray, target_w: int, target_h: int, t: float) -> np.ndarray:
+    fitted = resize_contain_rgb(img_rgb, target_w, target_h)
+    eased = ease_in_out_cubic(t)
+    if eased <= 0:
+        return fitted
+    zoom = 1.0 + 0.16 * eased
+    crop_w = max(2, int(round(target_w / zoom)))
+    crop_h = max(2, int(round(target_h / zoom)))
+    x1 = (target_w - crop_w) // 2
+    y1 = (target_h - crop_h) // 2
+    crop = fitted[y1 : y1 + crop_h, x1 : x1 + crop_w]
+    return cv2.resize(crop, (target_w, target_h), interpolation=cv2.INTER_AREA)
+
+
+def render_pan_frame(img_rgb: np.ndarray, target_w: int, target_h: int, motion_style: str, t: float) -> np.ndarray:
+    h, w = img_rgb.shape[:2]
+    scale = max(target_w / max(w, 1), target_h / max(h, 1)) * 1.14
+    resized_w = max(target_w + 2, int(round(w * scale)))
+    resized_h = max(target_h + 2, int(round(h * scale)))
+    resized = cv2.resize(img_rgb, (resized_w, resized_h), interpolation=cv2.INTER_AREA)
+    pan = ease_in_out_cubic(t)
+    if motion_style in {"pan_l_r", "pan_r_l"}:
+        y1 = int(np.clip(round((resized_h - target_h) * 0.5), 0, max(0, resized_h - target_h)))
+        travel = max(0, resized_w - target_w)
+        x_start = 0 if motion_style == "pan_l_r" else travel
+        x_end = travel if motion_style == "pan_l_r" else 0
+        x1 = int(round(x_start + (x_end - x_start) * pan))
+    else:
+        x1 = int(np.clip(round((resized_w - target_w) * 0.5), 0, max(0, resized_w - target_w)))
+        travel = max(0, resized_h - target_h)
+        y_start = 0 if motion_style == "pan_t_b" else travel
+        y_end = travel if motion_style == "pan_t_b" else 0
+        y1 = int(round(y_start + (y_end - y_start) * pan))
+    crop = resized[y1 : y1 + target_h, x1 : x1 + target_w]
+    if crop.shape[:2] != (target_h, target_w):
+        crop = cv2.resize(crop, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    return np.ascontiguousarray(crop)
+
+
+def pan_metadata(motion_style: str | None) -> tuple[str | None, str | None]:
+    return {
+        "pan_l_r": ("x", "left_to_right"),
+        "pan_r_l": ("x", "right_to_left"),
+        "pan_t_b": ("y", "top_to_bottom"),
+        "pan_b_t": ("y", "bottom_to_top"),
+    }.get(str(motion_style), (None, None))
+
+
+def write_motion_metadata(meta_path: Path, image_path: str | Path, out_path: Path, audio_debug: dict[str, Any]) -> None:
+    meta_path.write_text(
+        json.dumps(
+            {
+                "source_image": str(image_path),
+                "output_video": str(out_path),
+                "video_path": str(out_path),
+                "requested_motion_style": audio_debug.get("requested_motion_style"),
+                "requested_video_mode": audio_debug.get("requested_video_mode"),
+                "requested_door_functionality": audio_debug.get("requested_door_functionality"),
+                "normalized_video_mode": audio_debug.get("normalized_video_mode"),
+                "video_generated": True,
+                "fps": audio_debug.get("fps"),
+                "frame_count": audio_debug.get("frame_count"),
+                "duration_seconds": audio_debug.get("duration_seconds"),
+                "quality": audio_debug.get("quality"),
+                "output_width": audio_debug.get("output_width"),
+                "output_height": audio_debug.get("output_height"),
+                "video_validation_status": audio_debug.get("video_validation_status"),
+                "video_source": audio_debug.get("video_source"),
+                "video_renderer": audio_debug.get("video_renderer"),
+                "door_animation_used": False,
+                "camera_motion_used": True,
+                "open_reference_image_used": False,
+                "closed_reference_image_used": False,
+                "video_mode_conflict_resolution": audio_debug.get("video_mode_conflict_resolution"),
+                "focus_point_source": audio_debug.get("focus_point_source"),
+                "pan_axis": audio_debug.get("pan_axis"),
+                "pan_direction": audio_debug.get("pan_direction"),
+                "audio": audio_debug,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def validate_video_output(path: Path, expected_fps: int, expected_frames: int, expected_duration: float) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {
+        "path": str(path),
+        "expected_fps": expected_fps,
+        "expected_frame_count": expected_frames,
+        "expected_duration_seconds": expected_duration,
+    }
+    if not path.exists():
+        diagnostics["status"] = "failed_missing_file"
+        raise RuntimeError(f"Video validation failed: output file missing: {path}")
+    size = path.stat().st_size
+    diagnostics["file_size_bytes"] = size
+    if size <= 0:
+        diagnostics["status"] = "failed_empty_file"
+        raise RuntimeError(f"Video validation failed: output file is empty: {path}")
+
+    cap = cv2.VideoCapture(str(path))
+    try:
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    finally:
+        cap.release()
+    duration = frame_count / fps if fps > 0 else 0.0
+    diagnostics.update({"fps": fps, "frame_count": frame_count, "duration_seconds": duration})
+    if fps <= 0 or frame_count <= 0 or duration <= 0:
+        diagnostics["status"] = "failed_zero_duration"
+        raise RuntimeError(f"Video validation failed: zero/invalid duration for {path}: {diagnostics}")
+    diagnostics["status"] = "passed"
+    LOGGER.info("[VIDEO] Validation passed: fps=%.3f frames=%s duration=%.3f", fps, frame_count, duration)
+    return diagnostics
 
 
 def normalize_video_frames(frames: list[np.ndarray]) -> list[np.ndarray]:
@@ -226,7 +867,33 @@ def write_metadata(
                 "output_video": str(out_path),
                 "door_box_xyxy": box,
                 "detected_initial_state": state,
+                "elevator_state": state,
                 "actions": actions,
+                "skipped_animation_reason": state_debug.get("skipped_animation_reason"),
+                "skipped_or_alternate_animation_reason": state_debug.get("skipped_or_alternate_animation_reason"),
+                "animation_mode": state_debug.get("animation_mode") or audio_debug.get("animation_mode"),
+                "video_path": str(out_path),
+                "frame_count": audio_debug.get("frame_count"),
+                "duration_seconds": audio_debug.get("duration_seconds", audio_debug.get("video_duration_seconds")),
+                "video_validation_status": audio_debug.get("video_validation_status"),
+                "requested_motion_style": audio_debug.get("requested_motion_style"),
+                "requested_video_mode": audio_debug.get("requested_video_mode"),
+                "requested_door_functionality": audio_debug.get("requested_door_functionality"),
+                "normalized_video_mode": audio_debug.get("normalized_video_mode"),
+                "video_mode_conflict_resolution": audio_debug.get("video_mode_conflict_resolution"),
+                "video_generated": True,
+                "video_source": audio_debug.get("video_source"),
+                "door_animation_used": audio_debug.get("door_animation_used"),
+                "camera_motion_used": audio_debug.get("camera_motion_used"),
+                "pan_axis": audio_debug.get("pan_axis"),
+                "pan_direction": audio_debug.get("pan_direction"),
+                "quality": audio_debug.get("quality"),
+                "open_reference_image_used": audio_debug.get("open_reference_image_used"),
+                "closed_reference_image_used": audio_debug.get("closed_reference_image_used"),
+                "open_state_source": source_policy.get("open_state_image"),
+                "closed_state_source": source_policy.get("closed_state_image"),
+                "used_open_reference_image": source_policy.get("open_reference_image_used") == "true",
+                "used_closed_reference_image": source_policy.get("closed_reference_image_used") == "true",
                 "source_policy": source_policy,
                 "state_debug": state_debug,
                 "audio": audio_debug,
@@ -266,6 +933,7 @@ def write_elevator_roi_debug(out_path: str | Path, image_bgr: np.ndarray, depth:
         cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 3)
         cv2.imwrite(str(out_dir / "selected_elevator_roi.png"), overlay)
         cv2.imwrite(str(out_dir / "refined_animation_roi.png"), overlay)
+        cv2.imwrite(str(out_dir / "nested_frame_depth_evidence.png"), overlay)
 
     rejected_overlay = image_bgr.copy()
     for cand in debug.get("rejected_candidates", []):
@@ -314,7 +982,7 @@ def select_state_images(final_img: np.ndarray, cfg: dict[str, Any], state: str, 
             closed_state,
             {
                 "open_state_image": "final_image",
-                "closed_state_image": "closed_reference_image_fitted_to_door_box" if closed_ref is not None else "final_image_fallback",
+                "closed_state_image": "closed_reference_image" if closed_ref is not None else "final_image_fallback",
                 "open_reference_image_used": "false",
                 "closed_reference_image_used": "true" if closed_ref is not None else "false",
             },
@@ -400,6 +1068,84 @@ def enforce_closed_branch_endpoints(
         frames[-1] = exact_closed_rgb.copy()
 
 
+def enforce_open_branch_endpoints(
+    frames: list[np.ndarray],
+    final_img_bgr: np.ndarray,
+    actions: list[tuple[str, float]],
+    fps: int,
+) -> None:
+    if not frames:
+        return
+
+    exact_open_rgb = cv2.cvtColor(final_img_bgr, cv2.COLOR_BGR2RGB)
+    frames[0] = exact_open_rgb.copy()
+
+    if actions and actions[-1][0] == "open":
+        end_hold_frames = max(4, int(fps * END_HOLD_SECONDS))
+        for idx in range(max(0, len(frames) - end_hold_frames), len(frames)):
+            frames[idx] = exact_open_rgb.copy()
+        frames[-1] = exact_open_rgb.copy()
+
+
+def validate_open_branch_motion(
+    frames: list[np.ndarray],
+    final_img_bgr: np.ndarray,
+    closed_state_bgr: np.ndarray,
+    box: list[int],
+    fps: int,
+) -> None:
+    if fps <= 0:
+        raise ValueError(f"Video fps must be positive, got {fps}")
+    if len(frames) < max(3, int(fps * 2.0)):
+        raise RuntimeError(f"Open elevator animation is too short: {len(frames)} frames at {fps} fps")
+
+    x1, y1, x2, y2 = [int(v) for v in box]
+    if x2 <= x1 or y2 <= y1:
+        raise RuntimeError(f"Open elevator animation ROI is invalid: {box}")
+
+    open_start = frames[0][y1:y2, x1:x2]
+    close_frames = max(24, int(fps * ACTION_SECONDS["close"]))
+    closed_midpoint = frames[min(len(frames) - 1, close_frames)][y1:y2, x1:x2]
+    open_end = frames[-1][y1:y2, x1:x2]
+    original_open = cv2.cvtColor(final_img_bgr, cv2.COLOR_BGR2RGB)[y1:y2, x1:x2]
+    closed_reference_state = cv2.cvtColor(closed_state_bgr, cv2.COLOR_BGR2RGB)[y1:y2, x1:x2]
+
+    start_error = mean_absdiff(open_start, original_open)
+    end_error = mean_absdiff(open_end, original_open)
+    close_motion = mean_absdiff(open_start, closed_midpoint)
+    closed_error = mean_absdiff(closed_midpoint, closed_reference_state)
+
+    if start_error > 1.0 or end_error > 1.0:
+        raise RuntimeError(
+            "Open elevator animation failed to preserve final_image interior at endpoints: "
+            f"start_error={start_error:.3f} end_error={end_error:.3f}"
+        )
+    if close_motion < 3.0:
+        raise RuntimeError(f"Open elevator animation is static/no-op in ROI: mean_diff={close_motion:.3f}")
+    if closed_error > 45.0:
+        raise RuntimeError(
+            "Open elevator animation closed midpoint does not match closed-door reference state closely enough: "
+            f"mean_error={closed_error:.3f}"
+        )
+
+
+def mean_absdiff(a: np.ndarray, b: np.ndarray) -> float:
+    if a.size == 0 or b.size == 0:
+        return 0.0
+    return float(np.mean(cv2.absdiff(a, b)))
+
+
+def validate_roi_motion(frames: list[np.ndarray], box: list[int], min_diff: float = 3.0) -> None:
+    if len(frames) < 2:
+        raise RuntimeError("Door animation rendered too few frames")
+    x1, y1, x2, y2 = [int(v) for v in box]
+    start = frames[0][y1:y2, x1:x2]
+    end = frames[-1][y1:y2, x1:x2]
+    diff = mean_absdiff(start, end)
+    if diff < min_diff:
+        raise RuntimeError(f"Door animation is static/no-op in ROI: mean_diff={diff:.3f}")
+
+
 def load_depth(path: str | Path, hw: tuple[int, int]) -> np.ndarray | None:
     p = Path(path)
     if not p.exists():
@@ -466,7 +1212,9 @@ def select_best_elevator_roi(
     )
     raw_candidates: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
+    candidate_scores: list[dict[str, Any]] = []
     scored: list[tuple[float, list[int], dict[str, Any], str]] = []
+    LOGGER.info("[ROI] Checking nested frame/depth evidence")
 
     for det in detections.get("detections", []):
         phrase = str(det.get("phrase", "")).lower()
@@ -483,12 +1231,15 @@ def select_best_elevator_roi(
         edge_score, refined = edge_alignment_score_and_refined_roi(image, box, cfg)
         candidate["edge_score"] = edge_score
         candidate["refined_box"] = refined
-        if not valid:
+        if not valid and not recoverable_elevator_candidate(box, refined, phrase, reason, w, h, edge_score):
             candidate["reason"] = reason
             rejected.append(candidate)
             continue
         depth_score = depth_roi_score(depth_map, refined) if depth_map is not None else 0.0
         interior_score = interior_overlap_score(refined, detections, src_w, src_h, w, h)
+        component_score = adjacent_component_score(refined, detections, src_w, src_h, w, h)
+        nested_score, nested_evidence = nested_frame_depth_score(image, refined, depth_map)
+        rejection_penalty = candidate_penalty(box, refined, reason, w, h) if not valid else 0.0
         x1, y1, x2, y2 = refined
         bw, bh = x2 - x1, y2 - y1
         aspect_score = min(1.0, max(0.0, (bh / max(bw, 1) - 1.15) / 2.2))
@@ -503,14 +1254,46 @@ def select_best_elevator_roi(
             + area_score * 0.35
             + depth_score * 0.40
             + interior_score * 0.50
+            + component_score * 0.45
+            + nested_score * 0.75
+            - rejection_penalty
         )
-        scored.append((score, refined, candidate, "geometry_validated_detection"))
+        score_detail = {
+            "box": refined,
+            "raw_box": box,
+            "phrase": phrase,
+            "score": float(score),
+            "raw_detection_score": float(det.get("score", 0.0)),
+            "edge_score": edge_score,
+            "depth_score": depth_score,
+            "interior_score": interior_score,
+            "component_score": component_score,
+            "nested_frame_depth_score": nested_score,
+            "nested_frame_depth_evidence": nested_evidence,
+            "penalty": rejection_penalty,
+        }
+        candidate_scores.append(score_detail)
+        candidate["candidate_score_detail"] = score_detail
+        if not valid:
+            candidate["recovered_rejection_reason"] = reason
+        scored.append((score, refined, candidate, "geometry_validated_detection" if valid else "recovered_geometry_candidate"))
 
     inferred = infer_elevator_box_from_image(image, detections, geometry)
     if inferred is not None:
         inferred = clamp_box(inferred, w, h)
         edge_score, refined = edge_alignment_score_and_refined_roi(image, inferred, cfg)
-        score = 1.10 + edge_score * 1.35 + depth_roi_score(depth_map, refined) * 0.30
+        nested_score, nested_evidence = nested_frame_depth_score(image, refined, depth_map)
+        score = 0.82 + edge_score * 1.05 + depth_roi_score(depth_map, refined) * 0.25 + nested_score * 0.35
+        score_detail = {
+            "box": refined,
+            "raw_box": inferred,
+            "phrase": "image_structure_fallback",
+            "score": float(score),
+            "edge_score": edge_score,
+            "nested_frame_depth_score": nested_score,
+            "nested_frame_depth_evidence": nested_evidence,
+        }
+        candidate_scores.append(score_detail)
         scored.append(
             (
                 score,
@@ -521,18 +1304,24 @@ def select_best_elevator_roi(
                     "score": score,
                     "edge_score": edge_score,
                     "refined_box": refined,
+                    "candidate_score_detail": score_detail,
                 },
                 "image_edges_fallback",
             )
         )
 
     if not scored:
-        return None, {"raw_candidates": raw_candidates, "rejected_candidates": rejected}
+        return None, {"raw_candidates": raw_candidates, "rejected_candidates": rejected, "candidate_scores": candidate_scores}
 
     selected_score, selected_box, selected_candidate, selected_reason = max(scored, key=lambda item: item[0])
+    selected_detail = selected_candidate.get("candidate_score_detail", {})
+    LOGGER.info("[ROI] Selected full doorway/cabin ROI: %s score=%.3f", selected_box, selected_score)
     return selected_box, {
         "raw_candidates": raw_candidates,
         "rejected_candidates": rejected,
+        "candidate_scores": candidate_scores,
+        "candidate_rejection_reasons": [{"box": item.get("box"), "reason": item.get("reason")} for item in rejected],
+        "nested_frame_depth_evidence": selected_detail.get("nested_frame_depth_evidence", {}),
         "selected_elevator_roi": selected_box,
         "selected_score": float(selected_score),
         "selected_reason": selected_reason,
@@ -559,6 +1348,98 @@ def validate_elevator_candidate(box: list[int], phrase: str, width: int, height:
     if bh / max(bw, 1) < 1.05:
         return False, "not a vertical/tall elevator ROI"
     return True, "valid"
+
+
+def recoverable_elevator_candidate(
+    box: list[int],
+    refined: list[int],
+    phrase: str,
+    reason: str,
+    width: int,
+    height: int,
+    edge_score: float,
+) -> bool:
+    if "elevator" not in phrase and "door" not in phrase and "frame" not in phrase:
+        return False
+    x1, y1, x2, y2 = refined
+    bw, bh = x2 - x1, y2 - y1
+    if reason == "extends too far below threshold":
+        return edge_score >= 0.58 and bh >= height * 0.48 and bw <= width * 0.58
+    if reason == "starts too high above elevator opening":
+        return edge_score >= 0.70 and y2 >= height * 0.45
+    return False
+
+
+def candidate_penalty(box: list[int], refined: list[int], reason: str, width: int, height: int) -> float:
+    del box
+    if reason == "extends too far below threshold":
+        overflow = max(0.0, refined[3] - height * 0.96) / max(height * 0.08, 1.0)
+        return min(0.32, overflow * 0.10)
+    if reason == "starts too high above elevator opening":
+        return 0.18
+    return 0.40
+
+
+def adjacent_component_score(box: list[int], detections: dict[str, Any], src_w: int, src_h: int, width: int, height: int) -> float:
+    terms = ("button panel", "call button", "elevator button", "floor indicator", "weight limit", "capacity")
+    x1, y1, x2, y2 = box
+    score = 0.0
+    for det in detections.get("detections", []):
+        phrase = str(det.get("phrase", "")).lower()
+        norm = str(det.get("normalized_component_type", "")).lower()
+        if not any(term in phrase for term in terms) and norm not in {"elevator_button_panel", "floor_indicator_display", "weight_limit_sign"}:
+            continue
+        bx1, by1, bx2, by2 = scaled_box(det["box_xyxy"], src_w, src_h, width, height)
+        bcx, bcy = (bx1 + bx2) * 0.5, (by1 + by2) * 0.5
+        horizontal_gap = min(abs(bx1 - x2), abs(x1 - bx2), abs(bcx - ((x1 + x2) * 0.5)))
+        beside = (y1 - height * 0.10) <= bcy <= (y2 + height * 0.10) and horizontal_gap < width * 0.28
+        above = y1 - height * 0.18 <= bcy <= y1 + height * 0.12 and x1 - width * 0.15 <= bcx <= x2 + width * 0.15
+        if beside or above:
+            score = max(score, 1.0 if norm in {"elevator_button_panel", "floor_indicator_display"} else 0.65)
+    return score
+
+
+def nested_frame_depth_score(image: np.ndarray, box: list[int], depth_map: np.ndarray | None) -> tuple[float, dict[str, Any]]:
+    x1, y1, x2, y2 = box
+    h, w = image.shape[:2]
+    bw, bh = x2 - x1, y2 - y1
+    if bw <= 4 or bh <= 4:
+        return 0.0, {}
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    roi = gray[y1:y2, x1:x2]
+    sx = np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3))
+    sy = np.abs(cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3))
+    left_edge = float(sx[y1:y2, max(0, x1 - 1) : min(w, x1 + 2)].mean())
+    right_edge = float(sx[y1:y2, max(0, x2 - 2) : min(w, x2 + 1)].mean())
+    top_edge = float(sy[max(0, y1 - 1) : min(h, y1 + 2), x1:x2].mean())
+    bottom_edge = float(sy[max(0, y2 - 2) : min(h, y2 + 1), x1:x2].mean())
+    edge_norm = float(np.mean(sx) + np.mean(sy) + 1e-6)
+    boundary_coverage = float(np.clip((left_edge + right_edge + top_edge + bottom_edge) / edge_norm / 12.0, 0.0, 1.0))
+    center = roi[int(bh * 0.20) : int(bh * 0.88), int(bw * 0.25) : int(bw * 0.75)]
+    border = roi.copy()
+    border[int(bh * 0.20) : int(bh * 0.88), int(bw * 0.25) : int(bw * 0.75)] = 0
+    center_dark_ratio = float(np.mean(center < np.percentile(roi, 38))) if center.size else 0.0
+    interior_contrast = float(np.median(border[border > 0]) - np.median(center)) if center.size and np.any(border > 0) else 0.0
+    depth_contrast = 0.0
+    if depth_map is not None:
+        d = depth_map[y1:y2, x1:x2]
+        if d.size:
+            dh, dw = d.shape[:2]
+            dc = d[int(dh * 0.22) : int(dh * 0.86), int(dw * 0.28) : int(dw * 0.72)]
+            db = d.copy()
+            db[int(dh * 0.22) : int(dh * 0.86), int(dw * 0.28) : int(dw * 0.72)] = np.nan
+            depth_contrast = float(np.nanmedian(db) - np.median(dc)) if dc.size else 0.0
+    scale_score = 1.0 - min(1.0, abs((bw * bh) / max(w * h, 1) - 0.34) / 0.34)
+    open_cabin_score = float(np.clip(center_dark_ratio * 1.2 + max(interior_contrast, 0.0) / 80.0 + abs(depth_contrast) * 0.8, 0.0, 1.0))
+    score = float(np.clip(boundary_coverage * 0.45 + scale_score * 0.25 + open_cabin_score * 0.30, 0.0, 1.0))
+    return score, {
+        "boundary_coverage": boundary_coverage,
+        "center_dark_ratio": center_dark_ratio,
+        "interior_contrast": interior_contrast,
+        "depth_contrast": depth_contrast,
+        "scale_score": scale_score,
+        "open_cabin_score": open_cabin_score,
+    }
 
 
 def edge_alignment_score_and_refined_roi(
@@ -722,10 +1603,14 @@ def classify_elevator_state(
 
     detections = elevator_json.get("detections", [])
     interior_labels = {
+        "elevator cabin",
         "elevator ceiling",
+        "elevator interior",
         "elevator wall",
         "elevator floor",
+        "inside elevator",
         "handrail",
+        "elevator handrail",
         "mirror",
         "ventilation grille",
         "light fixture",
@@ -738,6 +1623,9 @@ def classify_elevator_state(
     )
 
     image_state = classify_state(img, scaled_door_box)
+    visual_open_score, visual_evidence = open_elevator_visual_evidence(img, scaled_door_box)
+    debug["visual_open_score"] = visual_open_score
+    debug["elevator_state_evidence"] = visual_evidence
     if depth_map is not None:
         depth_state, depth_debug = classify_elevator_state_from_depth(depth_map, scaled_door_box)
         debug.update(depth_debug)
@@ -745,12 +1633,25 @@ def classify_elevator_state(
             debug["elevator_state"] = depth_state
             debug["state_source"] = "depth"
             return depth_state, debug
-        if depth_state == "closed" and not (
-            has_interior_detection and image_state == "open" and abs(float(depth_debug.get("depth_contrast") or 0.0)) < 6.0
-        ):
-            debug["elevator_state"] = depth_state
-            debug["state_source"] = "depth"
-            return depth_state, debug
+        if depth_state == "closed":
+            weak_depth_closed = abs(float(depth_debug.get("depth_contrast") or 0.0)) < 6.0
+            roi_height_ratio = (scaled_door_box[3] - scaled_door_box[1]) / max(img.shape[0], 1)
+            open_override = has_interior_detection or visual_open_score >= 2.0 or (
+                weak_depth_closed and visual_open_score >= 1.5 and roi_height_ratio >= 0.68
+            )
+            if not open_override:
+                debug["elevator_state"] = depth_state
+                debug["state_source"] = "depth"
+                return depth_state, debug
+            if weak_depth_closed and visual_open_score >= 1.5 and roi_height_ratio >= 0.68:
+                debug["elevator_state"] = "open"
+                debug["state_source"] = "weak_depth_visual_open_evidence"
+                return "open", debug
+
+    if visual_open_score >= 2.0:
+        debug["elevator_state"] = "open"
+        debug["state_source"] = "visual_open_evidence"
+        return "open", debug
 
     if has_interior_detection:
         debug["elevator_state"] = "open"
@@ -760,6 +1661,42 @@ def classify_elevator_state(
     debug["elevator_state"] = image_state
     debug["state_source"] = "image_fallback" if best_det is not None else "image_fallback_no_detection"
     return image_state, debug
+
+
+def open_elevator_visual_evidence(img: np.ndarray, box: list[int]) -> tuple[float, dict[str, Any]]:
+    x1, y1, x2, y2 = box
+    crop = img[y1:y2, x1:x2]
+    if crop.size == 0:
+        return 0.0, {}
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    h, w = gray.shape[:2]
+    if h < 10 or w < 10:
+        return 0.0, {}
+    center = gray[int(h * 0.12) : int(h * 0.90), int(w * 0.32) : int(w * 0.68)]
+    sides = np.concatenate(
+        [
+            gray[int(h * 0.12) : int(h * 0.90), int(w * 0.05) : int(w * 0.22)].reshape(-1),
+            gray[int(h * 0.12) : int(h * 0.90), int(w * 0.78) : int(w * 0.95)].reshape(-1),
+        ]
+    )
+    edges_x = np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)).mean(axis=0)
+    mid_edges = float(edges_x[int(w * 0.38) : int(w * 0.62)].mean())
+    side_edges = float(np.r_[edges_x[int(w * 0.08) : int(w * 0.24)], edges_x[int(w * 0.76) : int(w * 0.92)]].mean())
+    center_dark = float(np.mean(center < np.percentile(gray, 35))) if center.size else 0.0
+    center_delta = float(np.median(sides) - np.median(center)) if center.size and sides.size else 0.0
+    texture_ratio = float(np.std(center) / max(float(np.std(sides)), 1.0)) if center.size and sides.size else 1.0
+    score = 0.0
+    score += 1.0 if center_dark > 0.36 else 0.0
+    score += 1.0 if center_delta > 18.0 else 0.0
+    score += 0.75 if mid_edges > side_edges * 1.08 else 0.0
+    score += 0.75 if texture_ratio > 1.18 or texture_ratio < 0.72 else 0.0
+    return score, {
+        "center_dark_ratio": center_dark,
+        "center_vs_side_delta": center_delta,
+        "mid_vertical_edge_energy": mid_edges,
+        "side_vertical_edge_energy": side_edges,
+        "center_texture_ratio": texture_ratio,
+    }
 
 
 def _scaled_detection_box(det: dict[str, Any], detections: dict[str, Any], fallback_box: list[int], hw: tuple[int, int]) -> list[int]:
@@ -780,7 +1717,8 @@ def _is_reliable_interior_detection(
     interior_labels: set[str],
 ) -> bool:
     phrase = str(det.get("phrase", "")).strip().lower()
-    if phrase not in interior_labels:
+    normalized = str(det.get("normalized_component_type", "")).strip().lower()
+    if phrase not in interior_labels and normalized not in {"elevator_cabin", "handrail", "security_camera"}:
         return False
     box = _scaled_detection_box(det, detections, roi, hw)
     if box_iou(box, roi) <= 0.05:

@@ -18,27 +18,15 @@ detection:
   min_box_area_ratio: 5.0e-05
   max_box_area_ratio: 0.9
   labels:
-  - elevator door
-  - elevator wall
-  - elevator panel
-  - elevator ceiling
-  - elevator floor
-  - elevator button panel
-  - call button
-  - floor indicator display
+  - elevator_button_panel
+  - floor_indicator_display
+  - weight_limit_sign
+  - accessibility_control_panel
+  - elevator_door
+  - elevator_cabin
+  - threshold_plate
   - handrail
-  - mirror
-  - emergency phone
-  - safety sign
-  - weight limit sign
-  - ventilation grille
-  - door frame
-  - light fixture
-  - security camera
-  - speaker
-  - card reader
-  - threshold plate
-  - door track
+  - security_camera
 segmentation:
   enabled: true
   device: auto

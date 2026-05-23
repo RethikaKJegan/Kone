@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import contextlib
+import io
+import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -25,17 +28,34 @@ MAIN2_PATH = ROOT / "main2.py"
 _MAIN2: Any | None = None
 _GDINO_CACHE: dict[str, Any] = {}
 _SAM2_CACHE: dict[str, Any] = {}
+LOGGER = logging.getLogger(__name__)
+NORMALIZED_COMPONENT_PROMPTS: dict[str, list[str]] = {
+    "elevator_button_panel": ["elevator button panel", "elevator control panel", "elevator call button", "COP", "car operating panel", "button panel", "control panel"],
+    "floor_indicator_display": ["floor indicator display", "elevator floor indicator"],
+    "weight_limit_sign": ["weight limit sign", "elevator capacity sign", "capacity sign"],
+    "accessibility_control_panel": ["accessibility control panel", "wheelchair button", "accessible elevator panel"],
+    "elevator_door": ["elevator door", "elevator doors"],
+    "elevator_cabin": ["elevator cabin", "elevator interior", "inside elevator"],
+    "threshold_plate": ["elevator threshold plate", "door sill", "metal threshold plate"],
+    "handrail": ["elevator handrail", "handrail"],
+    "security_camera": ["security camera", "surveillance camera"],
+}
+NORMALIZED_COMPONENT_TYPES = set(NORMALIZED_COMPONENT_PROMPTS)
 
 
 def run_detection(image_path: str | Path, cfg: dict[str, Any], out_json: str | Path) -> dict[str, Any]:
     main2 = _load_main2()
+    LOGGER.info("[LOAD] Loading input image: %s", image_path)
     image_np, image_tensor = main2.load_rgb_image(_resolve_path(image_path))
     height, width = image_np.shape[:2]
     labels = cfg["detection"]["labels"]
     prompt = _labels_to_prompt(labels)
     device = main2.select_device(cfg["detection"].get("device", "auto"))
+    LOGGER.info("[MODEL] Loading GroundingDINO detector")
     model = _load_groundingdino(device)
 
+    LOGGER.info("[DETECT] Running elevator detection")
+    LOGGER.info("[DETECT] Running component detection: %s", ", ".join(NORMALIZED_COMPONENT_PROMPTS))
     with torch.inference_mode():
         boxes, logits, phrases = main2.predict_groundingdino(
             model=model,
@@ -58,6 +78,7 @@ def run_detection(image_path: str | Path, cfg: dict[str, Any], out_json: str | P
         min_area_ratio=float(cfg["detection"].get("min_box_area_ratio", 0.00005)),
     )
     detections = [_detection_to_dict(det, idx, labels) for idx, det in enumerate(chosen)]
+    LOGGER.info("[NORMALIZE] Mapping raw labels to normalized component types")
     if bool(cfg["detection"].get("enable_geometry_validation", True)):
         detections = _apply_cross_label_nms(
             detections,
@@ -156,7 +177,8 @@ def _load_main2() -> Any:
 def _load_groundingdino(device: str) -> Any:
     if device not in _GDINO_CACHE:
         main2 = _load_main2()
-        _GDINO_CACHE[device] = main2.load_groundingdino_model(main2.CONFIG_PATH, main2.DINO_WEIGHTS, device=device)
+        with contextlib.redirect_stdout(io.StringIO()):
+            _GDINO_CACHE[device] = main2.load_groundingdino_model(main2.CONFIG_PATH, main2.DINO_WEIGHTS, device=device)
     return _GDINO_CACHE[device]
 
 
@@ -166,17 +188,28 @@ def _resolve_path(path: str | Path) -> Path:
 
 
 def _labels_to_prompt(labels: list[str]) -> str:
-    prompt = " . ".join(label.strip().lower() for label in labels if label.strip()).rstrip(". ")
+    prompt_labels: list[str] = []
+    for label in labels:
+        normalized = label.strip().lower()
+        prompt_labels.extend(NORMALIZED_COMPONENT_PROMPTS.get(normalized, [normalized]))
+    prompt = " . ".join(label for label in dict.fromkeys(prompt_labels) if label).rstrip(". ")
     return prompt if prompt.endswith(".") else f"{prompt}."
 
 
 def _detection_to_dict(det: Any, idx: int, labels: list[str]) -> dict[str, Any]:
-    phrase = _canonical_phrase(str(det.phrase), labels)
+    raw_label = str(det.phrase).lower().strip()
+    phrase = _canonical_phrase(raw_label, labels)
     x1, y1, x2, y2 = [float(v) for v in det.box_xyxy]
     area = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    normalized_type = _normalized_component_type(phrase)
+    if normalized_type == "weight_limit_sign":
+        phrase = "weight limit sign"
     return {
         "id": idx,
         "phrase": phrase,
+        "raw_detection_label": raw_label,
+        "source_prompt": phrase,
+        "normalized_component_type": normalized_type,
         "score": float(det.score),
         "box_xyxy": [x1, y1, x2, y2],
         "box_xywh": [x1, y1, x2 - x1, y2 - y1],
@@ -186,11 +219,42 @@ def _detection_to_dict(det: Any, idx: int, labels: list[str]) -> dict[str, Any]:
 
 def _canonical_phrase(phrase: str, labels: list[str]) -> str:
     lower = phrase.lower().strip()
-    label_lowers = [label.lower() for label in labels]
+    label_lowers: list[str] = []
+    for label in labels:
+        normalized = label.lower().strip()
+        label_lowers.append(normalized)
+        label_lowers.extend(NORMALIZED_COMPONENT_PROMPTS.get(normalized, []))
     if lower in label_lowers:
         return lower
     matches = [label.lower() for label in labels if label.lower() in lower or lower in label.lower()]
+    for normalized, prompts in NORMALIZED_COMPONENT_PROMPTS.items():
+        if normalized in lower:
+            matches.append(normalized)
+        matches.extend(prompt for prompt in prompts if prompt in lower or lower in prompt)
     return max(matches, key=len) if matches else lower or "elevator component"
+
+
+def _normalized_component_type(phrase: str) -> str | None:
+    lower = phrase.lower().strip()
+    if any(term in lower for term in ("wheelchair", "accessibility", "accessible elevator", "accessible panel")):
+        return "accessibility_control_panel"
+    if any(term in lower for term in ("capacity", "weight limit", "load limit", "maximum load")):
+        return "weight_limit_sign"
+    if any(term in lower for term in ("floor indicator", "indicator display", "digital floor display", "elevator display")):
+        return "floor_indicator_display"
+    if any(term in lower for term in ("button panel", "call button", "elevator button", "control panel", "car operating panel", "cop")):
+        return "elevator_button_panel"
+    if any(term in lower for term in ("elevator door", "elevator doors", "door frame", "elevator opening", "lift entrance")):
+        return "elevator_door"
+    if any(term in lower for term in ("threshold plate", "door sill", "metal threshold plate", "door track")):
+        return "threshold_plate"
+    if "handrail" in lower:
+        return "handrail"
+    if any(term in lower for term in ("security camera", "surveillance camera")):
+        return "security_camera"
+    if any(term in lower for term in ("elevator cabin", "elevator interior", "inside elevator", "elevator ceiling", "elevator floor", "mirror")):
+        return "elevator_cabin"
+    return None
 
 
 def _apply_cross_label_nms(detections: list[dict[str, Any]], iou_threshold: float) -> list[dict[str, Any]]:
@@ -216,7 +280,7 @@ def _apply_cross_label_nms(detections: list[dict[str, Any]], iou_threshold: floa
 def _component_group(phrase: str) -> str:
     if any(term in phrase for term in ("floor indicator", "display")):
         return "floor_indicator"
-    if any(term in phrase for term in ("button", "control", "card reader", "elevator panel")):
+    if any(term in phrase for term in ("button", "control", "card reader", "elevator panel", "accessibility", "wheelchair")):
         return "control_panel"
     if any(term in phrase for term in ("door", "frame", "opening", "interior")):
         return "elevator_opening"
@@ -246,6 +310,9 @@ def _ensure_elevator_door_detection(image_rgb: np.ndarray, detections: list[dict
         {
             "id": len(detections),
             "phrase": "elevator door",
+            "raw_detection_label": "image_structure_fallback",
+            "source_prompt": "elevator door",
+            "normalized_component_type": "elevator_door",
             "score": 0.24,
             "box_xyxy": [x1, y1, x2, y2],
             "box_xywh": [x1, y1, x2 - x1, y2 - y1],

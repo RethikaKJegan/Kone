@@ -8,6 +8,29 @@ preprocessing:
   max_roll_degrees: 12.0
   max_horizontal_shift_ratio: 0.035
 
+input_validation:
+  enabled: true
+  fail_on_invalid: true
+  require_elevator: true
+  weights:
+    perspective: 0.40
+    visibility: 0.20
+    sharpness: 0.10
+    exposure: 0.10
+    context: 0.10
+    crop_scale: 0.10
+  hard_fails:
+    perspective_fail: 0.62
+    perspective_review: 0.68
+    visibility_min: 0.40
+    sharpness_extreme_min: 0.05
+    min_short_side: 420
+  thresholds:
+    pass: 0.65
+    review: 0.55
+  elevator_presence:
+    min_score: 0.22
+
 detection:
   enabled: true
   model_id: groundingdino_swint_ogc
@@ -23,33 +46,15 @@ detection:
   min_box_area_ratio: 0.00005
   max_box_area_ratio: 0.90
   labels:
-    - elevator door
-    - elevator wall
-    - elevator panel
-    - elevator ceiling
-    - elevator floor
-    - elevator button panel
-    - call button
-    - floor indicator display
-    - floor indicator
-    - elevator floor indicator
-    - indicator display
-    - digital floor display
-    - elevator display
-    - display panel above elevator
+    - elevator_button_panel
+    - floor_indicator_display
+    - weight_limit_sign
+    - accessibility_control_panel
+    - elevator_door
+    - elevator_cabin
+    - threshold_plate
     - handrail
-    - mirror
-    - emergency phone
-    - safety sign
-    - weight limit sign
-    - ventilation grille
-    - door frame
-    - light fixture
-    - security camera
-    - speaker
-    - card reader
-    - threshold plate
-    - door track
+    - security_camera
 
 segmentation:
   enabled: true
@@ -105,6 +110,7 @@ insertion:
     - speaker
   manual_box_xyxy: null     # Example: [95, 415, 140, 560]
   fallback_box_ratio_xyxy: [0.145, 0.39, 0.255, 0.61]
+  adjacent_wall_min_margin_ratio: 0.055
   size_mode: fit_box         # fit_box, preserve_asset, or fixed_height
   fixed_height_px: null
   allow_upscale: false
