@@ -32,8 +32,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "elevator_presence": {
         "min_score": 0.22,
+        "door_min_score": 0.30,
+        "cabin_min_score": 0.34,
+        "panel_min_score": 0.25,
         "valid_types": [
-            "elevator_button_panel",
+            "tall stainless steel elevator operating panel with round buttons",
+            "elevator call button panel",
+            "wheelchair button",
             "accessibility_control_panel",
             "floor_indicator_display",
             "weight_limit_sign",
@@ -321,24 +326,102 @@ def validate_elevator_presence(detections: dict[str, Any], cfg: dict[str, Any]) 
     presence_cfg = validation_cfg["elevator_presence"]
     valid_types = {str(item).lower() for item in presence_cfg["valid_types"]}
     min_score = float(presence_cfg["min_score"])
+    meta = detections.get("metadata", {})
+    image_w = int(meta.get("image_width", 0) or 0)
+    image_h = int(meta.get("image_height", 0) or 0)
     matches = []
+    rejected = []
     for det in detections.get("detections", []):
         norm = str(det.get("normalized_component_type") or det.get("phrase") or "").strip().lower()
         score = float(det.get("score", 0.0) or 0.0)
-        if norm in valid_types and score >= min_score:
+        valid, reason = elevator_detection_is_reliable(det, norm, score, image_w, image_h, valid_types, min_score, presence_cfg)
+        record = {
+            "normalized_component_type": norm,
+            "raw_detection_label": det.get("raw_detection_label", det.get("phrase")),
+            "score": score,
+            "bbox": det.get("box_xyxy"),
+        }
+        if valid:
             matches.append(
-                {
-                    "normalized_component_type": norm,
-                    "raw_detection_label": det.get("raw_detection_label", det.get("phrase")),
-                    "score": score,
-                    "bbox": det.get("box_xyxy"),
-                }
+                record
             )
+        elif norm in valid_types:
+            record["reason"] = reason
+            rejected.append(record)
     valid = bool(matches)
     return {
         "result": "PASS" if valid else "FAIL",
         "valid": valid,
         "matched_elevator_components": matches,
+        "rejected_elevator_components": rejected,
         "reason": None if valid else "No elevator-related component was detected with sufficient confidence.",
         "suggestions": [] if valid else ["Upload an image that clearly contains an elevator, elevator doorway, cabin, or elevator control panel."],
     }
+
+
+def elevator_detection_is_reliable(
+    det: dict[str, Any],
+    norm: str,
+    score: float,
+    image_w: int,
+    image_h: int,
+    valid_types: set[str],
+    min_score: float,
+    presence_cfg: dict[str, Any],
+) -> tuple[bool, str | None]:
+    if norm not in valid_types:
+        return False, "not an elevator validation type"
+    if score < min_score:
+        return False, "below minimum confidence"
+    x1, y1, x2, y2 = [float(v) for v in det.get("box_xyxy", [0, 0, 0, 0])]
+    bw = max(0.0, x2 - x1)
+    bh = max(0.0, y2 - y1)
+    image_area = max(float(image_w * image_h), 1.0)
+    area_ratio = (bw * bh) / image_area
+    aspect = bh / max(bw, 1.0)
+    raw = str(det.get("raw_detection_label", det.get("phrase", ""))).lower()
+    source = str(det.get("source", "")).lower()
+
+    if source == "image_structure_fallback" or raw == "image_structure_fallback":
+        return False, "image-structure fallback is not enough for input validation"
+
+    if norm in {
+        "tall stainless steel elevator operating panel with round buttons",
+        "elevator call button panel",
+        "wheelchair button",
+        "accessibility_control_panel",
+        "floor_indicator_display",
+        "weight_limit_sign",
+    }:
+        if score < float(presence_cfg.get("panel_min_score", 0.25)):
+            return False, "panel/sign confidence too low"
+        if area_ratio > 0.22:
+            return False, "panel/sign detection is implausibly large"
+        return True, None
+
+    if norm == "elevator_door":
+        if score < float(presence_cfg.get("door_min_score", 0.30)):
+            return False, "door confidence too low"
+        if not (0.015 <= area_ratio <= 0.55):
+            return False, "door area is not plausible"
+        if aspect < 0.85:
+            return False, "door is not vertical enough"
+        return True, None
+
+    if norm == "elevator_cabin":
+        if score < float(presence_cfg.get("cabin_min_score", 0.34)):
+            return False, "cabin/interior confidence too low"
+        if area_ratio > 0.70:
+            return False, "cabin/interior covers nearly the whole image"
+        if aspect < 0.75:
+            return False, "cabin/interior is not vertical enough"
+        return True, None
+
+    if norm in {"threshold_plate", "handrail", "security_camera"}:
+        if score < max(min_score, 0.32):
+            return False, "supporting component confidence too low"
+        if area_ratio > 0.18:
+            return False, "supporting component is implausibly large"
+        return True, None
+
+    return False, "unsupported validation type"

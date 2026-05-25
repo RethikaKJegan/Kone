@@ -12,9 +12,11 @@ from .utils import load_image_rgba, load_image_rgb, save_rgb, select_detection, 
 
 LOGGER = logging.getLogger(__name__)
 
-
-VALID_MOD_PANEL_TARGETS = {"accessibility_control_panel", "elevator_button_panel"}
+OPERATING_PANEL_CLASS = "tall stainless steel elevator operating panel with round buttons"
+VALID_MOD_PANEL_TARGETS = {OPERATING_PANEL_CLASS, "elevator call button panel"}
 INVALID_MOD_PANEL_TARGETS = {
+    "accessibility_control_panel",
+    "wheelchair button",
     "weight_limit_sign",
     "floor_indicator_display",
     "elevator_door",
@@ -70,9 +72,18 @@ def preselect_mod_panel_placement(
     mod = close_internal_alpha_holes(load_image_rgba(mod_path))
     height, width = image_rgb.shape[:2]
     target_box, reason = _target_box(width, height, detections, cfg, mod.shape[:2], removal_mask, image_rgb)
+    inpaint_box, cleanup_debug = extend_inpaint_bbox_for_aligned_panel_artifacts(target_box, detections.get("detections", []), width, height)
     cfg.setdefault("_placement_debug", {})
-    cfg["_placement_debug"].update({"placement_preselected": True, "preselected_reason": reason, "inpaint_bbox": target_box})
-    return target_box
+    cfg["_placement_debug"].update(
+        {
+            "placement_preselected": True,
+            "preselected_reason": reason,
+            "insert_bbox": target_box,
+            "inpaint_bbox": inpaint_box,
+            "aligned_artifact_cleanup": cleanup_debug,
+        }
+    )
+    return inpaint_box
 
 
 def localized_mask_from_bbox(image_shape: tuple[int, int] | tuple[int, int, int], bbox: list[int], pad: int = 0) -> np.ndarray:
@@ -91,8 +102,10 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
     ins = cfg["insertion"]
     if ins.get("manual_box_xyxy"):
         return [int(v) for v in ins["manual_box_xyxy"]], "manual_box_xyxy"
-    if cfg.get("_placement_debug", {}).get("placement_preselected") and cfg.get("_placement_debug", {}).get("inpaint_bbox"):
-        return [int(v) for v in cfg["_placement_debug"]["inpaint_bbox"]], str(cfg["_placement_debug"].get("preselected_reason", "preselected_target"))
+    if cfg.get("_placement_debug", {}).get("placement_preselected"):
+        selected = cfg.get("_placement_debug", {}).get("insert_bbox") or cfg.get("_placement_debug", {}).get("inpaint_bbox")
+        if selected:
+            return [int(v) for v in selected], str(cfg["_placement_debug"].get("preselected_reason", "preselected_target"))
     elevator_roi = selected_elevator_roi_for_placement(width, height, detections, cfg, image) if image is not None else None
     credible_elevator_roi = elevator_roi if has_credible_elevator_detection(detections, width, height) else None
     rejected_components: list[dict[str, Any]] = []
@@ -104,8 +117,9 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
             cfg["_placement_debug"] = {"rejected_component_detections": rejected_components}
             if det:
                 detection_box = [int(round(v)) for v in det["box_xyxy"]]
-                panel_box, expansion_debug = expand_control_panel_bbox(image, detections["detections"], detection_box, width, height)
+                panel_box, expansion_debug = expand_control_panel_bbox(image, detections["detections"], detection_box, width, height, det.get("normalized_component_type"))
                 target_box = padded_box(panel_box, width, height, int(ins.get("existing_panel_padding_px", 4)))
+                target_box, target_clamp_debug = clamp_existing_panel_target_box(target_box, width, height, cfg)
                 cfg["_placement_debug"].update(
                     {
                         "requested_component_type": "elevator_mod_panel",
@@ -115,6 +129,7 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
                         "target_panel_bbox": panel_box,
                         "target_panel_expansion": expansion_debug,
                         "target_padding_px": int(ins.get("existing_panel_padding_px", 4)),
+                        "target_box_clamp": target_clamp_debug,
                         "inpaint_bbox": target_box,
                         "scale_to_target_bbox": True,
                         "placement_mode": "existing_panel",
@@ -184,8 +199,13 @@ def select_mod_panel_target(
                 rejected.append(rejection_debug(det, reason))
             continue
         valid.append(det)
-    priority = {"accessibility_control_panel": 0, "elevator_button_panel": 1}
-    return min(valid, key=lambda det: (priority.get(str(det.get("normalized_component_type")), 9), -float(det.get("score", 0.0)))) if valid else None
+    if not valid:
+        return None
+    panels = [det for det in valid if str(det.get("normalized_component_type")) == OPERATING_PANEL_CLASS]
+    if panels:
+        return max(panels, key=lambda det: _box_area(det.get("box_xyxy", [0, 0, 0, 0])) * (0.70 + float(det.get("score", 0.0))))
+    priority = {OPERATING_PANEL_CLASS: 0, "elevator call button panel": 1}
+    return min(valid, key=lambda det: (priority.get(str(det.get("normalized_component_type")), 9), -float(det.get("score", 0.0))))
 
 
 def invalid_mod_panel_target_reason(det: dict[str, Any], width: int, height: int, elevator_roi: list[int] | None) -> str | None:
@@ -193,7 +213,7 @@ def invalid_mod_panel_target_reason(det: dict[str, Any], width: int, height: int
     phrase = str(det.get("phrase") or "").lower()
     if norm in INVALID_MOD_PANEL_TARGETS:
         return f"not valid for elevator_mod_panel"
-    if norm not in VALID_MOD_PANEL_TARGETS and not any(term in phrase for term in ("cop", "car operating panel", "control panel", "button panel")):
+    if norm not in VALID_MOD_PANEL_TARGETS:
         return "not a valid elevator_mod_panel target"
     x1, y1, x2, y2 = [float(v) for v in det.get("box_xyxy", [0, 0, 0, 0])]
     bw, bh = max(1.0, x2 - x1), max(1.0, y2 - y1)
@@ -228,50 +248,183 @@ def padded_box(box: list[int], width: int, height: int, pad: int) -> list[int]:
     return [max(0, x1 - pad), max(0, y1 - pad), min(width, x2 + pad), min(height, y2 + pad)]
 
 
+def extend_inpaint_bbox_for_aligned_panel_artifacts(
+    target_box: list[int],
+    detections: list[dict[str, Any]],
+    width: int,
+    height: int,
+) -> tuple[list[int], dict[str, Any]]:
+    x1, y1, x2, y2 = [int(v) for v in target_box]
+    target_w, target_h = max(1, x2 - x1), max(1, y2 - y1)
+    cleanup_box = [x1, y1, x2, y2]
+    included: list[dict[str, Any]] = []
+    for det in detections:
+        norm = str(det.get("normalized_component_type") or "").lower()
+        phrase = str(det.get("phrase") or "").lower()
+        if norm not in {"floor_indicator_display"} and not any(term in phrase for term in ("indicator", "display")):
+            continue
+        bx1, by1, bx2, by2 = [int(round(v)) for v in det.get("box_xyxy", [0, 0, 0, 0])]
+        bw, bh = max(1, bx2 - bx1), max(1, by2 - by1)
+        horizontal_overlap = max(0, min(x2, bx2) - max(x1, bx1)) / max(1, min(target_w, bw))
+        vertical_gap = y1 - by2
+        if horizontal_overlap >= 0.45 and -int(target_h * 0.22) <= vertical_gap <= int(target_h * 0.55) and bh <= target_h * 1.20:
+            cleanup_box = [min(cleanup_box[0], bx1), min(cleanup_box[1], by1), max(cleanup_box[2], bx2), max(cleanup_box[3], by2)]
+            included.append(
+                {
+                    "bbox": [bx1, by1, bx2, by2],
+                    "normalized_component_type": norm,
+                    "phrase": det.get("phrase"),
+                    "reason": "aligned_display_artifact_above_panel",
+                }
+            )
+    if not included:
+        return target_box, {"status": "not_needed"}
+    cleanup_box = padded_box(cleanup_box, width, height, max(2, int(min(target_w, target_h) * 0.08)))
+    LOGGER.info("[INPAINT] Extending cleanup bbox for aligned old panel artifacts: %s", cleanup_box)
+    return cleanup_box, {"status": "extended", "included_artifacts": included, "cleanup_bbox": cleanup_box}
+
+
+def _box_area(box: Any) -> float:
+    try:
+        x1, y1, x2, y2 = [float(v) for v in box]
+    except Exception:
+        return 0.0
+    return max(1.0, x2 - x1) * max(1.0, y2 - y1)
+
+
+def clamp_existing_panel_target_box(box: list[int], width: int, height: int, cfg: dict[str, Any]) -> tuple[list[int], dict[str, Any]]:
+    x1, y1, x2, y2 = [int(v) for v in box]
+    box_w, box_h = max(1, x2 - x1), max(1, y2 - y1)
+    image_area = max(1, width * height)
+    area_ratio = (box_w * box_h) / image_area
+    max_ratio = float(cfg["insertion"].get("max_existing_panel_target_area_ratio", cfg["insertion"].get("max_insert_area_ratio", 0.12)))
+    if area_ratio <= max_ratio:
+        return [x1, y1, x2, y2], {"status": "not_clamped", "area_ratio": float(area_ratio), "max_area_ratio": max_ratio}
+
+    shrink = (max_ratio / max(area_ratio, 1e-6)) ** 0.5
+    new_w = max(2, int(round(box_w * shrink)))
+    new_h = max(2, int(round(box_h * shrink)))
+    cx = (x1 + x2) * 0.5
+    cy = (y1 + y2) * 0.5
+    nx1 = int(round(cx - new_w * 0.5))
+    ny1 = int(round(cy - new_h * 0.5))
+    nx1 = int(np.clip(nx1, 0, max(0, width - new_w)))
+    ny1 = int(np.clip(ny1, 0, max(0, height - new_h)))
+    clamped = [nx1, ny1, min(width, nx1 + new_w), min(height, ny1 + new_h)]
+    clamped_ratio = ((clamped[2] - clamped[0]) * (clamped[3] - clamped[1])) / image_area
+    LOGGER.info("[TARGET] Clamped oversized panel target area %.3f -> %.3f", area_ratio, clamped_ratio)
+    return clamped, {
+        "status": "clamped",
+        "reason": "max_existing_panel_target_area_ratio",
+        "original_bbox": [x1, y1, x2, y2],
+        "original_area_ratio": float(area_ratio),
+        "clamped_bbox": clamped,
+        "clamped_area_ratio": float(clamped_ratio),
+        "max_area_ratio": max_ratio,
+    }
+
+
 def expand_control_panel_bbox(
     image_rgb: np.ndarray | None,
     detections: list[dict[str, Any]],
     seed_box: list[int],
     width: int,
     height: int,
+    seed_type: str | None = None,
 ) -> tuple[list[int], dict[str, Any]]:
-    panel_types = {"elevator_button_panel", "accessibility_control_panel", "floor_indicator_display", "weight_limit_sign"}
+    panel_types = {OPERATING_PANEL_CLASS, "elevator call button panel"}
     x1, y1, x2, y2 = seed_box
     seed_w = max(1, x2 - x1)
     seed_cx = (x1 + x2) * 0.5
     members: list[dict[str, Any]] = []
+    explicit_members: list[list[int]] = []
+    deferred_cop_members: list[tuple[list[int], dict[str, Any]]] = []
     union = [x1, y1, x2, y2]
     supporting_members = 0
     for det in detections:
         norm = str(det.get("normalized_component_type") or "").lower()
         phrase = str(det.get("phrase") or "").lower()
-        if norm not in panel_types and not any(term in phrase for term in ("cop", "control panel", "button panel", "call button", "wheelchair button")):
+        if norm in INVALID_MOD_PANEL_TARGETS:
+            continue
+        if norm not in panel_types:
             continue
         box = [int(round(v)) for v in det.get("box_xyxy", [0, 0, 0, 0])]
         bx1, by1, bx2, by2 = box
         bw, bh = max(1, bx2 - bx1), max(1, by2 - by1)
+        box_area_ratio = (bw * bh) / max(width * height, 1)
+        if box_area_ratio > 0.10:
+            continue
         bcx = (bx1 + bx2) * 0.5
         horizontal_overlap = max(0, min(x2, bx2) - max(x1, bx1)) / max(1, min(seed_w, bw))
         same_column = horizontal_overlap >= 0.28 or abs(bcx - seed_cx) <= max(seed_w * 0.75, width * 0.055)
         vertical_gap = max(0, max(y1, by1) - min(y2, by2))
+        same_physical_panel = vertical_gap <= max(height * 0.035, seed_box_height(seed_box) * 0.85) or horizontal_overlap >= 0.70
+        if seed_type and norm != str(seed_type).lower():
+            continue
         if same_column and vertical_gap <= height * 0.26:
-            union = [min(union[0], bx1), min(union[1], by1), max(union[2], bx2), max(union[3], by2)]
-            if box != seed_box:
-                supporting_members += 1
-            members.append(
-                {
-                    "bbox": box,
-                    "normalized_component_type": norm,
-                    "phrase": det.get("phrase"),
-                    "score": det.get("score"),
-                }
-            )
+            member_debug = {
+                "bbox": box,
+                "normalized_component_type": norm,
+                "phrase": det.get("phrase"),
+                "score": det.get("score"),
+            }
+        union = [min(union[0], bx1), min(union[1], by1), max(union[2], bx2), max(union[3], by2)]
+        explicit_members.append(box)
+        if box != seed_box:
+            supporting_members += 1
+        members.append(member_debug)
 
+    explicit_union = union.copy()
+    explicit_area = _box_area(explicit_union)
+    for box, member_debug in deferred_cop_members:
+        if explicit_members and _box_area(box) > explicit_area * 2.25:
+            members.append({**member_debug, "excluded_from_expansion_reason": "raw_cop_box_larger_than_explicit_button_panel"})
+            continue
+        bx1, by1, bx2, by2 = box
+        union = [min(union[0], bx1), min(union[1], by1), max(union[2], bx2), max(union[3], by2)]
+        if box != seed_box:
+            supporting_members += 1
+        members.append(member_debug)
+
+    member_union = union.copy()
     if supporting_members > 0:
-        union = grow_to_visible_panel_plate(image_rgb, union, width, height)
+        grown = grow_to_visible_panel_plate(image_rgb, union, width, height)
+        union, expansion_limit_debug = bound_panel_expansion_to_members(grown, member_union, width, height)
     else:
         union = padded_box(union, width, height, max(3, int(width * 0.01)))
-    return union, {"seed_bbox": seed_box, "member_detections": members, "expanded_bbox": union}
+        expansion_limit_debug = {"status": "not_needed"}
+    return union, {"seed_bbox": seed_box, "seed_type": seed_type, "member_detections": members, "member_union_bbox": member_union, "expanded_bbox": union, "expansion_limit": expansion_limit_debug}
+
+
+def seed_box_height(box: list[int]) -> int:
+    return max(1, int(box[3]) - int(box[1]))
+
+
+def bound_panel_expansion_to_members(grown_box: list[int], member_union: list[int], width: int, height: int) -> tuple[list[int], dict[str, Any]]:
+    gx1, gy1, gx2, gy2 = [int(v) for v in grown_box]
+    ux1, uy1, ux2, uy2 = [int(v) for v in member_union]
+    grown_w, grown_h = max(1, gx2 - gx1), max(1, gy2 - gy1)
+    member_w, member_h = max(1, ux2 - ux1), max(1, uy2 - uy1)
+    grown_area_ratio = (grown_w * grown_h) / max(width * height, 1)
+    max_area_ratio = 0.10
+    max_w = max(member_w + int(width * 0.06), int(member_w * 1.65))
+    max_h = max(member_h + int(height * 0.10), int(member_h * 1.55))
+    too_large = grown_area_ratio > max_area_ratio or grown_w > max_w or grown_h > max_h
+    if not too_large:
+        return [gx1, gy1, gx2, gy2], {"status": "not_clamped", "area_ratio": float(grown_area_ratio)}
+
+    pad_x = max(4, int(min(width * 0.018, member_w * 0.35)))
+    pad_y = max(6, int(min(height * 0.030, member_h * 0.22)))
+    bounded = padded_box([ux1, uy1, ux2, uy2], width, height, max(pad_x, pad_y))
+    LOGGER.info("[TARGET] Rejected over-expanded panel plate %s; using bounded member union %s", grown_box, bounded)
+    return bounded, {
+        "status": "clamped",
+        "reason": "grown_panel_plate_too_large_or_crossed_wall",
+        "grown_bbox": [gx1, gy1, gx2, gy2],
+        "grown_area_ratio": float(grown_area_ratio),
+        "member_union_bbox": [ux1, uy1, ux2, uy2],
+        "bounded_bbox": bounded,
+    }
 
 
 def grow_to_visible_panel_plate(image_rgb: np.ndarray | None, box: list[int], width: int, height: int) -> list[int]:
@@ -449,12 +602,6 @@ def select_valid_component_detection(
         select_detection(detections, keywords),
     ]
     candidates = [det for det in ordered if det is not None]
-    if _needs_contextual_panel_fallback(keywords):
-        candidates.extend(
-            det
-            for det in detections
-            if det.get("normalized_component_type") == "accessibility_control_panel" and det not in candidates
-        )
     if not candidates:
         return None
     valid = []
@@ -489,7 +636,7 @@ def _valid_component_detection(det: dict[str, Any], keywords: list[str], width: 
             return False, "ambiguous_panel_label"
         if det.get("normalized_component_type") == "weight_limit_sign" or any(term in phrase for term in ("weight", "capacity", "limit")):
             return False, "sign_not_external_control_panel"
-        if elevator_roi and det.get("normalized_component_type") not in {"accessibility_control_panel"}:
+        if elevator_roi and det.get("normalized_component_type") not in {"accessibility_control_panel", OPERATING_PANEL_CLASS, "elevator call button panel"}:
             det_box = [int(round(v)) for v in det.get("box_xyxy", [0, 0, 0, 0])]
             if box_overlap_fraction(det_box, elevator_roi) > 0.20:
                 LOGGER.info("[PLACE] Rejected detected panel inside elevator opening: %s", det_box)
@@ -499,8 +646,6 @@ def _valid_component_detection(det: dict[str, Any], keywords: list[str], width: 
         return (0.00004 <= area_ratio <= 0.16 and 0.45 <= aspect <= 8.5 and near_side_wall), "invalid_external_panel_geometry"
     if "emergency" in target_text:
         return (area_ratio <= 0.18 and bh / bw <= 5.5), "invalid_emergency_component_geometry"
-    if det.get("normalized_component_type") == "accessibility_control_panel":
-        return True, "valid_accessibility_control_panel"
     return (area_ratio <= 0.25), "invalid_component_area"
 
 
@@ -524,7 +669,7 @@ def _select_long_panel_detection(detections: list[dict[str, Any]], keywords: lis
     candidates: list[dict[str, Any]] = []
     for det in detections:
         phrase = det.get("phrase", "").lower()
-        if phrase not in {"door track", "threshold plate", "elevator button panel"}:
+        if phrase not in {"door track", "threshold plate", OPERATING_PANEL_CLASS, "elevator call button panel"}:
             continue
         x1, y1, x2, y2 = [float(v) for v in det["box_xyxy"]]
         box_w, box_h = max(1.0, x2 - x1), max(1.0, y2 - y1)
@@ -608,10 +753,13 @@ def _warp_mod_to_scene(mod: np.ndarray, box: list[int], geometry: dict[str, Any]
     native_scene_scale = max(1.0, native_scene_scale)
     if not cfg["insertion"].get("allow_upscale", False) and not placement_debug.get("scale_to_target_bbox"):
         scale = min(scale, native_scene_scale)
+    scale, scale_clamp_debug = clamp_insertion_scale(scale, [mw, mh], [x1, y1, x2, y2], out_hw, cfg)
     new_w, new_h = max(1, int(mw * scale)), max(1, int(mh * scale))
     validate_insertion_size([x1, y1, x2, y2], [new_w, new_h], out_hw, cfg)
     placement_debug["insertion_scale_factor"] = float(scale)
     placement_debug["insertion_scale_reason"] = scale_reason
+    if scale_clamp_debug:
+        placement_debug.update(scale_clamp_debug)
     placement_debug["insertion_size_validation_status"] = "passed"
     mod = cv2.resize(mod, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
 
@@ -639,6 +787,49 @@ def _warp_mod_to_scene(mod: np.ndarray, box: list[int], geometry: dict[str, Any]
     ]
     cfg["_placement_debug"] = placement_debug
     return warp_rgba_to_quad(mod, quad, out_hw)
+
+
+def clamp_insertion_scale(
+    scale: float,
+    mod_wh: list[int],
+    target_box: list[int],
+    out_hw: tuple[int, int],
+    cfg: dict[str, Any],
+) -> tuple[float, dict[str, Any]]:
+    image_h, image_w = out_hw
+    mod_w, mod_h = max(1, int(mod_wh[0])), max(1, int(mod_wh[1]))
+    target_w = max(1, target_box[2] - target_box[0])
+    target_h = max(1, target_box[3] - target_box[1])
+    original_scale = float(scale)
+    max_scale = original_scale
+    reasons: list[str] = []
+
+    max_area_ratio = float(cfg["insertion"].get("max_insert_area_ratio", 0.12))
+    max_area_px = max(1.0, image_w * image_h * max_area_ratio)
+    projected_area = (mod_w * original_scale) * (mod_h * original_scale)
+    if projected_area > max_area_px:
+        max_scale = min(max_scale, (max_area_px / max(mod_w * mod_h, 1)) ** 0.5)
+        reasons.append("max_insert_area_ratio")
+
+    if cfg.get("_placement_debug", {}).get("placement_mode") == "existing_panel":
+        max_factor = float(cfg["insertion"].get("existing_panel_max_scale_factor", 1.10))
+        panel_max_scale = min((target_w * max_factor) / mod_w, (target_h * max_factor) / mod_h)
+        if panel_max_scale < max_scale:
+            max_scale = panel_max_scale
+            reasons.append("existing_panel_max_scale_factor")
+
+    clamped_scale = max(0.001, min(original_scale, max_scale))
+    if clamped_scale >= original_scale:
+        return original_scale, {}
+
+    insert_w, insert_h = max(1, int(mod_w * clamped_scale)), max(1, int(mod_h * clamped_scale))
+    area_ratio = (insert_w * insert_h) / max(image_w * image_h, 1)
+    return clamped_scale, {
+        "insertion_scale_clamped": True,
+        "insertion_original_scale_factor": original_scale,
+        "insertion_scale_clamp_reasons": sorted(set(reasons)),
+        "insertion_area_ratio_after_clamp": float(area_ratio),
+    }
 
 
 def validate_insertion_size(target_box: list[int], insert_wh: list[int], out_hw: tuple[int, int], cfg: dict[str, Any]) -> None:

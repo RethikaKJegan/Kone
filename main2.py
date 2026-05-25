@@ -59,11 +59,48 @@ class Detection:
 	box_xyxy: np.ndarray
 	phrase: str
 	score: float
+	remove: bool = True
 
 	@property
 	def label(self) -> str:
 		phrase = self.phrase.strip() or "object"
 		return f"{phrase} {self.score:.2f}"
+
+
+ELEVATOR_COMPONENTS = [
+	"elevator interior",
+	"elevator door",
+	"elevator doors",
+	"car operating panel",
+	"elevator button panel",
+	"elevator button",
+	"wheelchair button",
+	"accessibility control panel",
+	"security camera",
+	"floor indicator",
+	"elevator display",
+	"call button",
+	"handrail",
+	"elevator floor",
+	"elevator wall",
+	"door frame",
+]
+
+COMPONENT_ALIASES = {
+	"elevator doors": "elevator door",
+	"door": "elevator door",
+	"doors": "elevator door",
+	"button panel": "elevator button panel",
+	"buttons": "elevator button",
+	"control panel": "car operating panel",
+	"operating panel": "car operating panel",
+	"accessibility panel": "accessibility control panel",
+	"display": "elevator display",
+	"indicator": "floor indicator",
+	"floor": "elevator floor",
+	"wall": "elevator wall",
+	"frame": "door frame",
+}
 
 
 def resolve_path(value: str | Path) -> Path:
@@ -109,6 +146,33 @@ def load_torch(path: Path):
 def preprocess_caption(caption: str) -> str:
 	result = caption.lower().strip()
 	return result if result.endswith(".") else result + "."
+
+
+def normalize_component_label(phrase: str, fallback: str) -> str:
+	cleaned = " ".join(phrase.lower().replace(".", " ").split())
+	if not cleaned:
+		cleaned = fallback.lower().strip()
+	for alias, label in COMPONENT_ALIASES.items():
+		if alias in cleaned:
+			return label
+	for component in ELEVATOR_COMPONENTS:
+		if component in cleaned or cleaned in component:
+			return COMPONENT_ALIASES.get(component, component)
+	return cleaned
+
+
+def should_use_component_caption(prompt: str, force: bool) -> bool:
+	if force:
+		return True
+	cleaned = prompt.lower().strip()
+	return cleaned in {"elevator", "elevator component", "elevator components", "components"}
+
+
+def build_detection_caption(prompt: str, force_components: bool) -> tuple[str, bool]:
+	use_components = should_use_component_caption(prompt, force_components)
+	if use_components:
+		return ". ".join(ELEVATOR_COMPONENTS), True
+	return prompt, False
 
 
 def load_groundingdino_model(config_path: Path, weights_path: Path, device: str):
@@ -211,6 +275,8 @@ def choose_detections(
 	fallback_phrase: str,
 	nms_threshold: float,
 	min_area_ratio: float,
+	component_mode: bool = False,
+	remove_prompt: str | None = None,
 ) -> list[Detection]:
 
 	if len(boxes) == 0:
@@ -242,7 +308,8 @@ def choose_detections(
 
 		score = float(scores[idx].item())
 
-		phrase = phrases[idx].strip().lower()
+		raw_phrase = phrases[idx].strip().lower()
+		phrase = normalize_component_label(raw_phrase, fallback_phrase) if component_mode else raw_phrase
 
 		x1, y1, x2, y2 = box
 
@@ -290,10 +357,7 @@ def choose_detections(
 		# FLOOR FILTERS
 		# ====================================================
 
-		if "floor" in phrase:
-
-			# floor must stay low
-
+		if "floor" in phrase and "indicator" not in phrase and "display" not in phrase:
 			if y1 < height * 0.60:
 				continue
 
@@ -377,6 +441,7 @@ def choose_detections(
 				box_xyxy=box.astype(np.float32),
 				phrase=phrase,
 				score=score,
+				remove=True,
 			)
 		)
 
@@ -414,6 +479,54 @@ def choose_detections(
 			final.append(
 				dets[int(k)]
 			)
+
+	if component_mode:
+		best_by_label: dict[str, Detection] = {}
+		for det in final:
+			existing = best_by_label.get(det.phrase)
+			if existing is None or det.score > existing.score:
+				best_by_label[det.phrase] = det
+		final = list(best_by_label.values())
+
+	# ========================================================
+	# CROSS-CLASS DUPLICATE SUPPRESSION
+	# ========================================================
+
+	final.sort(
+		key=lambda d: ((d.box_xyxy[2] - d.box_xyxy[0]) * (d.box_xyxy[3] - d.box_xyxy[1]), d.score),
+		reverse=False,
+	)
+
+	no_cross_duplicates: list[Detection] = []
+	broad_labels = {"elevator interior", "elevator wall", "elevator floor", "door frame"}
+
+	for det in final:
+		x1, y1, x2, y2 = det.box_xyxy
+		area_det = (x2 - x1) * (y2 - y1)
+		overlaps_existing = False
+
+		for existing in no_cross_duplicates:
+			ex1, ey1, ex2, ey2 = existing.box_xyxy
+			area_existing = (ex2 - ex1) * (ey2 - ey1)
+			ix1 = max(x1, ex1)
+			iy1 = max(y1, ey1)
+			ix2 = min(x2, ex2)
+			iy2 = min(y2, ey2)
+			inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+			broad_contains_component = (
+				det.phrase in broad_labels
+				and area_det > area_existing
+				and inter / max(area_existing, 1) > 0.85
+			)
+			near_duplicate = inter / max(area_det, 1) > 0.72 and det.phrase in broad_labels
+			if broad_contains_component or near_duplicate:
+				overlaps_existing = True
+				break
+
+		if not overlaps_existing:
+			no_cross_duplicates.append(det)
+
+	final = no_cross_duplicates
 
 	# ========================================================
 	# SORT
@@ -487,6 +600,19 @@ def choose_detections(
 
 		if keep_detection:
 			cleaned.append(det)
+
+	remove_target = (remove_prompt or "").lower().strip()
+	if remove_target:
+		for_remove = normalize_component_label(remove_target, remove_target)
+		cleaned = [
+			Detection(
+				box_xyxy=det.box_xyxy,
+				phrase=det.phrase,
+				score=det.score,
+				remove=(for_remove in det.phrase or det.phrase in for_remove),
+			)
+			for det in cleaned
+		]
 
 	return cleaned[:limit]
 
@@ -586,16 +712,27 @@ def make_mask(
 	dilate_radius: int,
 	min_component_area: int,
 	fill_holes: bool,
-) -> np.ndarray:
+) -> tuple[np.ndarray, list[np.ndarray]]:
 	predictor.set_image(image_rgb)
 	combined = np.zeros(image_rgb.shape[:2], dtype=bool)
+	per_detection_masks: list[np.ndarray] = []
 	for detection in detections:
-		combined |= make_mask_for_detection(
+		raw_mask = make_mask_for_detection(
 			predictor,
 			detection,
 			multimask=multimask,
 			use_center_point=use_center_point,
 		)
+		refined_single = postprocess_mask(
+			raw_mask,
+			close_radius=close_radius,
+			dilate_radius=dilate_radius,
+			min_component_area=min_component_area,
+			fill_holes=fill_holes,
+		)
+		per_detection_masks.append(refined_single.astype(np.uint8) * 255)
+		if detection.remove:
+			combined |= raw_mask
 	refined = postprocess_mask(
 		combined,
 		close_radius=close_radius,
@@ -603,35 +740,57 @@ def make_mask(
 		min_component_area=min_component_area,
 		fill_holes=fill_holes,
 	)
-	return refined.astype(np.uint8) * 255
+	return refined.astype(np.uint8) * 255, per_detection_masks
 
 
 def draw_detections(
 	image_rgb: np.ndarray,
 	detections: list[Detection],
-	mask: np.ndarray,
+	masks: list[np.ndarray],
 ) -> np.ndarray:
 	image = Image.fromarray(image_rgb).convert("RGBA")
 	overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-	mask_image = Image.fromarray((mask > 0).astype(np.uint8) * 120, mode="L")
-	overlay.paste((255, 64, 64, 120), mask=mask_image)
+	colors = [
+		(239, 68, 68, 120),
+		(59, 130, 246, 120),
+		(16, 185, 129, 120),
+		(245, 158, 11, 120),
+		(168, 85, 247, 120),
+		(236, 72, 153, 120),
+		(20, 184, 166, 120),
+		(250, 204, 21, 120),
+	]
+	for idx, mask in enumerate(masks):
+		mask_image = Image.fromarray((mask > 0).astype(np.uint8) * 130, mode="L")
+		overlay.paste(colors[idx % len(colors)], mask=mask_image)
 	image = Image.alpha_composite(image, overlay)
 
 	draw = ImageDraw.Draw(image)
 	font = ImageFont.load_default()
-	for detection in detections:
+	placed_labels: list[tuple[int, int, int, int]] = []
+	for idx, detection in enumerate(detections):
 		x1, y1, x2, y2 = detection.box_xyxy.astype(int).tolist()
-		draw.rectangle((x1, y1, x2, y2), outline=(44, 220, 112, 255), width=4)
+		outline = colors[idx % len(colors)][:3] + (255,)
+		draw.rectangle((x1, y1, x2, y2), outline=outline, width=3)
 		label = detection.label
 		left, top, right, bottom = draw.textbbox((x1, y1), label, font=font)
 		text_height = bottom - top
 		text_width = right - left
 		label_y = max(0, y1 - text_height - 8)
+		label_x = min(max(0, x1), max(0, image.width - text_width - 8))
+		label_box = [label_x, label_y, label_x + text_width + 8, label_y + text_height + 6]
+		while any(
+			not (label_box[2] < placed[0] or label_box[0] > placed[2] or label_box[3] < placed[1] or label_box[1] > placed[3])
+			for placed in placed_labels
+		):
+			label_box[1] = min(image.height - text_height - 6, label_box[1] + text_height + 8)
+			label_box[3] = label_box[1] + text_height + 6
+		placed_labels.append(tuple(label_box))
 		draw.rectangle(
-			(x1, label_y, x1 + text_width + 8, label_y + text_height + 6),
+			tuple(label_box),
 			fill=(15, 23, 42, 230),
 		)
-		draw.text((x1 + 4, label_y + 3), label, fill=(255, 255, 255, 255), font=font)
+		draw.text((label_box[0] + 4, label_box[1] + 3), label, fill=(255, 255, 255, 255), font=font)
 	return np.asarray(image.convert("RGB"))
 
 
@@ -706,9 +865,11 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--image", default=str(DEFAULT_IMAGE), help="Input image path")
 	parser.add_argument("--output-dir", default=str(ROOT), help="Directory for output images")
 	parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
+	parser.add_argument("--detect-components", action="store_true", help="Detect the built-in elevator component list instead of only the prompt")
+	parser.add_argument("--remove-prompt", help="Component to remove while still drawing all detected components")
 	parser.add_argument("--box-threshold", type=float, default=0.25)
 	parser.add_argument("--text-threshold", type=float, default=0.20)
-	parser.add_argument("--max-detections", type=int, default=5)
+	parser.add_argument("--max-detections", type=int, default=12)
 	parser.add_argument("--nms-threshold", type=float, default=0.65)
 	parser.add_argument("--min-detection-area", type=float, default=0.0005)
 	parser.add_argument("--sam2-config", default=SAM2_CONFIG)
@@ -737,6 +898,7 @@ def get_prompt(prompt: str | None) -> str:
 def main() -> int:
 	args = parse_args()
 	prompt = get_prompt(args.prompt)
+	detection_caption, component_mode = build_detection_caption(prompt, args.detect_components)
 	image_path = resolve_path(args.image)
 	output_dir = resolve_path(args.output_dir)
 	lama_model = resolve_path(args.lama_model)
@@ -757,6 +919,10 @@ def main() -> int:
 		torch.set_float32_matmul_precision("high")
 
 	print(f"Prompt: {prompt}")
+	if component_mode:
+		print(f"Detection prompt: elevator component preset ({len(ELEVATOR_COMPONENTS)} labels)")
+	if args.remove_prompt:
+		print(f"Removal target: {args.remove_prompt}")
 	print(f"Device: {device}")
 	print(f"LaMa device: {lama_device}")
 	print("Pipeline: GroundingDINO -> SAM2 -> LaMa")
@@ -770,7 +936,7 @@ def main() -> int:
 		boxes, logits, phrases = predict_groundingdino(
 			model=dino,
 			image=image,
-			caption=prompt,
+			caption=detection_caption,
 			box_threshold=args.box_threshold,
 			text_threshold=args.text_threshold,
 			device=device,
@@ -788,6 +954,8 @@ def main() -> int:
 			prompt,
 			nms_threshold=args.nms_threshold,
 			min_area_ratio=args.min_detection_area,
+			component_mode=component_mode,
+			remove_prompt=args.remove_prompt,
 		)
 		if not detections:
 			print("No object detected. Try lowering --box-threshold or changing the prompt.")
@@ -797,7 +965,7 @@ def main() -> int:
 		print("Loading SAM2...")
 		predictor = load_sam2_predictor(args.sam2_config, sam2_weights, device=device)
 		with autocast_for(device):
-			mask = make_mask(
+			mask, component_masks = make_mask(
 				predictor,
 				image_source,
 				detections,
@@ -812,7 +980,7 @@ def main() -> int:
 		clear_device_cache(device)
 
 		print("Inpainting with LaMa...")
-		detected_rgb = draw_detections(image_source, detections, mask)
+		detected_rgb = draw_detections(image_source, detections, component_masks)
 		final_rgb = inpaint_image(image_source, mask, lama_model, device, args)
 
 	outputs = {
@@ -833,4 +1001,3 @@ def main() -> int:
 
 if __name__ == "__main__":
 	raise SystemExit(main())
-

@@ -26,6 +26,7 @@ ROOT = _find_repo_root()
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 _MAIN2_MODULE: Any | None = None
+OPERATING_PANEL_CLASS = "tall stainless steel elevator operating panel with round buttons"
 
 
 def build_removal_mask(image: np.ndarray, detections: dict[str, Any], cfg: dict[str, Any]) -> np.ndarray:
@@ -83,11 +84,11 @@ def merge_nearby_component_modules(
     target_boxes = [
         det_box(det)
         for det in dets
-        if any(k in str(det.get("phrase", "")).lower() for k in ("elevator button panel", "elevator panel", "call button"))
+        if any(k in str(det.get("phrase", "")).lower() for k in (OPERATING_PANEL_CLASS, "elevator call button panel"))
     ]
     emergency_boxes = [det_box(det) for det in dets if "emergency phone" in str(det.get("phrase", "")).lower() or "emergency button" in str(det.get("phrase", "")).lower()]
 
-    if any(k in {"elevator panel", "elevator button panel", "call button"} for k in keywords):
+    if any(k in {OPERATING_PANEL_CLASS, "elevator call button panel"} for k in keywords):
         for box in target_boxes:
             for module_box, reason in candidate_control_modules(image, dets, box, gap, x_tol, width, height):
                 add_box_to_mask(out, module_box, pad=max(2, int(cfg["removal"].get("box_mask_padding_px", 2))))

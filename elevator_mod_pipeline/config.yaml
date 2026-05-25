@@ -46,10 +46,12 @@ detection:
   min_box_area_ratio: 0.00005
   max_box_area_ratio: 0.90
   labels:
-    - elevator_button_panel
+    - tall stainless steel elevator operating panel with round buttons
+    - elevator call button panel
+    - wheelchair button
     - floor_indicator_display
     - weight_limit_sign
-    - accessibility_control_panel
+    - accessibility control panel
     - elevator_door
     - elevator_cabin
     - threshold_plate
@@ -77,7 +79,8 @@ removal:
   # These detections become the LaMa mask. Tune this list per job.
   target_keywords:
     - elevator panel
-    - elevator button panel
+    - tall stainless steel elevator operating panel with round buttons
+    - elevator call button panel
     - call button
     - speaker
   mask_padding_px: 10
@@ -105,7 +108,8 @@ insertion:
   placement: detection
   target_keywords:
     - elevator panel
-    - elevator button panel
+    - tall stainless steel elevator operating panel with round buttons
+    - elevator call button panel
     - call button
     - speaker
   manual_box_xyxy: null     # Example: [95, 415, 140, 560]

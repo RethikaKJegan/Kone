@@ -21,6 +21,10 @@ from .video import render_elevator_video
 from .visualize import save_detection_visuals
 
 
+class PipelineValidationError(RuntimeError):
+    pass
+
+
 def run(config_path: str | Path) -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     logger = logging.getLogger(__name__)
@@ -76,7 +80,7 @@ def run(config_path: str | Path) -> None:
                         "pipeline_steps": status_entries,
                     },
                 )
-                raise RuntimeError(f"Image is not valid: {message}")
+                raise PipelineValidationError(f"Image is not valid: {message}")
             monitor.mark("input_validation_done")
         if cfg.get("preprocessing", {}).get("enabled", True):
             monitor.mark("preprocessing_start")
@@ -121,7 +125,7 @@ def run(config_path: str | Path) -> None:
                         "pipeline_steps": status_entries,
                     },
                 )
-                raise RuntimeError(f"Image is not valid: {elevator_presence['reason']}")
+                raise PipelineValidationError(f"Image is not valid: {elevator_presence['reason']}")
             status(
                 "elevator_presence_passed",
                 f"[VALIDATION] Elevator presence validation: PASS components={len(elevator_presence['matched_elevator_components'])}",
@@ -327,7 +331,13 @@ def elevator_present_for_video(detections: dict) -> bool:
     if width <= 0 or height <= 0:
         return False
     has_valid_panel_target = any(
-        str(det.get("normalized_component_type") or "").lower() in {"accessibility_control_panel", "elevator_button_panel"}
+        str(det.get("normalized_component_type") or "").lower()
+        in {
+            "tall stainless steel elevator operating panel with round buttons",
+            "elevator call button panel",
+            "wheelchair button",
+            "accessibility_control_panel",
+        }
         and float(det.get("score", 0.0)) >= 0.25
         for det in detections.get("detections", [])
     )
@@ -357,7 +367,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Detect elevator components, clean background, and insert a mod panel.")
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     args = parser.parse_args()
-    run(args.config)
+    try:
+        run(args.config)
+    except PipelineValidationError as exc:
+        print(f"[VALIDATION] {exc}")
+        raise SystemExit(2) from None
 
 
 if __name__ == "__main__":

@@ -60,7 +60,8 @@ def render_elevator_video(
         action = mode_request["requested_door_functionality"]
     bitrate = str(video_cfg.get("bitrate", "10000k"))
     no_audio = bool(video_cfg.get("no_audio", False))
-    cycle = bool(video_cfg.get("cycle", True)) and not mode_request["requested_door_functionality"]
+    auto_door_functionality = mode_request["requested_video_mode"] in {"door", "door_functionality", "door_fuctionality"}
+    cycle = bool(video_cfg.get("cycle", True)) and not mode_request["requested_door_functionality"] and not auto_door_functionality
     refine_roi = bool(video_cfg.get("refine_elevator_roi", True))
     preserve_outside_roi = bool(video_cfg.get("preserve_static_wall_outside_roi", refine_roi))
 
@@ -183,7 +184,7 @@ def render_elevator_video(
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     video_write_cfg = dict(video_cfg)
-    video_write_cfg["_quality_resize_mode"] = "contain"
+    video_write_cfg["_quality_resize_mode"] = "preserve_aspect"
     audio_debug = write_video(out, frames, fps, bitrate, no_audio, actions, state, video_write_cfg)
     audio_debug["animation_mode"] = animation_mode
     audio_debug.update(mode_request)
@@ -314,9 +315,30 @@ def normalize_video_mode_request(video_cfg: dict[str, Any]) -> dict[str, Any]:
 
 def resize_frames_for_quality(frames: list[np.ndarray], quality: str, mode: str = "cover") -> list[np.ndarray]:
     target_w, target_h = QUALITY_SIZES[quality]
+    if mode == "preserve_aspect":
+        source_h, source_w = frames[0].shape[:2]
+        target_w, target_h = preserve_aspect_output_size(source_w, source_h, target_w, target_h)
+        return [resize_exact_rgb(frame, target_w, target_h) for frame in frames]
     if mode == "contain":
         return [resize_contain_rgb(frame, target_w, target_h) for frame in frames]
     return [resize_cover_rgb(frame, target_w, target_h) for frame in frames]
+
+
+def preserve_aspect_output_size(source_w: int, source_h: int, max_w: int, max_h: int) -> tuple[int, int]:
+    source_w, source_h = max(1, int(source_w)), max(1, int(source_h))
+    if source_h >= source_w:
+        out_h = max_h
+        out_w = int(round(out_h * source_w / source_h))
+    else:
+        out_w = max_w
+        out_h = int(round(out_w * source_h / source_w))
+    out_w = max(2, min(max_w, out_w))
+    out_h = max(2, min(max_h, out_h))
+    if out_w % 2:
+        out_w -= 1
+    if out_h % 2:
+        out_h -= 1
+    return max(2, out_w), max(2, out_h)
 
 
 def resize_cover_rgb(frame: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
@@ -549,24 +571,26 @@ def render_stable_cpu_zoom_motion(
     zoom_amount = float(video_settings.get("ffmpeg_zoom_amount", 0.22))
     focus_x = float(np.clip(float(video_settings.get("ffmpeg_zoom_focus_x", 0.50)), 0.05, 0.95))
     focus_y = float(np.clip(float(video_settings.get("ffmpeg_zoom_focus_y", 0.50)), 0.05, 0.95))
-    base = resize_contain_rgb(img_rgb, target_w, target_h)
+    base = resize_exact_rgb(img_rgb, target_w, target_h)
     frames: list[np.ndarray] = []
     den = max(frame_count - 1, 1)
     for idx in range(frame_count):
         t = idx / den
-        eased = t * t * (3.0 - 2.0 * t)
+        eased = t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
         zoom = 1.0 + zoom_amount * eased
-        crop_w = max(2, int(round(target_w / zoom)))
-        crop_h = max(2, int(round(target_h / zoom)))
         cx = target_w * focus_x
         cy = target_h * focus_y
-        x1 = int(np.clip(round(cx - crop_w * 0.5), 0, max(0, target_w - crop_w)))
-        y1 = int(np.clip(round(cy - crop_h * 0.5), 0, max(0, target_h - crop_h)))
-        crop = base[y1 : y1 + crop_h, x1 : x1 + crop_w]
-        frame = cv2.resize(crop, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
-        if bool(video_settings.get("ffmpeg_sharpen", True)):
+        matrix = np.array([[zoom, 0.0, (1.0 - zoom) * cx], [0.0, zoom, (1.0 - zoom) * cy]], dtype=np.float32)
+        frame = cv2.warpAffine(
+            base,
+            matrix,
+            (target_w, target_h),
+            flags=cv2.INTER_CUBIC,
+            borderMode=cv2.BORDER_REPLICATE,
+        )
+        if bool(video_settings.get("ffmpeg_zoom_sharpen", False)):
             blur = cv2.GaussianBlur(frame, (0, 0), 0.9)
-            frame = cv2.addWeighted(frame, 1.12, blur, -0.12, 0)
+            frame = cv2.addWeighted(frame, 1.06, blur, -0.06, 0)
         frames.append(np.ascontiguousarray(np.clip(frame, 0, 255).astype(np.uint8)))
 
     video_debug = write_frames_mp4(
@@ -626,6 +650,10 @@ def write_frames_mp4(out_path: Path, frames: list[np.ndarray], fps: int, crf: st
         "fps": fps,
         "frame_count": len(frames),
     }
+
+
+def resize_exact_rgb(frame: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
+    return np.ascontiguousarray(cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4))
 
 
 def build_ffmpeg_pan_base(img_rgb: np.ndarray, target_w: int, target_h: int, axis: str) -> np.ndarray:
@@ -1229,8 +1257,10 @@ def select_best_elevator_roi(
         raw_candidates.append(candidate)
         valid, reason = validate_elevator_candidate(box, phrase, w, h, center_hint)
         edge_score, refined = edge_alignment_score_and_refined_roi(image, box, cfg)
+        refined, refinement_policy = constrain_animation_roi_to_detection_box(box, refined, w, h, cfg)
         candidate["edge_score"] = edge_score
         candidate["refined_box"] = refined
+        candidate["refinement_policy"] = refinement_policy
         if not valid and not recoverable_elevator_candidate(box, refined, phrase, reason, w, h, edge_score):
             candidate["reason"] = reason
             rejected.append(candidate)
@@ -1271,6 +1301,7 @@ def select_best_elevator_roi(
             "nested_frame_depth_score": nested_score,
             "nested_frame_depth_evidence": nested_evidence,
             "penalty": rejection_penalty,
+            "refinement_policy": refinement_policy,
         }
         candidate_scores.append(score_detail)
         candidate["candidate_score_detail"] = score_detail
@@ -1381,13 +1412,20 @@ def candidate_penalty(box: list[int], refined: list[int], reason: str, width: in
 
 
 def adjacent_component_score(box: list[int], detections: dict[str, Any], src_w: int, src_h: int, width: int, height: int) -> float:
-    terms = ("button panel", "call button", "elevator button", "floor indicator", "weight limit", "capacity")
+    operating_panel = "tall stainless steel elevator operating panel with round buttons"
+    terms = (operating_panel, "elevator call button panel", "wheelchair button", "floor indicator", "weight limit", "capacity")
     x1, y1, x2, y2 = box
     score = 0.0
     for det in detections.get("detections", []):
         phrase = str(det.get("phrase", "")).lower()
         norm = str(det.get("normalized_component_type", "")).lower()
-        if not any(term in phrase for term in terms) and norm not in {"elevator_button_panel", "floor_indicator_display", "weight_limit_sign"}:
+        if not any(term in phrase for term in terms) and norm not in {
+            operating_panel,
+            "elevator call button panel",
+            "wheelchair button",
+            "floor_indicator_display",
+            "weight_limit_sign",
+        }:
             continue
         bx1, by1, bx2, by2 = scaled_box(det["box_xyxy"], src_w, src_h, width, height)
         bcx, bcy = (bx1 + bx2) * 0.5, (by1 + by2) * 0.5
@@ -1395,7 +1433,7 @@ def adjacent_component_score(box: list[int], detections: dict[str, Any], src_w: 
         beside = (y1 - height * 0.10) <= bcy <= (y2 + height * 0.10) and horizontal_gap < width * 0.28
         above = y1 - height * 0.18 <= bcy <= y1 + height * 0.12 and x1 - width * 0.15 <= bcx <= x2 + width * 0.15
         if beside or above:
-            score = max(score, 1.0 if norm in {"elevator_button_panel", "floor_indicator_display"} else 0.65)
+            score = max(score, 1.0 if norm in {operating_panel, "elevator call button panel", "floor_indicator_display"} else 0.65)
     return score
 
 
@@ -1477,6 +1515,44 @@ def edge_alignment_score_and_refined_roi(
     h_edge = float(sy[[max(0, ry1), min(h - 1, ry2 - 1)], max(0, rx1):min(w, rx2)].mean()) if rx2 > rx1 else 0.0
     global_edge = float(np.mean(sx) + np.mean(sy) + 1e-6)
     return float(np.clip((v_edge + h_edge) / global_edge / 7.5, 0.0, 1.0)), refined
+
+
+def constrain_animation_roi_to_detection_box(
+    raw_box: list[int],
+    refined_box: list[int],
+    width: int,
+    height: int,
+    cfg: dict[str, Any] | None = None,
+) -> tuple[list[int], dict[str, Any]]:
+    video_cfg = (cfg or {}).get("video", {}) if cfg else {}
+    if not bool(video_cfg.get("prefer_groundingdino_door_roi", True)):
+        return refined_box, {"status": "refinement_allowed"}
+    rx1, ry1, rx2, ry2 = clamp_box(raw_box, width, height)
+    fx1, fy1, fx2, fy2 = clamp_box(refined_box, width, height)
+    raw_w, raw_h = max(1, rx2 - rx1), max(1, ry2 - ry1)
+    refined_w, refined_h = max(1, fx2 - fx1), max(1, fy2 - fy1)
+    expanded = (
+        fx1 < rx1 - raw_w * 0.04
+        or fy1 < ry1 - raw_h * 0.04
+        or fx2 > rx2 + raw_w * 0.04
+        or fy2 > ry2 + raw_h * 0.04
+        or refined_w * refined_h > raw_w * raw_h * 1.18
+    )
+    if not expanded:
+        return [fx1, fy1, fx2, fy2], {"status": "refinement_kept_inside_detection"}
+
+    inset_ratio = float(video_cfg.get("groundingdino_door_roi_inset_ratio", 0.018))
+    inset_x = max(1, int(round(raw_w * inset_ratio)))
+    inset_y = max(1, int(round(raw_h * inset_ratio)))
+    constrained = clamp_box([rx1 + inset_x, ry1 + inset_y, rx2 - inset_x, ry2 - inset_y], width, height)
+    LOGGER.info("[ROI] Using inset GroundingDINO door ROI: %s raw=%s refined=%s", constrained, raw_box, refined_box)
+    return constrained, {
+        "status": "constrained_to_groundingdino_detection",
+        "reason": "refinement_expanded_outside_detected_door",
+        "raw_detection_box": [rx1, ry1, rx2, ry2],
+        "edge_refined_box": [fx1, fy1, fx2, fy2],
+        "inset_ratio": inset_ratio,
+    }
 
 
 def _best_projection_index(projection: np.ndarray, start: int, end: int, default: int) -> int:
@@ -1721,17 +1797,23 @@ def _is_reliable_interior_detection(
     if phrase not in interior_labels and normalized not in {"elevator_cabin", "handrail", "security_camera"}:
         return False
     box = _scaled_detection_box(det, detections, roi, hw)
-    if box_iou(box, roi) <= 0.05:
-        return False
+    iou_with_roi = box_iou(box, roi)
     rx1, ry1, rx2, ry2 = roi
     bx1, by1, bx2, by2 = box
     roi_area = max(1, (rx2 - rx1) * (ry2 - ry1))
     box_area = max(1, (bx2 - bx1) * (by2 - by1))
     if "elevator wall" in phrase and box_area > roi_area * 0.65:
         return False
+    if normalized == "elevator_cabin" and iou_with_roi > 0.75 and float(det.get("score", 0.0)) < 0.35:
+        return False
     cx = (bx1 + bx2) * 0.5
     cy = (by1 + by2) * 0.5
-    return rx1 <= cx <= rx2 and ry1 <= cy <= ry2
+    center_inside_roi = rx1 <= cx <= rx2 and ry1 <= cy <= ry2
+    if normalized == "handrail" or "handrail" in phrase:
+        return center_inside_roi and float(det.get("score", 0.0)) >= 0.24
+    if iou_with_roi <= 0.05:
+        return False
+    return center_inside_roi
 
 
 def classify_elevator_state_from_depth(

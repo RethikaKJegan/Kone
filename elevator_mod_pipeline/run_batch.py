@@ -14,11 +14,13 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent
 VIDEO_MODE_ALIASES = {
+    "pan_lr": {"motion_style": "pan_l_r"},
     "panel_lr": {"motion_style": "pan_l_r"},
     "pane_lr": {"motion_style": "pan_l_r"},
     "panle_lr": {"motion_style": "pan_l_r"},
     "panel_l_r": {"motion_style": "pan_l_r"},
     "pan_l_r": {"motion_style": "pan_l_r"},
+    "pan_rl": {"motion_style": "pan_r_l"},
     "panel_rl": {"motion_style": "pan_r_l"},
     "pane_rl": {"motion_style": "pan_r_l"},
     "panle_rl": {"motion_style": "pan_r_l"},
