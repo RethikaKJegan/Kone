@@ -47,6 +47,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "threshold_plate",
             "handrail",
             "security_camera",
+            "emergency_phone",
         ],
     },
 }
@@ -417,7 +418,7 @@ def elevator_detection_is_reliable(
             return False, "cabin/interior is not vertical enough"
         return True, None
 
-    if norm in {"threshold_plate", "handrail", "security_camera"}:
+    if norm in {"threshold_plate", "handrail", "security_camera", "emergency_phone"}:
         if score < max(min_score, 0.32):
             return False, "supporting component confidence too low"
         if area_ratio > 0.18:

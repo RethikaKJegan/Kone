@@ -24,6 +24,7 @@ INVALID_MOD_PANEL_TARGETS = {
     "threshold_plate",
     "handrail",
     "security_camera",
+    "emergency_phone",
 }
 
 
@@ -123,12 +124,19 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
                 detection_box = [int(round(v)) for v in det["box_xyxy"]]
                 panel_box, expansion_debug = expand_control_panel_bbox(image, detections["detections"], detection_box, width, height, det.get("normalized_component_type"))
                 target_box = padded_box(panel_box, width, height, int(ins.get("existing_panel_padding_px", 4)))
-                target_box, target_clamp_debug = clamp_existing_panel_target_box(target_box, width, height, cfg)
+                target_box, target_clamp_debug = clamp_existing_panel_target_box(
+                    target_box,
+                    width,
+                    height,
+                    cfg,
+                    max_ratio_override=0.18 if det.get("source") == "expanded_car_operating_panel_plate" else None,
+                )
                 cfg["_placement_debug"].update(
                     {
                         "requested_component_type": "elevator_mod_panel",
                         "valid_replacement_targets": valid_target_debug(detections["detections"]),
                         "selected_replacement_target_type": det.get("normalized_component_type"),
+                        "selected_replacement_target_source": det.get("source"),
                         "selected_replacement_target_bbox": detection_box,
                         "target_panel_bbox": panel_box,
                         "target_panel_expansion": expansion_debug,
@@ -222,7 +230,8 @@ def invalid_mod_panel_target_reason(det: dict[str, Any], width: int, height: int
     x1, y1, x2, y2 = [float(v) for v in det.get("box_xyxy", [0, 0, 0, 0])]
     bw, bh = max(1.0, x2 - x1), max(1.0, y2 - y1)
     area_ratio = (bw * bh) / max(width * height, 1)
-    if area_ratio > 0.10:
+    max_area_ratio = 0.18 if det.get("source") == "expanded_car_operating_panel_plate" else 0.10
+    if area_ratio > max_area_ratio:
         return "panel candidate too large"
     if bh / bw > 8.5 or bh / bw < 0.35:
         return "invalid panel aspect"
@@ -296,12 +305,22 @@ def _box_area(box: Any) -> float:
     return max(1.0, x2 - x1) * max(1.0, y2 - y1)
 
 
-def clamp_existing_panel_target_box(box: list[int], width: int, height: int, cfg: dict[str, Any]) -> tuple[list[int], dict[str, Any]]:
+def clamp_existing_panel_target_box(
+    box: list[int],
+    width: int,
+    height: int,
+    cfg: dict[str, Any],
+    max_ratio_override: float | None = None,
+) -> tuple[list[int], dict[str, Any]]:
     x1, y1, x2, y2 = [int(v) for v in box]
     box_w, box_h = max(1, x2 - x1), max(1, y2 - y1)
     image_area = max(1, width * height)
     area_ratio = (box_w * box_h) / image_area
-    max_ratio = float(cfg["insertion"].get("max_existing_panel_target_area_ratio", cfg["insertion"].get("max_insert_area_ratio", 0.12)))
+    max_ratio = float(
+        max_ratio_override
+        if max_ratio_override is not None
+        else cfg["insertion"].get("max_existing_panel_target_area_ratio", cfg["insertion"].get("max_insert_area_ratio", 0.12))
+    )
     if area_ratio <= max_ratio:
         return [x1, y1, x2, y2], {"status": "not_clamped", "area_ratio": float(area_ratio), "max_area_ratio": max_ratio}
 
@@ -372,11 +391,11 @@ def expand_control_panel_bbox(
                 "phrase": det.get("phrase"),
                 "score": det.get("score"),
             }
-        union = [min(union[0], bx1), min(union[1], by1), max(union[2], bx2), max(union[3], by2)]
-        explicit_members.append(box)
-        if box != seed_box:
-            supporting_members += 1
-        members.append(member_debug)
+            union = [min(union[0], bx1), min(union[1], by1), max(union[2], bx2), max(union[3], by2)]
+            explicit_members.append(box)
+            if box != seed_box:
+                supporting_members += 1
+            members.append(member_debug)
 
     explicit_union = union.copy()
     explicit_area = _box_area(explicit_union)
@@ -925,6 +944,8 @@ def clamp_insertion_scale(
     reasons: list[str] = []
 
     max_area_ratio = float(cfg["insertion"].get("max_insert_area_ratio", 0.12))
+    if cfg.get("_placement_debug", {}).get("selected_replacement_target_source") == "expanded_car_operating_panel_plate":
+        max_area_ratio = max(max_area_ratio, 0.18)
     max_area_px = max(1.0, image_w * image_h * max_area_ratio)
     projected_area = (mod_w * original_scale) * (mod_h * original_scale)
     if projected_area > max_area_px:
@@ -959,6 +980,8 @@ def validate_insertion_size(target_box: list[int], insert_wh: list[int], out_hw:
     insert_w, insert_h = insert_wh
     area_ratio = (insert_w * insert_h) / max(image_w * image_h, 1)
     max_area_ratio = float(cfg["insertion"].get("max_insert_area_ratio", 0.12))
+    if cfg.get("_placement_debug", {}).get("selected_replacement_target_source") == "expanded_car_operating_panel_plate":
+        max_area_ratio = max(max_area_ratio, 0.18)
     if area_ratio > max_area_ratio:
         raise RuntimeError(f"Insertion size validation failed: area_ratio={area_ratio:.3f} > {max_area_ratio:.3f}")
     if cfg.get("_placement_debug", {}).get("placement_mode") == "existing_panel":
