@@ -1,0 +1,122 @@
+[
+  {
+    "input_image": "tests/images/COP.jpg",
+    "mod_panel": "tests/panels/mod_long.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "run_dir": "tests/outputs/all_inputs/001_COP"
+  },
+  {
+    "input_image": "tests/images/Sample.jpg",
+    "mod_panel": "tests/panels/mod_long.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "run_dir": "tests/outputs/all_inputs/002_Sample"
+  },
+  {
+    "input_image": "tests/images/Sample10.jpg",
+    "mod_panel": "tests/panels/panel_mod.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "run_dir": "tests/outputs/all_inputs/003_Sample10"
+  },
+  {
+    "input_image": "tests/images/Sample11.jpg",
+    "mod_panel": "tests/panels/mod_panel.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "run_dir": "tests/outputs/all_inputs/004_Sample11"
+  },
+  {
+    "input_image": "tests/images/Sample2.jpg",
+    "mod_panel": "tests/panels/mod_long.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "run_dir": "tests/outputs/all_inputs/005_Sample2"
+  },
+  {
+    "input_image": "tests/images/Sample2_closed_exterior.jpg",
+    "mod_panel": "tests/panels/mod_long.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "run_dir": "tests/outputs/all_inputs/006_Sample2_closed_exterior"
+  },
+  {
+    "input_image": "tests/images/Sample2_open_interior.jpg",
+    "mod_panel": "tests/panels/mod_long.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "run_dir": "tests/outputs/all_inputs/007_Sample2_open_interior"
+  },
+  {
+    "input_image": "tests/images/Sample3.jpg",
+    "mod_panel": "tests/panels/mod_long.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "run_dir": "tests/outputs/all_inputs/008_Sample3"
+  },
+  {
+    "input_image": "tests/images/Sample4.jpg",
+    "mod_panel": "tests/panels/mod_long.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "run_dir": "tests/outputs/all_inputs/009_Sample4"
+  },
+  {
+    "input_image": "tests/images/Sample5.jpg",
+    "mod_panel": "tests/panels/mod_panel.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "run_dir": "tests/outputs/all_inputs/010_Sample5"
+  },
+  {
+    "input_image": "tests/images/Sample6.jpg",
+    "mod_panel": "tests/panels/mod_long.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "run_dir": "tests/outputs/all_inputs/011_Sample6"
+  },
+  {
+    "input_image": "tests/images/Sample7.jpg",
+    "mod_panel": "tests/panels/mod_panel.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "run_dir": "tests/outputs/all_inputs/012_Sample7"
+  },
+  {
+    "input_image": "tests/images/Sample8.jpg",
+    "mod_panel": "tests/panels/panel_mod.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "run_dir": "tests/outputs/all_inputs/013_Sample8"
+  },
+  {
+    "input_image": "tests/images/Sample9.jpg",
+    "mod_panel": "tests/panels/mod_long.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "run_dir": "tests/outputs/all_inputs/014_Sample9"
+  },
+  {
+    "input_image": "tests/images/cafe.jpeg",
+    "mod_panel": "tests/panels/mod_long.png",
+    "prompt": "replace the elevator display with the mod panel",
+    "run_dir": "tests/outputs/all_inputs/015_cafe"
+  },
+  {
+    "input_image": "tests/images/lift1.jpg",
+    "mod_panel": "tests/panels/mod_long.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "run_dir": "tests/outputs/all_inputs/016_lift1"
+  },
+  {
+    "input_image": "tests/images/lift2.jpg",
+    "mod_panel": "tests/panels/mod_long.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "run_dir": "tests/outputs/all_inputs/017_lift2"
+  },
+  {
+    "input_image": "tests/images/lift3.jpg",
+    "mod_panel": "tests/panels/mod_long.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "run_dir": "tests/outputs/all_inputs/018_lift3"
+  },
+  {
+    "input_image": "tests/images/office.jpg",
+    "mod_panel": "tests/panels/mod_long.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "run_dir": "tests/outputs/all_inputs/019_office"
+  },
+  {
+    "input_image": "tests/images/side1.jpg",
+    "mod_panel": "tests/panels/mod_long.png",
+    "prompt": "replace the elevator display with the mod panel",
+    "run_dir": "tests/outputs/all_inputs/020_side1"
+  }
+]
