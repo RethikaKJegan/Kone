@@ -33,7 +33,11 @@ def insert_mod_panel(background_path: str | Path, mod_path: str | Path, detectio
     height, width = bg.shape[:2]
     target_box, placement_reason = _target_box(width, height, detections, cfg, mod.shape[:2], removal_mask, bg)
     LOGGER.info("[PLACE] Final component placement: %s reason=%s", target_box, placement_reason)
-    warped = _warp_long_panel_to_exact_box(mod, target_box, bg.shape[:2]) if _is_long_panel_track_case(cfg, mod.shape[:2]) else _warp_mod_to_scene(mod, target_box, geometry, bg.shape[:2], cfg)
+    warped = (
+        _warp_long_panel_to_exact_box(mod, target_box, bg.shape[:2])
+        if _is_long_panel_track_case(cfg, mod.shape[:2])
+        else _warp_mod_to_scene(mod, target_box, geometry, bg.shape[:2], cfg, bg)
+    )
 
     fg = warped[:, :, :3]
     alpha = refine_alpha(warped[:, :, 3].astype(np.float32) / 255.0)
@@ -550,6 +554,8 @@ def write_component_placement_debug(
         "final_insertion_bbox": placement_debug.get("final_insertion_bbox") or bbox,
         "insertion_scale_factor": placement_debug.get("insertion_scale_factor"),
         "insertion_size_validation_status": placement_debug.get("insertion_size_validation_status"),
+        "homography_destination_quad": placement_debug.get("homography_destination_quad"),
+        "homography_alignment": placement_debug.get("homography_alignment"),
         "final_component_placement": {"bbox": placement_debug.get("final_insertion_bbox") or bbox, "reason": reason},
         "rejected_component_detections": placement_debug.get("rejected_component_detections", []),
         "harmonization_mask_bbox": (mask_debug or {}).get("harmonization_mask_bbox"),
@@ -726,7 +732,14 @@ def _warp_long_panel_to_exact_box(mod: np.ndarray, box: list[int], out_hw: tuple
     return warp_rgba_to_quad(mod, quad, out_hw)
 
 
-def _warp_mod_to_scene(mod: np.ndarray, box: list[int], geometry: dict[str, Any], out_hw: tuple[int, int], cfg: dict[str, Any]) -> np.ndarray:
+def _warp_mod_to_scene(
+    mod: np.ndarray,
+    box: list[int],
+    geometry: dict[str, Any],
+    out_hw: tuple[int, int],
+    cfg: dict[str, Any],
+    image_rgb: np.ndarray | None = None,
+) -> np.ndarray:
     x1, y1, x2, y2 = box
     box_w, box_h = max(1, x2 - x1), max(1, y2 - y1)
     mh, mw = mod.shape[:2]
@@ -763,19 +776,15 @@ def _warp_mod_to_scene(mod: np.ndarray, box: list[int], geometry: dict[str, Any]
     placement_debug["insertion_size_validation_status"] = "passed"
     mod = cv2.resize(mod, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
 
-    normal = geometry.get("wall_plane", {}).get("normal") or [0, 0, 1]
-    side_skew = float(cfg["insertion"]["side_skew"]) + abs(float(normal[0])) * 0.005
-    top_shrink = float(cfg["insertion"]["top_shrink"]) + abs(float(normal[1])) * 0.003
     px = x1 + (box_w - new_w) // 2
     py = y1 + (box_h - new_h) // 2
-    quad = np.array(
-        [
-            [px + int(new_w * side_skew), py],
-            [px + new_w - int(new_w * side_skew), py - int(new_h * top_shrink)],
-            [px + new_w, py + new_h],
-            [px, py + new_h],
-        ],
-        dtype=np.float32,
+    quad, homography_debug = build_wall_aligned_destination_quad(
+        image_rgb=image_rgb,
+        box=[px, py, px + new_w, py + new_h],
+        target_box=[x1, y1, x2, y2],
+        geometry=geometry,
+        cfg=cfg,
+        out_hw=out_hw,
     )
     qx1, qy1 = np.floor(quad.min(axis=0)).astype(int)
     qx2, qy2 = np.ceil(quad.max(axis=0)).astype(int)
@@ -785,8 +794,119 @@ def _warp_mod_to_scene(mod: np.ndarray, box: list[int], geometry: dict[str, Any]
         int(np.clip(qx2, 1, out_hw[1])),
         int(np.clip(qy2, 1, out_hw[0])),
     ]
+    placement_debug["homography_destination_quad"] = quad.round(3).tolist()
+    placement_debug["homography_alignment"] = homography_debug
     cfg["_placement_debug"] = placement_debug
     return warp_rgba_to_quad(mod, quad, out_hw)
+
+
+def build_wall_aligned_destination_quad(
+    image_rgb: np.ndarray | None,
+    box: list[int],
+    target_box: list[int],
+    geometry: dict[str, Any],
+    cfg: dict[str, Any],
+    out_hw: tuple[int, int],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    image_h, image_w = out_hw
+    x1, y1, x2, y2 = [int(v) for v in box]
+    width = max(2.0, float(x2 - x1))
+    height = max(2.0, float(y2 - y1))
+    cx = (x1 + x2) * 0.5
+    cy = (y1 + y2) * 0.5
+
+    orientation = estimate_local_wall_orientation(image_rgb, target_box)
+    normal = geometry.get("wall_plane", {}).get("normal") or [0, 0, 1]
+    vertical_shear = float(orientation.get("vertical_dx_per_y", 0.0))
+    horizontal_shear = float(orientation.get("horizontal_dy_per_x", 0.0))
+
+    # Keep the perspective physically plausible; noisy wall lines should not twist the panel.
+    max_shear = float(cfg["insertion"].get("homography_max_local_shear", 0.14))
+    vertical_shear = float(np.clip(vertical_shear, -max_shear, max_shear))
+    horizontal_shear = float(np.clip(horizontal_shear, -max_shear, max_shear))
+
+    plane_bias = float(np.clip(float(normal[0]) * 0.006, -0.025, 0.025))
+    side_skew = float(cfg["insertion"].get("side_skew", 0.008)) + plane_bias
+    top_shrink = float(cfg["insertion"].get("top_shrink", 0.015)) + abs(float(normal[1])) * 0.003
+    top_shrink = float(np.clip(top_shrink, 0.0, 0.16))
+
+    top_width = width * (1.0 - top_shrink)
+    bottom_width = width * (1.0 + min(top_shrink * 0.35, 0.045))
+    top_center = np.array([cx - vertical_shear * height * 0.5, cy - height * 0.5], dtype=np.float32)
+    bottom_center = np.array([cx + vertical_shear * height * 0.5, cy + height * 0.5], dtype=np.float32)
+    top_vec = np.array([top_width * 0.5, horizontal_shear * top_width * 0.5], dtype=np.float32)
+    bottom_vec = np.array([bottom_width * 0.5, horizontal_shear * bottom_width * 0.5], dtype=np.float32)
+    side_offset = np.array([side_skew * width, 0.0], dtype=np.float32)
+
+    quad = np.array(
+        [
+            top_center - top_vec + side_offset,
+            top_center + top_vec - side_offset,
+            bottom_center + bottom_vec,
+            bottom_center - bottom_vec,
+        ],
+        dtype=np.float32,
+    )
+    quad[:, 0] = np.clip(quad[:, 0], 0, image_w - 1)
+    quad[:, 1] = np.clip(quad[:, 1], 0, image_h - 1)
+    debug = {
+        "mode": "wall_oriented_homography",
+        "local_orientation": orientation,
+        "vertical_shear": vertical_shear,
+        "horizontal_shear": horizontal_shear,
+        "top_shrink": top_shrink,
+        "side_skew": side_skew,
+    }
+    return quad, debug
+
+
+def estimate_local_wall_orientation(image_rgb: np.ndarray | None, box: list[int]) -> dict[str, Any]:
+    if image_rgb is None:
+        return {"status": "no_image", "vertical_dx_per_y": 0.0, "horizontal_dy_per_x": 0.0, "line_count": 0}
+    height, width = image_rgb.shape[:2]
+    x1, y1, x2, y2 = [int(v) for v in box]
+    bw, bh = max(2, x2 - x1), max(2, y2 - y1)
+    pad_x = max(24, int(bw * 1.2))
+    pad_y = max(24, int(bh * 0.8))
+    sx1, sy1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
+    sx2, sy2 = min(width, x2 + pad_x), min(height, y2 + pad_y)
+    roi = image_rgb[sy1:sy2, sx1:sx2]
+    if roi.size == 0:
+        return {"status": "empty_roi", "vertical_dx_per_y": 0.0, "horizontal_dy_per_x": 0.0, "line_count": 0}
+
+    gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    edges = cv2.Canny(gray, 45, 130)
+    min_len = max(18, int(min(roi.shape[:2]) * 0.16))
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=max(18, min_len // 2), minLineLength=min_len, maxLineGap=12)
+    if lines is None:
+        return {"status": "no_lines", "vertical_dx_per_y": 0.0, "horizontal_dy_per_x": 0.0, "line_count": 0}
+
+    vertical_slopes: list[float] = []
+    horizontal_slopes: list[float] = []
+    for line in lines[:, 0]:
+        lx1, ly1, lx2, ly2 = [float(v) for v in line]
+        dx, dy = lx2 - lx1, ly2 - ly1
+        length = float(np.hypot(dx, dy))
+        if length < min_len:
+            continue
+        angle = abs(np.degrees(np.arctan2(dy, dx)))
+        angle = angle if angle <= 90 else 180 - angle
+        if angle >= 58 and abs(dy) > 1:
+            vertical_slopes.append(float(np.clip(dx / dy, -0.30, 0.30)))
+        elif angle <= 32 and abs(dx) > 1:
+            horizontal_slopes.append(float(np.clip(dy / dx, -0.30, 0.30)))
+
+    vertical = float(np.median(vertical_slopes)) if vertical_slopes else 0.0
+    horizontal = float(np.median(horizontal_slopes)) if horizontal_slopes else 0.0
+    return {
+        "status": "estimated",
+        "vertical_dx_per_y": vertical,
+        "horizontal_dy_per_x": horizontal,
+        "line_count": int(len(lines)),
+        "vertical_line_count": len(vertical_slopes),
+        "horizontal_line_count": len(horizontal_slopes),
+    }
 
 
 def clamp_insertion_scale(
@@ -866,7 +986,9 @@ def warp_rgba_to_quad(rgba: np.ndarray, quad: np.ndarray, out_hw: tuple[int, int
     out_h, out_w = out_hw
     h, w = rgba.shape[:2]
     src = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype=np.float32)
-    matrix = cv2.getPerspectiveTransform(src, quad)
+    matrix, status = cv2.findHomography(src, quad, 0)
+    if matrix is None or status is None:
+        matrix = cv2.getPerspectiveTransform(src, quad)
     rgb = rgba[:, :, :3].astype(np.float32)
     alpha = rgba[:, :, 3].astype(np.float32) / 255.0
     premul = rgb * alpha[:, :, None]

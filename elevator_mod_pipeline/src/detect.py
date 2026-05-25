@@ -120,6 +120,7 @@ def run_detection(image_path: str | Path, cfg: dict[str, Any], out_json: str | P
 			iou_threshold=float(cfg.get("detection", {}).get("cross_label_nms_iou", 0.35)),
 		)
 		detections = _apply_component_geometry_validation(detections, width, height)
+	_repair_nested_elevator_door_detection(image_np, detections)
 	_ensure_elevator_door_detection(image_np, detections)
 
 	output = {
@@ -459,6 +460,43 @@ def _ensure_elevator_door_detection(image_rgb: np.ndarray, detections: list[dict
 	)
 
 
+def _repair_nested_elevator_door_detection(image_rgb: np.ndarray, detections: list[dict[str, Any]]) -> None:
+	door = _best_detection_of_type(detections, "elevator_door")
+	if door is None:
+		return
+	inferred = _infer_elevator_door_box(image_rgb, detections)
+	if inferred is None:
+		return
+	current = [float(v) for v in door.get("box_xyxy", [0, 0, 0, 0])]
+	inferred_f = [float(v) for v in inferred]
+	current_area = _box_area(current)
+	inferred_area = _box_area(inferred_f)
+	if inferred_area <= current_area * 1.75:
+		return
+	if not _box_center_inside(current, inferred_f) and _box_overlap_fraction(current, inferred_f) < 0.40:
+		return
+	h, w = image_rgb.shape[:2]
+	inferred_w = inferred_f[2] - inferred_f[0]
+	inferred_h = inferred_f[3] - inferred_f[1]
+	inferred_ratio = inferred_area / max(w * h, 1)
+	if inferred_w < w * 0.20 or inferred_h < h * 0.45 or inferred_ratio > 0.72:
+		return
+	LOGGER.info("[DETECT] Repaired nested elevator door bbox: %s -> %s", [round(v) for v in current], inferred)
+	door.setdefault("geometry_validation", {})
+	door["geometry_validation"].update(
+		{
+			"status": "repaired",
+			"reason": "nested_interior_panel_detected_as_elevator_door",
+			"original_box_xyxy": current,
+			"repaired_box_xyxy": inferred_f,
+		}
+	)
+	door["box_xyxy"] = inferred_f
+	door["box_xywh"] = [inferred_f[0], inferred_f[1], inferred_f[2] - inferred_f[0], inferred_f[3] - inferred_f[1]]
+	door["box_area"] = float(inferred_area)
+	door["source"] = "groundingdino_structural_door_repair"
+
+
 def _infer_elevator_door_box(image_rgb: np.ndarray, detections: list[dict[str, Any]]) -> list[int] | None:
 	try:
 		import cv2
@@ -504,15 +542,33 @@ def _door_center_hint(width: int, detections: list[dict[str, Any]]) -> float:
 	panels = [
 		det
 		for det in detections
-		if "button panel" in det.get("phrase", "").lower() or "call button" in det.get("phrase", "").lower()
+		if (
+			"button panel" in det.get("phrase", "").lower()
+			or "call button" in det.get("phrase", "").lower()
+			or "wheelchair button" in det.get("phrase", "").lower()
+			or "accessibility control panel" in det.get("phrase", "").lower()
+			or det.get("normalized_component_type") in {"wheelchair button", "accessibility_control_panel", OPERATING_PANEL_CLASS, "elevator call button panel"}
+		)
 	]
 	if panels:
 		panel = max(panels, key=lambda d: float(d.get("score", 0)))
 		x1, _, x2, _ = [float(v) for v in panel["box_xyxy"]]
 		if (x1 + x2) * 0.5 < width * 0.45:
-			return min(width * 0.72, x2 + width * 0.28)
-		return max(width * 0.28, x1 - width * 0.28)
+			return min(width * 0.72, x2 + width * 0.46)
+		return max(width * 0.28, x1 - width * 0.46)
 	return width * 0.5
+
+
+def _box_area(box: list[float]) -> float:
+	x1, y1, x2, y2 = [float(v) for v in box]
+	return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
+
+def _box_center_inside(inner: list[float], outer: list[float]) -> bool:
+	x1, y1, x2, y2 = [float(v) for v in inner]
+	ox1, oy1, ox2, oy2 = [float(v) for v in outer]
+	cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+	return ox1 <= cx <= ox2 and oy1 <= cy <= oy2
 
 
 def _top_peaks(projection: np.ndarray, start: int, end: int, limit: int) -> list[int]:
