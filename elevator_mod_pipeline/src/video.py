@@ -116,8 +116,12 @@ def render_elevator_video(
         LOGGER.info("[ANIMATION] Final image already contains open elevator; using final image as open state")
         LOGGER.info("[ANIMATION] Open reference image disabled for open-state final image")
         LOGGER.info("[ANIMATION] Building closed-door state from closed_reference_image")
-        LOGGER.info("[ANIMATION] Rendering open \u2192 close \u2192 open sequence")
-        animation_mode = "open_close_open_from_existing_interior"
+        if actions and actions[0][0] == "close" and actions[-1][0] == "open":
+            LOGGER.info("[ANIMATION] Rendering open \u2192 close \u2192 open sequence")
+            animation_mode = "open_close_open_from_existing_interior"
+        else:
+            LOGGER.info("[ANIMATION] Rendering open \u2192 close sequence")
+            animation_mode = "closing_from_existing_interior"
     else:
         animation_mode = "opening" if first_action == "open" else "closing"
     LOGGER.info("[ANIMATION] Choosing animation mode: %s", animation_mode)

@@ -1,0 +1,31 @@
+[
+  {
+    "input_image": "tests/images/Sample11.jpg",
+    "mod_panel": "tests/panels/mod_panel.png",
+    "prompt": "replace the elevator button panel and floor indicator with mod components",
+    "run_dir": "tests/outputs/sample11_multi",
+    "mode": "Door Functionality",
+    "replacements": [
+      {
+        "id": "call_panel",
+        "asset": "tests/panels/mod_panel.png",
+        "component_type": "elevator_mod_panel",
+        "target_keywords": [
+          "elevator button panel",
+          "tall stainless steel elevator operating panel with round buttons",
+          "elevator call button panel"
+        ]
+      },
+      {
+        "id": "floor_indicator",
+        "asset": "tests/panels/mod_up.png",
+        "component_type": "floor_indicator_display",
+        "target_keywords": [
+          "floor indicator",
+          "elevator display",
+          "floor_indicator_display"
+        ]
+      }
+    ]
+  }
+]

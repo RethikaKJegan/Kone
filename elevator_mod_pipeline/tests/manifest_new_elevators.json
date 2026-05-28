@@ -1,0 +1,38 @@
+[
+  {
+    "input_image": "tests/images/elevator1.jpeg",
+    "open_reference_image": "tests/images/Sample2_open_interior.jpg",
+    "closed_reference_image": "tests/images/Sample2_closed_exterior.jpg",
+    "mod_panel": "tests/panels/panel_mod.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "mode": "Pan L-R",
+    "run_dir": "tests/outputs/new_elevators/001_elevator1"
+  },
+  {
+    "input_image": "tests/images/elevator2.jpeg",
+    "open_reference_image": "tests/images/Sample2_open_interior.jpg",
+    "closed_reference_image": "tests/images/Sample2_closed_exterior.jpg",
+    "mod_panel": "tests/panels/mod_long.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "mode": "Pan R-L",
+    "run_dir": "tests/outputs/new_elevators/002_elevator2"
+  },
+  {
+    "input_image": "tests/images/elevator4.jpg",
+    "open_reference_image": "tests/images/Sample2_open_interior.jpg",
+    "closed_reference_image": "tests/images/Sample2_closed_exterior.jpg",
+    "mod_panel": "tests/panels/mod_long.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "mode": "Zoom In",
+    "run_dir": "tests/outputs/new_elevators/003_elevator4"
+  },
+  {
+    "input_image": "tests/images/elevator5.jpg",
+    "open_reference_image": "tests/images/Sample2_open_interior.jpg",
+    "closed_reference_image": "tests/images/Sample2_closed_exterior.jpg",
+    "mod_panel": "tests/panels/mod_long.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "mode": "Door Functionality",
+    "run_dir": "tests/outputs/new_elevators/004_elevator5"
+  }
+]

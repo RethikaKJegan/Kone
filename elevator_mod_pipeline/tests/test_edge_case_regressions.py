@@ -8,7 +8,11 @@ import numpy as np
 import pytest
 
 import src.detect as detect
+import run_batch
+from src.input_validation import validate_elevator_presence
 from src.insert_mod import expand_control_panel_bbox, invalid_mod_panel_target_reason
+from src.perspective_mod_placement import parse_points, run_perspective_mod_placement
+from src.pipeline import component_config, elevator_present_for_video, replacement_configs
 from src.video import normalize_video_mode_request, pan_metadata, render_motion_style_frame
 
 
@@ -31,6 +35,98 @@ def image_area(sample: str) -> int:
     image = cv2.imread(str(OUTPUTS / sample / "final_output.png"), cv2.IMREAD_COLOR)
     assert image is not None
     return int(image.shape[0] * image.shape[1])
+
+
+def test_perspective_mod_placement_writes_sd_handoff_outputs(tmp_path: Path) -> None:
+    base = np.full((160, 220, 3), 180, dtype=np.uint8)
+    cv2.rectangle(base, (25, 20), (190, 145), (150, 150, 150), -1)
+    panel = np.zeros((70, 28, 4), dtype=np.uint8)
+    panel[:, :, :3] = (205, 205, 205)
+    panel[:, :, 3] = 255
+    cv2.circle(panel, (14, 22), 6, (30, 30, 30, 255), -1)
+    cv2.circle(panel, (14, 46), 6, (30, 30, 30, 255), -1)
+    base_path = tmp_path / "elevator.jpg"
+    panel_path = tmp_path / "mod_panel.png"
+    cv2.imwrite(str(base_path), base)
+    cv2.imwrite(str(panel_path), panel)
+
+    outputs = run_perspective_mod_placement(
+        base_path,
+        panel_path,
+        tmp_path / "outputs",
+        parse_points("30,20 190,35 175,145 25,130", 4),
+        8,
+        12,
+        parse_points("5.2,4.0 6.5,7.2", 2),
+        match_lighting=True,
+    )
+
+    for name in (
+        "original",
+        "wall_plane_marked",
+        "perspective_grid",
+        "mod_panel_warped",
+        "mod_panel_placed",
+        "edge_refine_mask",
+        "sd_ready_composite",
+    ):
+        assert outputs[name].exists()
+    mask = cv2.imread(str(outputs["edge_refine_mask"]), cv2.IMREAD_GRAYSCALE)
+    assert mask is not None
+    assert 0 < float(np.mean(mask > 0)) < 0.12
+
+
+def test_multi_component_config_preserves_legacy_and_overrides_targets() -> None:
+    base = {
+        "mod_panel": "tests/panels/mod_panel.png",
+        "removal": {"target_keywords": ["button"]},
+        "insertion": {"target_keywords": ["button"], "manual_box_xyxy": None},
+    }
+    assert replacement_configs(base) == [{"id": "mod_panel", "asset": "tests/panels/mod_panel.png"}]
+
+    replacement = {
+        "id": "indicator",
+        "asset": "tests/panels/mod_up.png",
+        "component_type": "floor_indicator_display",
+        "target_keywords": ["floor indicator"],
+    }
+    cfg = component_config(base, replacement)
+    assert cfg["mod_panel"] == "tests/panels/mod_up.png"
+    assert cfg["removal"]["target_keywords"] == ["floor indicator"]
+    assert cfg["insertion"]["target_keywords"] == ["floor indicator"]
+    assert cfg["_requested_component_type"] == "floor_indicator_display"
+
+
+def test_batch_component_and_video_defaults_support_manifest_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    base = {
+        "input_validation": {"enabled": True, "fail_on_invalid": True},
+        "detection": {"labels": ["elevator_door"]},
+        "removal": {"target_keywords": ["button"]},
+        "insertion": {"target_keywords": ["button"]},
+        "refinement": {"prompt": "replace"},
+        "video": {"enabled": True, "cycle": True},
+    }
+    monkeypatch.setattr(run_batch, "ROOT", tmp_path)
+    test = {
+        "input_image": "tests/images/example.jpg",
+        "mod_panel": "tests/panels/mod_panel.png",
+        "prompt": "replace the elevator button panel with the mod panel",
+        "replacements": [
+            {
+                "asset": "tests/panels/mod_up.png",
+                "target_keywords": ["floor indicator"],
+            }
+        ],
+    }
+
+    path = run_batch.write_config(test, 1, base)
+    cfg = run_batch.yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    assert cfg["input_validation"]["fail_on_invalid"] is False
+    assert cfg["video"]["cycle"] is False
+    assert cfg["video"]["open_reference_image"] == "tests/images/Sample2_open_interior.jpg"
+    assert cfg["video"]["closed_reference_image"] == "tests/images/Sample2_closed_exterior.jpg"
+    assert cfg["replacements"][0]["asset"] == "tests/panels/mod_up.png"
 
 
 def test_sample5_uses_existing_panel_bbox_for_replacement() -> None:
@@ -81,6 +177,7 @@ def test_component_detection_vocabulary_is_normalized() -> None:
         "elevator_button_panel",
         detect.OPERATING_PANEL_CLASS,
         "wheelchair button",
+        "wheelchair_indicator",
         "floor_indicator_display",
         "weight_limit_sign",
         "accessibility_control_panel",
@@ -111,12 +208,96 @@ def test_open_elevator_false_components_are_rejected() -> None:
         {"phrase": "elevator cabin", "normalized_component_type": "elevator_cabin", "score": 0.28, "box_xyxy": [47, 1, 268, 121]},
         {"phrase": "elevator display", "normalized_component_type": "floor_indicator_display", "score": 0.31, "box_xyxy": [20, 99, 46, 168]},
         {"phrase": "security camera", "normalized_component_type": "security_camera", "score": 0.34, "box_xyxy": [251, 132, 264, 150]},
+        {"phrase": "elevator emergency phone", "normalized_component_type": "emergency_phone", "score": 0.31, "box_xyxy": [150, 220, 170, 255]},
     ]
 
     kept = detect._apply_component_geometry_validation(detections, 451, 602)
     kept_types = {item.get("normalized_component_type") for item in kept}
 
     assert kept_types == {"elevator_door"}
+
+
+def test_recovered_full_door_is_validated_at_lower_detector_confidence() -> None:
+    detections = {
+        "metadata": {"image_width": 447, "image_height": 597},
+        "detections": [
+            {
+                "phrase": "elevator door",
+                "normalized_component_type": "elevator_door",
+                "raw_detection_label": "elevator door",
+                "source": "closed_door_header_recovery",
+                "score": 0.271,
+                "box_xyxy": [108, 63, 324, 560],
+            }
+        ],
+    }
+
+    result = validate_elevator_presence(detections, {})
+
+    assert result["valid"] is True
+    assert result["matched_elevator_components"][0]["normalized_component_type"] == "elevator_door"
+    assert elevator_present_for_video(detections) is True
+
+
+def test_room_fixture_door_and_weak_panels_do_not_validate_as_elevator() -> None:
+    detections = {
+        "metadata": {"image_width": 7875, "image_height": 4429},
+        "detections": [
+            {
+                "phrase": "elevator door",
+                "normalized_component_type": "elevator_door",
+                "raw_detection_label": "elevator door",
+                "score": 0.349,
+                "box_xyxy": [3281, 1564, 3918, 2725],
+            },
+            {
+                "phrase": detect.OPERATING_PANEL_CLASS,
+                "normalized_component_type": detect.OPERATING_PANEL_CLASS,
+                "raw_detection_label": "car operating panel",
+                "score": 0.295,
+                "box_xyxy": [2848, 909, 3221, 2515],
+            },
+        ],
+    }
+
+    result = validate_elevator_presence(detections, {})
+
+    assert result["valid"] is False
+    assert elevator_present_for_video(detections) is False
+
+
+def test_close_up_operating_panel_remains_a_valid_standalone_elevator_component() -> None:
+    detections = {
+        "metadata": {"image_width": 493, "image_height": 652},
+        "detections": [
+            {
+                "phrase": detect.OPERATING_PANEL_CLASS,
+                "normalized_component_type": detect.OPERATING_PANEL_CLASS,
+                "raw_detection_label": "car operating panel",
+                "score": 0.305,
+                "box_xyxy": [212, 347, 302, 584],
+            }
+        ],
+    }
+
+    assert validate_elevator_presence(detections, {})["valid"] is True
+
+
+def test_wide_open_elevator_door_remains_eligible_for_video() -> None:
+    detections = {
+        "metadata": {"image_width": 1536, "image_height": 2048},
+        "detections": [
+            {
+                "phrase": "elevator door",
+                "normalized_component_type": "elevator_door",
+                "score": 0.394,
+                "source": "groundingdino_open_door_entrance_repair",
+                "box_xyxy": [331, 341, 1154, 1119],
+            }
+        ],
+    }
+
+    assert elevator_present_for_video(detections) is True
 
 
 def test_nested_door_region_is_split_into_door_and_inset_cabin(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -166,6 +347,80 @@ def test_closed_sample_door_is_not_split_into_false_interior(monkeypatch: pytest
     assert detections[0]["box_xyxy"] == pytest.approx([212.9, 256.7, 389.3, 672.8])
 
 
+def test_closed_sample_rejects_raw_elevator_interior_detection() -> None:
+    image = cv2.cvtColor(cv2.imread(str(ROOT / "tests" / "images" / "Sample.jpg")), cv2.COLOR_BGR2RGB)
+    detections = [
+        {"phrase": "elevator door", "normalized_component_type": "elevator_door", "score": 0.50, "box_xyxy": [209, 259, 386, 670]},
+        {"phrase": "elevator interior", "normalized_component_type": "elevator_cabin", "score": 0.31, "box_xyxy": [220, 270, 370, 650]},
+    ]
+
+    detect._filter_false_elevator_interior_detections(image, detections)
+
+    assert [det["normalized_component_type"] for det in detections] == ["elevator_door"]
+
+
+def test_sample11_door_header_is_recovered_to_full_door_height() -> None:
+    image = cv2.cvtColor(cv2.imread(str(ROOT / "tests" / "images" / "Sample11.jpg")), cv2.COLOR_BGR2RGB)
+    detections = [
+        {
+            "phrase": "elevator door",
+            "normalized_component_type": "elevator_door",
+            "score": 0.50,
+            "box_xyxy": [125.9, 215.0, 331.4, 580.0],
+        }
+    ]
+
+    detect._recover_elevator_door_header(image, detections)
+
+    door = detections[0]
+    assert door["source"] == "closed_door_header_recovery"
+    assert door["box_xyxy"][1] < 165
+    assert door["box_xyxy"][3] == pytest.approx(580.0)
+    assert door["geometry_validation"]["reason"] == "horizontal_header_edge_extends_closed_door_to_full_height"
+
+
+def test_sample11_stacked_indicator_is_split_from_operating_panel() -> None:
+    image = cv2.cvtColor(cv2.imread(str(ROOT / "tests" / "images" / "Sample11.jpg")), cv2.COLOR_BGR2RGB)
+    detections = [
+        {
+            "phrase": detect.OPERATING_PANEL_CLASS,
+            "normalized_component_type": detect.OPERATING_PANEL_CLASS,
+            "score": 0.45,
+            "box_xyxy": [41.4, 273.5, 75.8, 439.9],
+        },
+        {
+            "phrase": "wheelchair button",
+            "normalized_component_type": "wheelchair button",
+            "score": 0.29,
+            "box_xyxy": [53.9, 412.2, 66.7, 426.7],
+        },
+    ]
+
+    detect._split_stacked_accessibility_panel_detection(image, detections)
+
+    panel = next(item for item in detections if item.get("normalized_component_type") == detect.OPERATING_PANEL_CLASS)
+    indicator = next(item for item in detections if item.get("normalized_component_type") == "wheelchair_indicator")
+    assert panel["box_xyxy"][1] > 375
+    assert panel["box_xyxy"][3] < 445
+    assert indicator["box_xyxy"][3] < panel["box_xyxy"][1]
+    assert not any(item.get("normalized_component_type") == "wheelchair button" for item in detections)
+
+
+def test_sample11_button_anchor_recovers_replaceable_call_panel() -> None:
+    image = cv2.cvtColor(cv2.imread(str(ROOT / "tests" / "images" / "Sample11.jpg")), cv2.COLOR_BGR2RGB)
+    detections = [
+        {"phrase": "elevator door", "normalized_component_type": "elevator_door", "score": 0.50, "box_xyxy": [126, 137, 331, 580]},
+        {"phrase": "wheelchair button", "normalized_component_type": "wheelchair button", "score": 0.29, "box_xyxy": [53.9, 412.2, 66.7, 426.7]},
+    ]
+
+    detect._add_structural_call_panel_detection(image, detections)
+
+    panel = detections[1]
+    assert panel["normalized_component_type"] == "elevator call button panel"
+    assert panel["box_xyxy"][1] < 395
+    assert panel["box_xyxy"][3] > 430
+
+
 def test_open_cabin_interior_includes_ceiling_and_stops_at_inner_sill() -> None:
     image = np.zeros((602, 451, 3), dtype=np.uint8)
     image[490:493, 82:249] = 255
@@ -202,7 +457,23 @@ def test_car_operating_panel_is_a_replaceable_cop_target() -> None:
     assert detect._normalized_component_type("car operating panel") == detect.OPERATING_PANEL_CLASS
 
 
-def test_sample_wall_fixture_is_emergency_phone_not_blank_operating_panel() -> None:
+def test_duplicate_elevator_label_is_normalized_as_elevator_door() -> None:
+    assert detect._canonical_phrase("elevator elevator", ["elevator_door"]) == "elevator door"
+    assert detect._normalized_component_type("elevator elevator") == "elevator_door"
+
+
+def test_unmapped_prompt_fragment_is_not_returned_as_component() -> None:
+    detections = [
+        {"phrase": "tall stainless steel elevator elevator elevator", "normalized_component_type": None},
+        {"phrase": "elevator door", "normalized_component_type": "elevator_door"},
+    ]
+
+    kept = detect._filter_unmapped_component_detections(detections)
+
+    assert [det["normalized_component_type"] for det in kept] == ["elevator_door"]
+
+
+def test_sample_wall_fixture_is_replaceable_call_panel_not_emergency_phone() -> None:
     image = cv2.cvtColor(cv2.imread(str(ROOT / "tests" / "images" / "Sample.jpg")), cv2.COLOR_BGR2RGB)
     detections = [
         {
@@ -222,11 +493,11 @@ def test_sample_wall_fixture_is_emergency_phone_not_blank_operating_panel() -> N
     kept = detect._apply_component_geometry_validation(detections, image.shape[1], image.shape[0], image)
 
     assert len(kept) == 1
-    assert kept[0]["normalized_component_type"] == "emergency_phone"
+    assert kept[0]["normalized_component_type"] == "elevator call button panel"
     assert kept[0]["box_xyxy"] == pytest.approx([127, 425, 164, 496])
 
 
-def test_sample_structural_indicator_and_emergency_phone_are_added() -> None:
+def test_sample_structural_indicator_and_mod_panel_are_added() -> None:
     image = cv2.cvtColor(cv2.imread(str(ROOT / "tests" / "images" / "Sample.jpg")), cv2.COLOR_BGR2RGB)
     detections = [
         {
@@ -234,16 +505,69 @@ def test_sample_structural_indicator_and_emergency_phone_are_added() -> None:
             "normalized_component_type": "elevator_door",
             "score": 0.50,
             "box_xyxy": [212.9, 256.7, 389.3, 672.8],
-        }
+        },
+        {
+            "phrase": "emergency phone",
+            "normalized_component_type": "emergency_phone",
+            "score": 0.45,
+            "box_xyxy": [86, 425, 164, 496],
+        },
     ]
 
     detect._add_structural_floor_indicator_detection(image, detections)
-    detect._add_structural_emergency_phone_detection(image, detections)
+    detect._add_structural_call_panel_detection(image, detections)
 
     indicator = next(item for item in detections if item.get("normalized_component_type") == "floor_indicator_display")
-    phone = next(item for item in detections if item.get("normalized_component_type") == "emergency_phone")
+    panel = next(item for item in detections if item.get("normalized_component_type") == "elevator call button panel")
     assert indicator["box_xyxy"] == pytest.approx([275, 151, 313, 194])
-    assert phone["box_xyxy"] == pytest.approx([90, 425, 164, 496])
+    assert panel["box_xyxy"] == pytest.approx([90, 425, 164, 496])
+
+
+def test_unmatched_dark_wall_fixture_does_not_invent_call_panel() -> None:
+    image = cv2.cvtColor(cv2.imread(str(ROOT / "tests" / "images" / "Sample9.jpg")), cv2.COLOR_BGR2RGB)
+    detections = [
+        {"phrase": "elevator door", "normalized_component_type": "elevator_door", "score": 0.61, "box_xyxy": [169, 214, 291, 494]},
+    ]
+
+    detect._add_structural_call_panel_detection(image, detections)
+
+    assert [det["normalized_component_type"] for det in detections] == ["elevator_door"]
+
+
+def test_sample8_side_floor_display_replaces_false_overhead_indicator() -> None:
+    image = cv2.cvtColor(cv2.imread(str(ROOT / "tests" / "images" / "Sample8.jpg")), cv2.COLOR_BGR2RGB)
+    detections = [
+        {"phrase": "elevator door", "normalized_component_type": "elevator_door", "score": 0.32, "box_xyxy": [158, 75, 351, 525]},
+        {"phrase": "floor indicator display", "normalized_component_type": "floor_indicator_display", "score": 0.51, "box_xyxy": [184, 12, 311, 41]},
+        {"phrase": "accessibility control panel", "normalized_component_type": "accessibility_control_panel", "score": 0.36, "box_xyxy": [368, 225, 405, 275]},
+    ]
+
+    detect._promote_visual_floor_indicator_detections(image, detections)
+
+    indicators = [det for det in detections if det.get("normalized_component_type") == "floor_indicator_display"]
+    assert len(indicators) == 1
+    assert indicators[0]["box_xyxy"] == [368, 225, 405, 275]
+    assert indicators[0]["geometry_validation"]["reason"] == "visual_red_digits_on_side_floor_indicator"
+
+
+def test_open_full_door_detection_derives_interior_without_header_expansion() -> None:
+    image = cv2.cvtColor(cv2.imread(str(ROOT / "tests" / "images" / "Sample8.jpg")), cv2.COLOR_BGR2RGB)
+    detections = [
+        {"phrase": "elevator door", "normalized_component_type": "elevator_door", "score": 0.32, "box_xyxy": [158, 75, 351, 525]},
+    ]
+
+    detect._recover_elevator_door_header(image, detections)
+    detect._add_confirmed_open_interior_detection(image, detections)
+
+    assert detections[0]["box_xyxy"] == [158, 75, 351, 525]
+    assert any(det.get("normalized_component_type") == "elevator_cabin" for det in detections)
+
+
+def test_sample9_closed_textured_door_is_not_open_interior() -> None:
+    image = cv2.cvtColor(cv2.imread(str(ROOT / "tests" / "images" / "Sample9.jpg")), cv2.COLOR_BGR2RGB)
+    false_opening = [72.0, 119.7, 276.6, 532.3]
+
+    assert detect._has_open_elevator_interior_evidence(image, false_opening) is False
 
 
 def test_cop_panel_expands_to_include_aligned_display_plate() -> None:

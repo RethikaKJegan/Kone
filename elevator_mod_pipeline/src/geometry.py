@@ -151,32 +151,44 @@ def _fit_wall_plane(mask: np.ndarray, depth: np.ndarray, cfg: dict[str, Any]) ->
         return np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32), {"passed": False, "reason": "too_few_wall_pixels"}
 
     points = np.stack([xs.astype(np.float32), ys.astype(np.float32), depth[ys, xs].astype(np.float32)], axis=1)
-    if len(points) > 20000:
+    geometry_cfg = cfg["geometry"]
+    max_points = max(100, int(geometry_cfg.get("max_plane_points", 4000)))
+    if len(points) > max_points:
         rng = np.random.default_rng(42)
-        points = points[rng.choice(len(points), 20000, replace=False)]
+        points = points[rng.choice(len(points), max_points, replace=False)]
 
     best = np.zeros(len(points), dtype=bool)
     rng = np.random.default_rng(42)
-    for _ in range(200):
+    iterations = max(8, int(geometry_cfg.get("ransac_iterations", 64)))
+    for _ in range(iterations):
         sample = points[rng.choice(len(points), 3, replace=False)]
         normal = np.cross(sample[1] - sample[0], sample[2] - sample[0])
         norm = np.linalg.norm(normal)
         if norm < 1e-8:
             continue
         normal /= norm
-        d = -np.dot(normal, sample[0])
-        inliers = np.abs(points @ normal + d) < 0.02
+        d = -float(normal[0] * sample[0, 0] + normal[1] * sample[0, 1] + normal[2] * sample[0, 2])
+        inliers = _plane_residuals(points, normal, d) < 0.02
         if inliers.sum() > best.sum():
             best = inliers
 
     inlier_points = points[best] if best.any() else points
     centroid = inlier_points.mean(axis=0)
-    _, _, vh = np.linalg.svd(inlier_points - centroid, full_matrices=False)
-    normal = vh[-1]
-    d = -np.dot(normal, centroid)
-    residuals = np.abs(inlier_points @ normal + d)
+    centered = inlier_points - centroid
+    covariance = np.array(
+        [
+            [np.sum(centered[:, 0] * centered[:, 0]), np.sum(centered[:, 0] * centered[:, 1]), np.sum(centered[:, 0] * centered[:, 2])],
+            [np.sum(centered[:, 1] * centered[:, 0]), np.sum(centered[:, 1] * centered[:, 1]), np.sum(centered[:, 1] * centered[:, 2])],
+            [np.sum(centered[:, 2] * centered[:, 0]), np.sum(centered[:, 2] * centered[:, 1]), np.sum(centered[:, 2] * centered[:, 2])],
+        ],
+        dtype=np.float64,
+    )
+    _, vectors = np.linalg.eigh(covariance)
+    normal = vectors[:, 0]
+    d = -float(normal[0] * centroid[0] + normal[1] * centroid[1] + normal[2] * centroid[2])
+    residuals = _plane_residuals(inlier_points, normal, d)
     inlier_ratio = float(best.sum() / len(points))
-    passed = inlier_ratio >= float(cfg["geometry"]["min_plane_inlier_ratio"]) and float(residuals.mean()) <= float(cfg["geometry"]["max_plane_residual"])
+    passed = inlier_ratio >= float(geometry_cfg["min_plane_inlier_ratio"]) and float(residuals.mean()) <= float(geometry_cfg["max_plane_residual"])
     quality = {
         "inlier_ratio": inlier_ratio,
         "n_inliers": int(best.sum()),
@@ -186,6 +198,10 @@ def _fit_wall_plane(mask: np.ndarray, depth: np.ndarray, cfg: dict[str, Any]) ->
         "passed": bool(passed),
     }
     return np.array([normal[0], normal[1], normal[2], d], dtype=np.float32), quality
+
+
+def _plane_residuals(points: np.ndarray, normal: np.ndarray, d: float) -> np.ndarray:
+    return np.abs(points[:, 0] * normal[0] + points[:, 1] * normal[1] + points[:, 2] * normal[2] + d)
 
 
 def _wall_homography(mask: np.ndarray, wall: dict[str, Any]) -> dict[str, Any]:

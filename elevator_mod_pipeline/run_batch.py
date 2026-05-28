@@ -13,6 +13,8 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parent
+DEFAULT_OPEN_REFERENCE = "tests/images/Sample2_open_interior.jpg"
+DEFAULT_CLOSED_REFERENCE = "tests/images/Sample2_closed_exterior.jpg"
 VIDEO_MODE_ALIASES = {
     "pan_lr": {"motion_style": "pan_l_r"},
     "panel_lr": {"motion_style": "pan_l_r"},
@@ -48,6 +50,25 @@ def target_from(prompt: str) -> str:
     return (match.group(1) if match else prompt).strip()
 
 
+def replacements_from(test: dict) -> list[dict]:
+    replacements = test.get("replacements", test.get("mod_components", []))
+    if not replacements:
+        return []
+    normalized: list[dict] = []
+    for index, replacement in enumerate(replacements, start=1):
+        if not isinstance(replacement, dict):
+            raise ValueError(f"Replacement #{index} for {test['input_image']} must be an object")
+        item = dict(replacement)
+        if not item.get("asset") and item.get("mod_panel"):
+            item["asset"] = item["mod_panel"]
+        if not item.get("asset"):
+            raise ValueError(f"Replacement #{index} for {test['input_image']} must define asset or mod_panel")
+        if not item.get("target_keywords") and item.get("prompt"):
+            item["target_keywords"] = [target_from(item["prompt"])]
+        normalized.append(item)
+    return normalized
+
+
 def write_config(test: dict, idx: int, base: dict, *, no_video: bool = False, video_mode: str | None = None) -> Path:
     name = Path(test["input_image"]).stem or f"case_{idx}"
     mode_name = normalize_video_mode_name(video_mode or test.get("video_mode") or test.get("mode"))
@@ -58,13 +79,24 @@ def write_config(test: dict, idx: int, base: dict, *, no_video: bool = False, vi
     target = test.get("target", target_from(test["prompt"]))
     cfg = dict(base)
     cfg.update(input_image=test["input_image"], mod_panel=test["mod_panel"], run_dir=str(run_dir))
+    input_validation_cfg = {**base.get("input_validation", {}), **test.get("input_validation", {})}
+    input_validation_cfg["fail_on_invalid"] = bool(test.get("fail_on_invalid", False))
+    cfg["input_validation"] = input_validation_cfg
     removal_keywords = [target]
     if Path(test["mod_panel"]).stem == "mod_long" and target.lower() in {"door track", "threshold plate"}:
         removal_keywords = ["door track", "threshold plate"]
     cfg["removal"] = {**base["removal"], "target_keywords": removal_keywords}
     cfg["insertion"] = {**base["insertion"], "target_keywords": [target]}
+    replacements = replacements_from(test)
+    if replacements:
+        cfg["replacements"] = replacements
+    replacement_labels = [
+        label
+        for replacement in replacements
+        for label in replacement.get("target_keywords", [])
+    ]
     detection_labels = test.get("detection_labels", base["detection"]["labels"])
-    detection_cfg = {**base["detection"], "labels": sorted(set(detection_labels + [target]))}
+    detection_cfg = {**base["detection"], "labels": sorted(set(detection_labels + [target] + replacement_labels))}
     for key in (
         "box_threshold",
         "text_threshold",
@@ -97,9 +129,18 @@ def write_config(test: dict, idx: int, base: dict, *, no_video: bool = False, vi
     ):
         if key in test:
             video_cfg[key] = test[key]
+    if not video_cfg.get("open_reference_image"):
+        video_cfg["open_reference_image"] = DEFAULT_OPEN_REFERENCE
+    if not video_cfg.get("closed_reference_image"):
+        video_cfg["closed_reference_image"] = DEFAULT_CLOSED_REFERENCE
     if mode_name:
         video_cfg.update(video_config_for_mode(mode_name))
         video_cfg["mode"] = mode_name
+    elif video_cfg.get("enabled", True) and not video_cfg.get("motion_style") and not video_cfg.get("door_functionality"):
+        # Default batch videos show one physical state transition: closed opens,
+        # open closes using the corresponding provided reference image.
+        video_cfg["action"] = "auto"
+        video_cfg["cycle"] = False
     if no_video:
         video_cfg["enabled"] = False
     cfg["video"] = video_cfg
