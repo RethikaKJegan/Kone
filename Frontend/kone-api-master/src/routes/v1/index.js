@@ -6,6 +6,7 @@ const config = require('../../config/config');
 const videoRoute = require('./video.route');
 const projectRoute = require('./project.route');
 const offeringRoute = require('./offering.route');
+const guestRoute = require('./guest.route');
 
 const router = express.Router();
 
@@ -29,6 +30,10 @@ const defaultRoutes = [
   {
     path: '/offerings',
     route: offeringRoute,
+  },
+  {
+    path: '/guest',
+    route: guestRoute,
   },
 ];
 

@@ -10,18 +10,18 @@ afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 
 async function signIn() {
-  const res = await apiClient.post('/auth/login', {
+  const res = await apiClient.post('/api/auth/signin', {
     email: 'pavan@bellcorpstudio.com',
     password: 'password123',
   })
-  localStorage.setItem('salesnxt_token', res.data.tokens.access.token)
-  return res.data.tokens.access.token
+  localStorage.setItem('salesnxt_token', res.data.token)
+  return res.data.token
 }
 
 describe('projects API', () => {
   it('fetches seeded projects for authenticated user', async () => {
     await signIn()
-    const res = await apiClient.get('/projects')
+    const res = await apiClient.get('/api/projects')
     expect(Array.isArray(res.data)).toBe(true)
     expect(res.data.length).toBeGreaterThan(0)
     expect(res.data[0]).toHaveProperty('name')
@@ -29,7 +29,7 @@ describe('projects API', () => {
 
   it('creates a new project', async () => {
     await signIn()
-    const res = await apiClient.post('/projects', { name: 'Test Project' })
+    const res = await apiClient.post('/api/projects', { name: 'Test Project' })
     expect(res.data.name).toBe('Test Project')
     expect(res.data.status).toBe('draft')
     expect(res.status).toBe(201)
@@ -38,7 +38,7 @@ describe('projects API', () => {
   it('rejects project name that is too short', async () => {
     await signIn()
     try {
-      await apiClient.post('/projects', { name: 'X' })
+      await apiClient.post('/api/projects', { name: 'X' })
       expect.fail('should have thrown')
     } catch (err: unknown) {
       const axiosErr = err as { response?: { status: number } }
@@ -48,9 +48,9 @@ describe('projects API', () => {
 
   it('deletes a project', async () => {
     await signIn()
-    const createRes = await apiClient.post('/projects', { name: 'To Delete' })
+    const createRes = await apiClient.post('/api/projects', { name: 'To Delete' })
     const id = createRes.data.id
-    const deleteRes = await apiClient.delete(`/projects/${id}`)
+    const deleteRes = await apiClient.delete(`/api/projects/${id}`)
     expect(deleteRes.status).toBe(204)
   })
 })

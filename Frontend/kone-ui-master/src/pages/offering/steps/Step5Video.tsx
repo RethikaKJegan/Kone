@@ -1,9 +1,12 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { Play } from 'lucide-react'
+import apiClient from '../../../api/client'
+import { getGuestSessionId, isGuestSession } from '../../../api/guestWorkflow'
 import { useOfferingStore } from '../../../store/offeringStore'
 import { VIDEO_MOTION_STYLES, VIDEO_QUALITIES } from '../../../lib/constants'
 import { cn } from '../../../lib/utils'
+import { toast } from '../../../hooks/useToast'
 import type { Offering } from '../../../types'
 
 type MotionStyle = Offering['videoMotionStyle']
@@ -12,11 +15,33 @@ type Quality = Offering['videoQuality']
 export default function Step5Video() {
   const { projectId, offeringId } = useParams()
   const navigate = useNavigate()
-  const { currentOffering, setVideoSettings, goToStep } = useOfferingStore()
+  const { currentOffering, setVideoSettings, setCurrentOffering, goToStep } = useOfferingStore()
 
   const [motion, setMotion] = useState<MotionStyle>(currentOffering?.videoMotionStyle ?? 'zoom-in')
   const [quality, setQuality] = useState<Quality>(currentOffering?.videoQuality ?? '1080p')
   const [playing, setPlaying] = useState(false)
+  const [generating, setGenerating] = useState(false)
+  const [loadFailed, setLoadFailed] = useState(false)
+  const videoReady = !!currentOffering?.outputVideoUrl
+    && currentOffering.videoMotionStyle === motion
+    && currentOffering.videoQuality === quality
+    && !loadFailed
+
+  const selectMotion = (value: MotionStyle) => {
+    setMotion(value)
+    setLoadFailed(false)
+    if (currentOffering?.outputVideoUrl) {
+      setCurrentOffering({ ...currentOffering, outputVideoUrl: null })
+    }
+  }
+
+  const selectQuality = (value: Quality) => {
+    setQuality(value)
+    setLoadFailed(false)
+    if (currentOffering?.outputVideoUrl) {
+      setCurrentOffering({ ...currentOffering, outputVideoUrl: null })
+    }
+  }
 
   const handlePlay = () => {
     setPlaying(true)
@@ -25,16 +50,40 @@ export default function Step5Video() {
 
   const motionLabel = VIDEO_MOTION_STYLES.find(m => m.value === motion)?.label ?? ''
 
-  const getAnimStyle = (): React.CSSProperties => {
-    if (!playing) return {}
-    if (motion === 'zoom-in') return { animation: 'salesnxt-zoom 4s ease-in-out forwards' }
-    if (motion === 'pan-lr') return { animation: 'salesnxt-pan-lr 4s ease-in-out forwards' }
-    if (motion === 'pan-rl') return { animation: 'salesnxt-pan-rl 4s ease-in-out forwards' }
-    return {}
-  }
-
   const handleContinue = async () => {
-    await setVideoSettings({ videoMotionStyle: motion, videoQuality: quality })
+    setVideoSettings({ videoMotionStyle: motion, videoQuality: quality })
+    if (isGuestSession() && projectId && currentOffering && !videoReady) {
+      setGenerating(true)
+      setLoadFailed(false)
+      setCurrentOffering({ ...currentOffering, outputVideoUrl: null })
+      const sessionId = await getGuestSessionId()
+      await apiClient.post('/guest/video', {
+        is_guest: true,
+        session_id: sessionId,
+        project_id: projectId,
+        project_name: currentOffering.name,
+        video_options: { motion, speed: currentOffering.videoSpeed, quality },
+      })
+      for (;;) {
+        const { data } = await apiClient.get('/guest/status', {
+          params: { session_id: sessionId, project_id: projectId },
+        })
+        if (data.status === 'video_ready') {
+          setLoadFailed(false)
+          setCurrentOffering({ ...currentOffering, videoMotionStyle: motion, videoQuality: quality, outputVideoUrl: `${data.video_url}?v=${Date.now()}` })
+          break
+        }
+        if (data.status === 'failed') {
+          setGenerating(false)
+          setCurrentOffering({ ...currentOffering, outputVideoUrl: null })
+          toast(data.error || 'Video generation failed')
+          return
+        }
+        await new Promise(resolve => setTimeout(resolve, 2000))
+      }
+      setGenerating(false)
+      return
+    }
     goToStep(6)
     navigate(`/projects/${projectId}/offerings/${offeringId}/step/6`)
   }
@@ -44,15 +93,15 @@ export default function Step5Video() {
     goToStep(4)
   }
 
-  const btnBase = 'rounded-[5px] border text-sm font-medium transition-colors duration-[120ms]'
-  const btnActive = 'border-[#0A0A0A] bg-[#0A0A0A] text-white'
-  const btnInactive = 'border-[#E4E4E4] bg-white text-[#374151] hover:border-[#C8C8C8]'
+  const btnBase = 'rounded-lg border text-[13px] font-semibold transition-all duration-[150ms]'
+  const btnActive = 'border-[#1450F5] bg-[#1450F5] text-white shadow-sm'
+  const btnInactive = 'border-[#E4E4E4] bg-white text-[#374151] hover:border-[#1450F5]/40'
 
   return (
-    <div className="rounded-lg border border-[#E4E4E4] bg-white p-8">
+    <div className="rounded-xl border border-[#E9ECEF] bg-white p-8 shadow-sm">
       <div className="mb-6 flex items-start justify-between">
-        <h2 className="text-base font-semibold text-[#0A0A0A]">5 &nbsp; Video Settings</h2>
-        <button onClick={handleBack} className="text-xs text-[#A3A3A3] transition-colors duration-[120ms] hover:text-[#525252]">Back</button>
+        <h2 className="text-heading text-[15px] font-semibold text-[#111827]">5 &nbsp; Video Settings</h2>
+        <button onClick={handleBack} className="text-xs font-medium text-[#9CA3AF] transition-colors duration-[120ms] hover:text-[#6B7280]">Back</button>
       </div>
 
       <div className="flex gap-8">
@@ -65,17 +114,32 @@ export default function Step5Video() {
             role="button"
             aria-label="Play video preview"
           >
-            {currentOffering?.uploadedFileUrl ? (
+            {videoReady ? (
+              <video
+                src={currentOffering.outputVideoUrl ?? ''}
+                controls
+                className="h-full w-full object-contain"
+                onError={() => {
+                  setLoadFailed(true)
+                  setCurrentOffering({ ...currentOffering, outputVideoUrl: null })
+                  if (!generating) toast('Video preview failed to load. Generate it again.', 'destructive')
+                }}
+              />
+            ) : generating ? (
+              <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-[#1A1A1A] text-white">
+                <div className="h-7 w-7 animate-spin rounded-full border-2 border-white/20 border-t-white" />
+                <p className="text-sm font-medium">Generating video preview...</p>
+              </div>
+            ) : (currentOffering?.outputImageUrl ?? currentOffering?.uploadedFileUrl) ? (
               <img
-                src={currentOffering.uploadedFileUrl}
+                src={currentOffering.outputImageUrl ?? currentOffering.uploadedFileUrl ?? ''}
                 alt="Video preview"
-                className="w-full h-full object-cover"
-                style={getAnimStyle()}
+                className="h-full w-full object-contain"
               />
             ) : (
-              <div className="w-full h-full bg-[#1A1A1A]" style={getAnimStyle()} />
+              <div className="h-full w-full bg-[#1A1A1A]" />
             )}
-            {!playing && (
+            {!videoReady && !playing && (
               <div className="absolute inset-0 flex items-center justify-center">
                 <div className="flex items-center justify-center rounded-full bg-white/20 transition-colors duration-[120ms] hover:bg-white/30" style={{ width: 48, height: 48 }}>
                   <Play className="ml-0.5 text-white" style={{ width: 18, height: 18 }} />
@@ -89,12 +153,12 @@ export default function Step5Video() {
         {/* Controls */}
         <div className="w-56 shrink-0 space-y-6">
           <div>
-            <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.05em] text-[#6B7280]">Motion Style</p>
+            <p className="label-caps mb-2">Motion Style</p>
             <div className="flex flex-col gap-1.5">
               {VIDEO_MOTION_STYLES.map(s => (
                 <button
                   key={s.value}
-                  onClick={() => setMotion(s.value as MotionStyle)}
+                  onClick={() => selectMotion(s.value as MotionStyle)}
                   className={cn(btnBase, 'px-3', motion === s.value ? btnActive : btnInactive)}
                   style={{ height: 34 }}
                 >
@@ -105,12 +169,12 @@ export default function Step5Video() {
           </div>
 
           <div>
-            <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.05em] text-[#6B7280]">Quality</p>
+            <p className="label-caps mb-2">Quality</p>
             <div className="grid grid-cols-2 gap-1.5">
               {VIDEO_QUALITIES.map(q => (
                 <button
                   key={q}
-                  onClick={() => setQuality(q as Quality)}
+                  onClick={() => selectQuality(q as Quality)}
                   className={cn(btnBase, 'text-xs', quality === q ? btnActive : btnInactive)}
                   style={{ height: 34 }}
                 >
@@ -125,10 +189,11 @@ export default function Step5Video() {
       <div className="mt-8 flex justify-end">
         <button
           onClick={handleContinue}
-          className="rounded-[5px] bg-[#0A0A0A] px-5 text-sm font-medium text-white transition-colors duration-[120ms] hover:bg-[#262626]"
-          style={{ height: 34 }}
+          disabled={generating}
+          className="rounded-lg bg-[#1450F5] px-6 text-[13px] font-semibold text-white transition-all duration-[150ms] hover:bg-[#1040D0] hover:shadow-md hover:shadow-[#1450F5]/20 disabled:cursor-not-allowed disabled:opacity-40"
+          style={{ height: 38 }}
         >
-          Continue
+          {generating ? 'Generating...' : videoReady ? 'Continue' : 'Generate Preview'}
         </button>
       </div>
 

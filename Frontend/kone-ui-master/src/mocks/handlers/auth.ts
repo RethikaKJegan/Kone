@@ -85,22 +85,6 @@ export const authHandlers = [
     return HttpResponse.json({ user, tokens: mockTokens }, { status: 201 })
   }),
 
-  http.post('/api/v1/auth/guest-login', async () => {
-    await delay(400)
-    const id = `guest-${generateId()}`
-    const user: User = {
-      id,
-      email: `${id}@salesnxt.local`,
-      name: 'Guest User',
-      role: 'guest',
-      company: 'KONE',
-      avatarInitials: 'GU',
-    }
-    const mockTokens = makeTokenPair(user.id)
-    users.set(user.email, { ...user, password: `Guest${generateId()}1` })
-    return HttpResponse.json({ user, tokens: mockTokens }, { status: 201 })
-  }),
-
   http.post('/api/v1/auth/logout', async () => {
     await delay(200)
     return new HttpResponse(null, { status: 204 })

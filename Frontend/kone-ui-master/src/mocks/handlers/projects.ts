@@ -18,15 +18,12 @@ export const projectHandlers = [
     const user = getUserFromToken(auth)
     const body = (await request.json()) as { name: string }
 
-    if (!user) {
-      return HttpResponse.json({ code: 401, message: 'Unauthorized' }, { status: 401 })
-    }
-
     if (!body.name || body.name.length < 2 || body.name.length > 80) {
       return HttpResponse.json({ code: 400, message: 'Project name must be 2–80 characters' }, { status: 400 })
     }
 
-    const project = createProject(body.name, user.id)
+    const userId = user?.id ?? `guest-${Date.now()}`
+    const project = createProject(body.name, userId)
     return HttpResponse.json(project, { status: 201 })
   }),
 

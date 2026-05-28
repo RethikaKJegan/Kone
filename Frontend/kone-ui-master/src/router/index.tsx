@@ -12,8 +12,8 @@ const OfferingShell = lazy(() => import('../pages/offering/OfferingShell'))
 const BrochurePage = lazy(() => import('../pages/offering/brochure/BrochurePage'))
 
 function AuthGuard() {
-  const { isAuthenticated } = useAuthStore()
-  if (!isAuthenticated) return <Navigate to="/signin" replace />
+  const { isAuthenticated, isGuest } = useAuthStore()
+  if (!isAuthenticated && !isGuest) return <Navigate to="/signin" replace />
   return <Outlet />
 }
 

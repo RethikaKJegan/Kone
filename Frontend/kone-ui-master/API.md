@@ -1,14 +1,14 @@
 # SalesNXT — API Reference
 
-The UI is wired to the Express API by default. The Vite dev-server mock (`src/mocks/vitePlugin.ts`) is available only when `VITE_ENABLE_MOCK_API=true`.  
-Base path: `/api/v1` in the UI, proxied to `http://localhost:4000` during development.  
+All endpoints are currently served by the **Vite dev-server mock** (`src/mocks/vitePlugin.ts`).  
+Base path: same origin as the frontend (no separate host in dev).  
 Auth: `Authorization: Bearer <token>` header on all protected routes.
 
 ---
 
 ## Auth
 
-### `POST /api/v1/auth/register`
+### `POST /api/auth/signup`
 
 Create a new account.
 
@@ -24,7 +24,7 @@ Create a new account.
 **Validation**
 - `name` — min 2 characters
 - `email` — valid email format
-- `password` — min 8 characters, at least 1 letter, at least 1 number
+- `password` — min 8 characters
 
 **Response `201`**
 ```json
@@ -37,20 +37,11 @@ Create a new account.
     "company": "KONE",
     "avatarInitials": "PK"
   },
-  "tokens": {
-    "access": {
-      "token": "jwt-access-token",
-      "expires": "2026-05-28T10:30:00.000Z"
-    },
-    "refresh": {
-      "token": "jwt-refresh-token",
-      "expires": "2026-06-27T10:00:00.000Z"
-    }
-  }
+  "token": "1718000000000-xyz9876"
 }
 ```
 
-**Error `400`** — email already registered
+**Error `409`** — email already registered
 ```json
 { "message": "An account with this email already exists" }
 ```
@@ -62,7 +53,7 @@ Create a new account.
 
 ---
 
-### `POST /api/v1/auth/login`
+### `POST /api/auth/signin`
 
 Sign in with existing credentials.
 
@@ -74,16 +65,18 @@ Sign in with existing credentials.
 }
 ```
 
+**Special rule:** any `@kone.com` email with a non-empty password is accepted automatically (no prior signup needed).
+
 **Response `200`** — same shape as signup `201`
 
-**Error `401`** — wrong credentials
+**Error `400`** — wrong credentials
 ```json
 { "message": "Incorrect email or password" }
 ```
 
 ---
 
-### `POST /api/v1/auth/logout`
+### `POST /api/auth/signout`
 
 Invalidate the current session.
 
@@ -94,33 +87,7 @@ Invalidate the current session.
 
 ---
 
-### `POST /api/v1/auth/guest-login`
-
-Create a temporary guest session with normal access and refresh tokens.
-
-**Response `201`**
-```json
-{
-  "user": {
-    "id": "guest-user-id",
-    "email": "guest-...@salesnxt.local",
-    "name": "Guest User",
-    "role": "guest",
-    "company": "KONE",
-    "avatarInitials": "GU"
-  },
-  "tokens": {
-    "access": { "token": "jwt-access-token", "expires": "2026-05-28T10:30:00.000Z" },
-    "refresh": { "token": "jwt-refresh-token", "expires": "2026-06-27T10:00:00.000Z" }
-  }
-}
-```
-
-Guest project, offering, brochure, and video actions use the same protected API routes as signed-in users.
-
----
-
-### `GET /api/v1/auth/me`
+### `GET /api/auth/me`
 
 Return the user for the current token.
 
@@ -137,9 +104,9 @@ Return the user for the current token.
 
 ## Projects
 
-### `GET /api/v1/projects`
+### `GET /api/projects`
 
-List all projects for the authenticated user.
+List all projects for the authenticated user. Returns `[]` for guests.
 
 **Headers:** `Authorization: Bearer <token>`
 
@@ -160,7 +127,7 @@ List all projects for the authenticated user.
 
 ---
 
-### `POST /api/v1/projects`
+### `POST /api/projects`
 
 Create a new project.
 
@@ -180,7 +147,7 @@ Create a new project.
 
 ---
 
-### `DELETE /api/v1/projects/:id`
+### `DELETE /api/projects/:id`
 
 Delete a project by ID.
 
@@ -190,7 +157,7 @@ Delete a project by ID.
 
 ## Offerings
 
-### `GET /api/v1/projects/:projectId/offerings`
+### `GET /api/projects/:projectId/offerings`
 
 List all offerings for a project.
 
@@ -198,7 +165,7 @@ List all offerings for a project.
 
 ---
 
-### `POST /api/v1/projects/:projectId/offerings`
+### `POST /api/projects/:projectId/offerings`
 
 Create a new offering (always starts as draft with all defaults).
 
@@ -373,7 +340,7 @@ Update one or more brochure sections. Automatically recalculates `sectionsComple
 ## Data Types
 
 ```typescript
-type UserRole = 'authenticated'
+type UserRole = 'authenticated' | 'guest'
 
 interface User {
   id: string
@@ -455,12 +422,12 @@ The table below describes what each endpoint needs in production.
 
 | Endpoint | What it needs |
 |---|---|
-| `POST /api/v1/auth/register` | User table in DB, password hashing (bcrypt), JWT signing |
-| `POST /api/v1/auth/login` | Password verify (bcrypt), JWT signing |
-| `GET /api/v1/auth/me` | JWT verify, user lookup |
-| `POST /api/v1/auth/logout` | Refresh token invalidation |
-| `GET/POST/DELETE /api/v1/projects` | Projects table scoped to `userId` |
-| `GET/POST /api/v1/projects/:id/offerings` | Offerings table with `projectId` FK |
+| `POST /api/auth/signup` | User table in DB, password hashing (bcrypt), JWT signing |
+| `POST /api/auth/signin` | Password verify (bcrypt), JWT signing |
+| `GET /api/auth/me` | JWT verify, user lookup |
+| `POST /api/auth/signout` | JWT blocklist or session invalidation |
+| `GET/POST/DELETE /api/projects` | Projects table scoped to `userId` |
+| `GET/POST /api/projects/:id/offerings` | Offerings table with `projectId` FK |
 | `PATCH /api/offerings/:id` | Generic partial update |
 | `POST /api/offerings/:id/ai-placement` | **Vision model** (GPT-4o / Gemini Vision) — detect surfaces in uploaded photo, return `{x, y}` percentages per component |
 | `POST /api/offerings/:id/render` | **Image compositing** (Sharp / Pillow) — overlay component PNGs at pin coords; **Video generation** (FFmpeg) |

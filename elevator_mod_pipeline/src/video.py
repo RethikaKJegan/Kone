@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import shutil
 import subprocess
 import wave
 from pathlib import Path
@@ -17,6 +18,23 @@ MID_HOLD_SECONDS = 0.7
 END_HOLD_SECONDS = 0.9
 LOGGER = logging.getLogger(__name__)
 MOTION_STYLES = {"zoom_in", "pan_l_r", "pan_r_l", "pan_t_b", "pan_b_t"}
+MOTION_STYLE_ALIASES = {
+    "zoom": "zoom_in",
+    "zoom-in": "zoom_in",
+    "zoom_in": "zoom_in",
+    "pan-lr": "pan_l_r",
+    "pan_lr": "pan_l_r",
+    "pan-l-r": "pan_l_r",
+    "pan_l_r": "pan_l_r",
+    "pan-rl": "pan_r_l",
+    "pan_rl": "pan_r_l",
+    "pan-r-l": "pan_r_l",
+    "pan_r_l": "pan_r_l",
+    "left": "pan_r_l",
+    "right": "pan_l_r",
+    "pan_left": "pan_r_l",
+    "pan_right": "pan_l_r",
+}
 DOOR_FUNCTIONALITY = {"open", "close"}
 QUALITY_SIZES = {
     "360p": (640, 360),
@@ -295,6 +313,7 @@ def normalize_video_mode_request(video_cfg: dict[str, Any]) -> dict[str, Any]:
     door_functionality = video_cfg.get("door_functionality")
     if motion_style is not None:
         motion_style = str(motion_style).strip().lower()
+        motion_style = MOTION_STYLE_ALIASES.get(motion_style, motion_style)
         if motion_style not in MOTION_STYLES:
             raise ValueError(f"Unsupported motion_style: {motion_style}")
     if door_functionality is not None:
@@ -632,28 +651,69 @@ def render_stable_cpu_zoom_motion(
 
 
 def write_frames_mp4(out_path: Path, frames: list[np.ndarray], fps: int, crf: str, renderer: str) -> dict[str, Any]:
-    del crf, renderer
+    del renderer
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_path = out_path.with_name(out_path.stem + ".opencv.mp4")
     height, width = frames[0].shape[:2]
     writer = None
     for codec in ("mp4v", "avc1", "H264"):
-        candidate = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*codec), float(fps), (width, height))
+        candidate = cv2.VideoWriter(str(raw_path), cv2.VideoWriter_fourcc(*codec), float(fps), (width, height))
         if candidate.isOpened():
             writer = candidate
             break
         candidate.release()
     if writer is None:
-        raise RuntimeError(f"Could not open an MP4 writer for {out_path}")
+        raise RuntimeError(f"Could not open an MP4 writer for {raw_path}")
     try:
         for frame in frames:
             writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
     finally:
         writer.release()
+    browser_safe = transcode_browser_mp4(raw_path, out_path, fps, crf)
+    if not browser_safe:
+        raw_path.replace(out_path)
     return {
         "video_path": str(out_path),
         "fps": fps,
         "frame_count": len(frames),
+        "browser_safe_h264": browser_safe,
     }
+
+
+def transcode_browser_mp4(raw_path: Path, out_path: Path, fps: int, crf: str) -> bool:
+    ffmpeg = find_ffmpeg_executable()
+    if ffmpeg == "ffmpeg" and shutil.which("ffmpeg") is None:
+        return False
+    tmp_out = out_path.with_name(out_path.stem + ".h264.mp4")
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(raw_path),
+        "-r",
+        str(fps),
+        "-an",
+        "-c:v",
+        "libx264",
+        "-profile:v",
+        "main",
+        "-pix_fmt",
+        "yuv420p",
+        "-crf",
+        str(crf),
+        "-movflags",
+        "+faststart",
+        str(tmp_out),
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        tmp_out.replace(out_path)
+        safe_unlink(raw_path)
+        return True
+    except Exception as exc:
+        LOGGER.warning("[VIDEO] H.264 browser transcode failed; using OpenCV MP4: %s", exc)
+        safe_unlink(tmp_out)
+        return False
 
 
 def resize_exact_rgb(frame: np.ndarray, target_w: int, target_h: int) -> np.ndarray:

@@ -43,6 +43,10 @@ export default defineConfig(({ mode }) => {
           target: 'http://localhost:4000',
           changeOrigin: true,
         },
+        '/storage': {
+          target: env.VITE_API_BASE_URL?.replace('/api/v1', '') || 'http://localhost:4000',
+          changeOrigin: true,
+        },
       },
     },
     build: {

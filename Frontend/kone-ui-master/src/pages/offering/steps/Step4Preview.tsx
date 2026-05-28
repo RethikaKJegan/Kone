@@ -24,7 +24,7 @@ export default function Step4Preview() {
   )
 
   useEffect(() => {
-    void setAnnotationState(annotationsOn, activeFilters)
+    setAnnotationState(annotationsOn, activeFilters)
   }, [annotationsOn, activeFilters])
 
   const toggleFilter = (k: ComponentKey) =>
@@ -43,10 +43,10 @@ export default function Step4Preview() {
   }
 
   return (
-    <div className="rounded-lg border border-[#E4E4E4] bg-white p-8">
+    <div className="rounded-xl border border-[#E9ECEF] bg-white p-8 shadow-sm">
       <div className="mb-6 flex items-start justify-between">
-        <h2 className="text-base font-semibold text-[#0A0A0A]">4 &nbsp; Preview with Annotations</h2>
-        <button onClick={handleBack} className="text-xs text-[#A3A3A3] transition-colors duration-[120ms] hover:text-[#525252]">Back</button>
+        <h2 className="text-heading text-[15px] font-semibold text-[#111827]">4 &nbsp; Preview with Annotations</h2>
+        <button onClick={handleBack} className="text-xs font-medium text-[#9CA3AF] transition-colors duration-[120ms] hover:text-[#6B7280]">Back</button>
       </div>
 
       {/* Filter bar */}

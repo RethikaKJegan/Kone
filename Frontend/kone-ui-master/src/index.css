@@ -4,15 +4,15 @@
 
 /* ── KONE App Animations ─────────────────────────────────── */
 @keyframes kone-enter {
-  from { opacity: 0; transform: translateY(10px); }
+  from { opacity: 0; transform: translateY(8px); }
   to   { opacity: 1; transform: translateY(0); }
 }
 
 .kone-enter {
-  animation: kone-enter 0.32s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  animation: kone-enter 0.28s cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
 
-/* Primary action button — blue lift */
+/* Primary action button */
 .kone-btn {
   transition: background 0.15s ease, transform 0.18s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.18s ease;
 }
@@ -56,13 +56,71 @@
   }
 
   html {
-    font-family: 'Inter', system-ui, sans-serif;
+    font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+    font-feature-settings: 'kern' 1, 'liga' 1, 'calt' 1;
+    text-rendering: optimizeLegibility;
   }
 
   body {
-    @apply bg-[#F7F7F7] text-[#525252];
-    font-family: 'Inter', system-ui, sans-serif;
+    @apply bg-[#F5F6F8] text-[#4B5563];
+    font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: 'Outfit', system-ui, sans-serif;
+    font-feature-settings: 'kern' 1;
+    letter-spacing: -0.02em;
+    color: #111827;
+  }
+}
+
+/* ── Typography utilities ─────────────────────────────────── */
+.text-heading {
+  font-family: 'Outfit', system-ui, sans-serif;
+  letter-spacing: -0.02em;
+}
+
+.label-caps {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #6B7280;
+}
+
+/* ── Card & surface refinements ──────────────────────────── */
+.surface-card {
+  background: #FFFFFF;
+  border: 1px solid #E9ECEF;
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.02);
+}
+
+.surface-card-hover {
+  transition: box-shadow 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+}
+.surface-card-hover:hover {
+  box-shadow: 0 8px 24px -6px rgba(0,0,0,0.08), 0 2px 8px -2px rgba(0,0,0,0.04);
+  border-color: rgba(20,80,245,0.2);
+  transform: translateY(-2px);
+}
+
+/* ── Form field refinements ──────────────────────────────── */
+.field-input {
+  font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+  font-size: 14px;
+  font-weight: 450;
+  letter-spacing: 0.01em;
+}
+.field-input::placeholder {
+  color: #C4C9D4;
+}
+.field-input:focus {
+  outline: none;
+  border-color: #1450F5;
+  box-shadow: 0 0 0 3px rgba(20, 80, 245, 0.08);
 }

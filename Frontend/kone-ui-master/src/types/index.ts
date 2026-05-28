@@ -28,6 +28,7 @@ export interface ComponentItem {
   key: ComponentKey
   label: string
   description: string
+  imageUrl?: string
 }
 
 export interface ComponentPin {

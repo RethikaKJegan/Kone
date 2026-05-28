@@ -14,45 +14,7 @@ apiClient.interceptors.request.use(config => {
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
   }
-  if (config.data instanceof FormData) {
-    delete config.headers['Content-Type']
-  }
   return config
 })
-
-apiClient.interceptors.response.use(
-  response => response,
-  async error => {
-    const originalRequest = error.config
-    const refreshToken = localStorage.getItem('salesnxt_refresh_token')
-
-    if (error.response?.status !== 401 || !refreshToken || originalRequest?._retry) {
-      return Promise.reject(error)
-    }
-
-    originalRequest._retry = true
-    try {
-      const { data } = await axios.post(
-        `${apiClient.defaults.baseURL}/auth/refresh-tokens`,
-        { refreshToken }
-      )
-      const accessToken = data.access?.token
-      const nextRefreshToken = data.refresh?.token
-      if (accessToken) {
-        localStorage.setItem('salesnxt_token', accessToken)
-        originalRequest.headers.Authorization = `Bearer ${accessToken}`
-      }
-      if (nextRefreshToken) {
-        localStorage.setItem('salesnxt_refresh_token', nextRefreshToken)
-      }
-      return apiClient(originalRequest)
-    } catch (refreshError) {
-      localStorage.removeItem('salesnxt_token')
-      localStorage.removeItem('salesnxt_refresh_token')
-      localStorage.removeItem('salesnxt_user')
-      return Promise.reject(refreshError)
-    }
-  }
-)
 
 export default apiClient

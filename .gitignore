@@ -52,6 +52,9 @@ runs/
 outputs/
 tests/outputs/
 uploads/
+Frontend/kone-api-master/storage/
+elevator_mod_pipeline/input.jpg
+elevator_mod_pipeline/run_single.py
 Video/
 *.mp4
 *.avi

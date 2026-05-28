@@ -169,7 +169,7 @@ const features = [
 ]
 
 const steps = [
-  { n: '01', title: 'Upload',            desc: 'Upload your building photo to get started.' },
+  { n: '01', title: 'Upload',            desc: 'Upload your building photo or video to get started.' },
   { n: '02', title: 'Select & AI Place', desc: 'Select KONE components and let AI position them precisely.' },
   { n: '03', title: 'Export',            desc: 'Export renders, video, and a complete sales brochure.' },
 ]
@@ -197,14 +197,10 @@ function useScrollReveal() {
 
 // ── Page ─────────────────────────────────────────────────────────────────────
 export default function LandingPage() {
-  const navRef          = useRef<HTMLElement>(null)
   const navigate        = useNavigate()
-  const continueAsGuest = useAuthStore(s => s.continueAsGuest)
-
-  const handleGuest = async () => {
-    await continueAsGuest()
-    navigate('/projects')
-  }
+  const continueAsGuest = useAuthStore((s) => s.continueAsGuest)
+  const handleGuest     = () => { continueAsGuest(); navigate('/projects') }
+  const navRef          = useRef<HTMLElement>(null)
 
   useScrollReveal()
 

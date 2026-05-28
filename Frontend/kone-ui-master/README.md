@@ -30,20 +30,20 @@ npm run dev        # starts on localhost:3000 with mock API
 
 ### Demo credentials
 
-These are available only when `VITE_ENABLE_MOCK_API=true`.
-
 | Email | Password |
 |---|---|
 | `pavan@bellcorpstudio.com` | `password123` |
 | `any@kone.com` | any non-empty password |
 
-Or click **Continue as guest** / **View demo**. Guest login calls the Express API at `/api/v1/auth/guest-login`, receives normal auth tokens, and all project/offering actions still pass through protected backend routes and validation.
+Or click **Continue as guest** — no account needed.
 
 ### Sign up flow
 
 1. Go to `/signup`
-2. Fill in name, email, and a password with at least 8 characters, 1 letter, and 1 number
-3. Account creation is sent to the Express API so backend validation, password hashing, and token generation are applied
+2. Fill in name, email (any format), password (min 8 chars)
+3. Account is created in the dev session's in-memory store
+4. You can sign out and sign back in with those credentials for the duration of the dev server session
+5. The mock store resets on server restart — seeded accounts (`pavan@bellcorpstudio.com`) always work
 
 ### Other scripts
 
@@ -71,7 +71,7 @@ src/
 │       └── seed.ts                # In-memory Maps: users, projects, offerings, brochures
 │
 ├── store/
-│   ├── authStore.ts               # sign-in / sign-up / guest / token hydrate
+│   ├── authStore.ts               # sign-in / sign-up / guest / hydrate
 │   ├── projectStore.ts            # projects CRUD
 │   └── offeringStore.ts           # 6-step offering workflow + AI calls
 │
@@ -89,7 +89,7 @@ src/
 │   └── useToast.ts
 │
 ├── components/
-│   ├── layout/                    # AppShell, Sidebar, TopBar
+│   ├── layout/                    # AppShell, Sidebar, TopBar, GuestBanner
 │   └── shared/                    # StepProgress, ComponentBadge, UploadZone,
 │                                  # ImageCanvas, AnnotatedPreview, AIBadge, StatusBadge
 │
@@ -111,11 +111,11 @@ src/
 / (Landing)
   ├── /signup  →  create account  →  /projects
   ├── /signin  →  sign in         →  /projects
-  └── guest    →  backend guest login → /projects
+  └── guest    →  continue        →  /projects
                                        │
                                   /projects/:id  (detail)
                                        │
-                          /projects/:id/offerings/:id/step/1   Upload photo
+                          /projects/:id/offerings/:id/step/1   Upload photo/video
                           /projects/:id/offerings/:id/step/2   Select components + environments
                           /projects/:id/offerings/:id/step/3   AI placement / manual pin
                           /projects/:id/offerings/:id/step/4   Annotated preview
@@ -126,18 +126,20 @@ src/
 ```
 
 **Route guards:**
-- `/projects/*` — accessible to authenticated users and backend-authenticated guests
+- `/projects/*` — accessible to authenticated users and guests
+- Guests see a persistent banner prompting sign-up
 - All other private routes redirect to `/signin` if unauthenticated
 
 ---
 
-## API
+## Mock API
 
-Development uses the Express API by default through the Vite proxy. The local mock API can still be enabled for isolated UI demos by setting `VITE_ENABLE_MOCK_API=true`.
+All API calls in dev hit a **Vite server middleware** defined in `src/mocks/vitePlugin.ts`.
 
-- Default frontend base path: `/api/v1`
-- Default backend target: `http://localhost:4000`
-- Mock implementation: `src/mocks/vitePlugin.ts`
+- Runs in the same Node.js process as the dev server — no separate backend needed
+- In-memory state (`Map` objects in `seed.ts`) persists for the full dev server session
+- Simulates realistic latency: 300–2200 ms per endpoint
+- `apply: 'serve'` — completely excluded from the production build
 
 See [API.md](API.md) for the full endpoint reference.
 

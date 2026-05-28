@@ -1,5 +1,7 @@
 import { create } from 'zustand'
 import apiClient from '../api/client'
+import { clearGuestSessionId } from '../api/guestWorkflow'
+import { GUEST_USER } from '../lib/constants'
 import { initials } from '../lib/utils'
 import type { User } from '../types'
 
@@ -13,11 +15,14 @@ interface AuthState {
   isAuthenticated: boolean
   isGuest: boolean
   token: string | null
+  guestBannerDismissed: boolean
   signIn: (email: string, password: string) => Promise<void>
   signUp: (name: string, email: string, password: string) => Promise<void>
-  continueAsGuest: () => Promise<void>
+  continueAsGuest: () => void
   signOut: () => void
   hydrate: () => void
+  dismissGuestBanner: () => void
+  resetGuestBanner: () => void
 }
 
 function mapApiUser(apiUser: { id: string; name: string; email: string; role?: string; company?: string; avatarInitials?: string }): User {
@@ -25,17 +30,18 @@ function mapApiUser(apiUser: { id: string; name: string; email: string; role?: s
     id: apiUser.id,
     email: apiUser.email,
     name: apiUser.name,
-    role: apiUser.role === 'guest' ? 'guest' : 'authenticated',
+    role: 'authenticated',
     company: apiUser.company ?? 'KONE',
     avatarInitials: apiUser.avatarInitials ?? initials(apiUser.name),
   }
 }
 
-export const useAuthStore = create<AuthState>()(set => ({
+export const useAuthStore = create<AuthState>()((set, get) => ({
   user: null,
   isAuthenticated: false,
   isGuest: false,
   token: null,
+  guestBannerDismissed: false,
 
   signIn: async (email, password) => {
     const { data } = await apiClient.post<{ user: { id: string; name: string; email: string; role?: string }; tokens: AuthTokens }>('/auth/login', {
@@ -48,6 +54,8 @@ export const useAuthStore = create<AuthState>()(set => ({
     localStorage.setItem('salesnxt_token', accessToken)
     localStorage.setItem('salesnxt_refresh_token', refreshToken)
     localStorage.setItem('salesnxt_user', JSON.stringify(user))
+    sessionStorage.removeItem('guest_session')
+    clearGuestSessionId()
     set({ user, token: accessToken, isAuthenticated: true, isGuest: false })
   },
 
@@ -63,18 +71,14 @@ export const useAuthStore = create<AuthState>()(set => ({
     localStorage.setItem('salesnxt_token', accessToken)
     localStorage.setItem('salesnxt_refresh_token', refreshToken)
     localStorage.setItem('salesnxt_user', JSON.stringify(user))
+    sessionStorage.removeItem('guest_session')
+    clearGuestSessionId()
     set({ user, token: accessToken, isAuthenticated: true, isGuest: false })
   },
 
-  continueAsGuest: async () => {
-    const { data } = await apiClient.post<{ user: { id: string; name: string; email: string; role?: string }; tokens: AuthTokens }>('/auth/guest-login')
-    const user = mapApiUser(data.user)
-    const accessToken = data.tokens.access.token
-    const refreshToken = data.tokens.refresh.token
-    localStorage.setItem('salesnxt_token', accessToken)
-    localStorage.setItem('salesnxt_refresh_token', refreshToken)
-    localStorage.setItem('salesnxt_user', JSON.stringify(user))
-    set({ user, token: accessToken, isAuthenticated: true, isGuest: true })
+  continueAsGuest: () => {
+    sessionStorage.setItem('guest_session', '1')
+    set({ user: GUEST_USER, isGuest: true, isAuthenticated: false, token: null })
   },
 
   signOut: () => {
@@ -85,6 +89,10 @@ export const useAuthStore = create<AuthState>()(set => ({
     localStorage.removeItem('salesnxt_token')
     localStorage.removeItem('salesnxt_refresh_token')
     localStorage.removeItem('salesnxt_user')
+    sessionStorage.removeItem('guest_session')
+    sessionStorage.removeItem('guest_projects')
+    sessionStorage.removeItem('guest_offerings')
+    clearGuestSessionId()
     set({ user: null, isAuthenticated: false, isGuest: false, token: null })
   },
 
@@ -94,7 +102,7 @@ export const useAuthStore = create<AuthState>()(set => ({
     if (token && userStr) {
       try {
         const user = JSON.parse(userStr) as User
-        set({ user, token, isAuthenticated: true, isGuest: user.role === 'guest' })
+        set({ user, token, isAuthenticated: true, isGuest: false })
         return
       } catch {
         localStorage.removeItem('salesnxt_token')
@@ -102,5 +110,13 @@ export const useAuthStore = create<AuthState>()(set => ({
         localStorage.removeItem('salesnxt_user')
       }
     }
+    if (sessionStorage.getItem('guest_session') === '1') {
+      set({ user: GUEST_USER, isGuest: true, isAuthenticated: false, token: null })
+    }
+  },
+
+  dismissGuestBanner: () => set({ guestBannerDismissed: true }),
+  resetGuestBanner: () => {
+    if (get().isGuest) set({ guestBannerDismissed: false })
   },
 }))
