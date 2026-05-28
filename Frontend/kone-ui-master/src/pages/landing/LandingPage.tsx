@@ -366,10 +366,7 @@ export default function LandingPage() {
         {/* ── Features — Architectural Matrix ──────────────────────────── */}
         <section style={{ background: '#FFFFFF', padding: '160px 40px', position: 'relative' }}>
           <div className="mx-auto" style={{ maxWidth: 1200 }}>
-            <div style={{ 
-              display: 'flex', flexDirection: 'column', gap: 24, marginBottom: 80,
-              '@media (min-width: 768px)': { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }
-            } as any}>
+            <div className="flex flex-col justify-between gap-6 md:flex-row md:items-end" style={{ marginBottom: 80 }}>
               <div>
                 <p data-reveal data-delay="0" style={{
                   fontFamily: '"Outfit", sans-serif', fontSize: 13, fontWeight: 700, letterSpacing: '0.15em',

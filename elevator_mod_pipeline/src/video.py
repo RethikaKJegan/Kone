@@ -245,7 +245,7 @@ def write_video(
         raise ValueError(f"Video fps must be positive, got {fps}")
     out.parent.mkdir(parents=True, exist_ok=True)
     add_audio = bool(video_cfg.get("add_audio", False)) and not no_audio
-    video_out = out.with_name(out.stem + ".silent.mp4") if add_audio else out
+    video_out = out.with_name(out.stem + ".silent.mp4") if add_audio else out.with_name(out.stem + ".opencv.mp4")
     codecs = ("mp4v", "avc1", "H264")
     writer = None
     for codec in codecs:
@@ -265,20 +265,25 @@ def write_video(
 
     duration = len(frames) / float(fps)
     if not add_audio:
-        validation = validate_video_output(video_out, fps, len(frames), duration)
+        crf = str(video_cfg.get("ffmpeg_crf", 18))
+        browser_safe = transcode_browser_mp4(video_out, out, fps, crf)
+        if not browser_safe:
+            video_out.replace(out)
+        validation = validate_video_output(out, fps, len(frames), duration)
         return {
             "audio_enabled": False,
             "audio_sample_rate": int(video_cfg.get("audio_sample_rate", 44100)),
             "audio_layers": [],
             "audio_duration_seconds": 0.0,
             "video_duration_seconds": duration,
-            "video_path": str(video_out),
+            "video_path": str(out),
             "fps": fps,
             "frame_count": len(frames),
             "duration_seconds": duration,
             "video_validation_status": validation["status"],
             "video_validation": validation,
             "quality": quality,
+            "browser_safe_h264": browser_safe,
         }
 
     audio_debug = mux_generated_audio(video_out, out, duration, actions, elevator_state, video_cfg)
@@ -500,7 +505,7 @@ def render_ffmpeg_camera_motion(
                 cfg,
             )
 
-        base = build_ffmpeg_pan_base(img_rgb, target_w, target_h, axis="x")
+        base = build_ffmpeg_pan_base(img_rgb, target_w, target_h, axis="x", cfg=cfg)
         ease = ffmpeg_smoothstep_expr(frame_count, "n")
         if motion_style == "pan_l_r":
             x_expr = f"(iw-ow)*({ease})"
@@ -699,6 +704,8 @@ def transcode_browser_mp4(raw_path: Path, out_path: Path, fps: int, crf: str) ->
         "main",
         "-pix_fmt",
         "yuv420p",
+        "-vf",
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2",
         "-crf",
         str(crf),
         "-movflags",
@@ -720,13 +727,15 @@ def resize_exact_rgb(frame: np.ndarray, target_w: int, target_h: int) -> np.ndar
     return np.ascontiguousarray(cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4))
 
 
-def build_ffmpeg_pan_base(img_rgb: np.ndarray, target_w: int, target_h: int, axis: str) -> np.ndarray:
+def build_ffmpeg_pan_base(img_rgb: np.ndarray, target_w: int, target_h: int, axis: str, cfg: dict[str, Any] | None = None) -> np.ndarray:
     h, w = img_rgb.shape[:2]
+    video_settings = (cfg or {}).get("video", {}) or {}
+    overscan = float(np.clip(float(video_settings.get("ffmpeg_pan_overscan", 0.06)), 0.0, 0.25))
     if axis == "x":
-        desired_w = int(round(target_w * 1.18))
+        desired_w = int(round(target_w * (1.0 + overscan)))
         scale = max(desired_w / max(w, 1), target_h / max(h, 1))
     else:
-        desired_h = int(round(target_h * 1.18))
+        desired_h = int(round(target_h * (1.0 + overscan)))
         scale = max(target_w / max(w, 1), desired_h / max(h, 1))
     resized_w = max(target_w + 2, int(round(w * scale)))
     resized_h = max(target_h + 2, int(round(h * scale)))
@@ -805,7 +814,7 @@ def render_zoom_in_frame(img_rgb: np.ndarray, target_w: int, target_h: int, t: f
 
 def render_pan_frame(img_rgb: np.ndarray, target_w: int, target_h: int, motion_style: str, t: float) -> np.ndarray:
     h, w = img_rgb.shape[:2]
-    scale = max(target_w / max(w, 1), target_h / max(h, 1)) * 1.14
+    scale = max(target_w / max(w, 1), target_h / max(h, 1)) * 1.06
     resized_w = max(target_w + 2, int(round(w * scale)))
     resized_h = max(target_h + 2, int(round(h * scale)))
     resized = cv2.resize(img_rgb, (resized_w, resized_h), interpolation=cv2.INTER_AREA)

@@ -107,13 +107,17 @@ const generateVideo = catchAsync(async (req, res) => {
   const { session_id: sessionId, project_id: projectId, project_name: projectName, video_options: videoOptions } = req.body;
   const root = projectDir(sessionId, projectId);
   await writeStatus(root, { status: 'generating_video', preview_url: 'preview/final_output.png', video_url: null, download_url: null, error: null });
+  console.log(`[guest/video] calling ${LOGIC_URL}/generate-video for ${projectId}`);
   axios.post(`${LOGIC_URL}/generate-video`, {
     session_id: sessionId,
     project_id: projectId,
     project_name: projectName,
     storage_dir: root,
     video_options: videoOptions,
-  }).catch((error) => writeStatus(root, { status: 'failed', preview_url: 'preview/final_output.png', video_url: null, download_url: null, error: error.message }));
+  }, { timeout: 0 }).catch((error) => {
+    console.error(`[guest/video] failed for ${projectId}: ${error.message}`);
+    return writeStatus(root, { status: 'failed', preview_url: 'preview/final_output.png', video_url: null, download_url: null, error: error.message });
+  });
   res.send({ ok: true, status: 'generating_video' });
 });
 

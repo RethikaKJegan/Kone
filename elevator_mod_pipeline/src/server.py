@@ -132,7 +132,19 @@ def generate_video(payload: ProjectPayload):
 
     try:
         cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else yaml.safe_load((repo_root() / "config.yaml").read_text(encoding="utf-8"))
-        cfg["video"] = {**cfg.get("video", {}), "enabled": True}
+        video_options = payload.video_options or {}
+        motion = video_options.get("motion") or video_options.get("motion_style")
+        cfg["video"] = {
+            **cfg.get("video", {}),
+            "enabled": True,
+            "quality": video_options.get("quality", cfg.get("video", {}).get("quality", "1080p")),
+            "duration_seconds": video_options.get("duration_seconds", video_options.get("duration", 9.0)),
+            "preserve_source_aspect": True,
+            "ffmpeg_pan_overscan": 0.20,
+            "ffmpeg_zoom_amount": 0.35,
+        }
+        if motion:
+            cfg["video"].update({"motion_style": motion, "mode": "motion"})
         detections = json.loads(detections_path.read_text(encoding="utf-8")) if detections_path.exists() else {}
         geometry = json.loads(geometry_path.read_text(encoding="utf-8")) if geometry_path.exists() else {}
         render_elevator_video(

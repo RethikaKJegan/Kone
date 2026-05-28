@@ -56,32 +56,47 @@ export default function Step5Video() {
       setGenerating(true)
       setLoadFailed(false)
       setCurrentOffering({ ...currentOffering, outputVideoUrl: null })
-      const sessionId = await getGuestSessionId()
-      await apiClient.post('/guest/video', {
-        is_guest: true,
-        session_id: sessionId,
-        project_id: projectId,
-        project_name: currentOffering.name,
-        video_options: { motion, speed: currentOffering.videoSpeed, quality },
-      })
-      for (;;) {
-        const { data } = await apiClient.get('/guest/status', {
-          params: { session_id: sessionId, project_id: projectId },
+      try {
+        const sessionId = await getGuestSessionId()
+        await apiClient.post('/guest/video', {
+          is_guest: true,
+          session_id: sessionId,
+          project_id: projectId,
+          project_name: currentOffering.name,
+          video_options: { motion, speed: currentOffering.videoSpeed, quality },
         })
-        if (data.status === 'video_ready') {
-          setLoadFailed(false)
-          setCurrentOffering({ ...currentOffering, videoMotionStyle: motion, videoQuality: quality, outputVideoUrl: `${data.video_url}?v=${Date.now()}` })
-          break
+
+        for (let attempt = 0; attempt < 120; attempt += 1) {
+          const { data } = await apiClient.get('/guest/status', {
+            params: { session_id: sessionId, project_id: projectId },
+          })
+
+          if (data.status === 'video_ready' && data.video_url) {
+            setLoadFailed(false)
+            setCurrentOffering({ ...currentOffering, videoMotionStyle: motion, videoQuality: quality, outputVideoUrl: `${data.video_url}?v=${Date.now()}` })
+            return
+          }
+
+          if (data.status === 'failed') {
+            setLoadFailed(true)
+            setCurrentOffering({ ...currentOffering, outputVideoUrl: null })
+            toast(data.error || 'Video generation failed', 'destructive')
+            return
+          }
+
+          await new Promise(resolve => setTimeout(resolve, 2000))
         }
-        if (data.status === 'failed') {
-          setGenerating(false)
-          setCurrentOffering({ ...currentOffering, outputVideoUrl: null })
-          toast(data.error || 'Video generation failed')
-          return
-        }
-        await new Promise(resolve => setTimeout(resolve, 2000))
+
+        setLoadFailed(true)
+        setCurrentOffering({ ...currentOffering, outputVideoUrl: null })
+        toast('Video generation timed out. Check the API and logic terminals.', 'destructive')
+      } catch (error) {
+        setLoadFailed(true)
+        setCurrentOffering({ ...currentOffering, outputVideoUrl: null })
+        toast(error instanceof Error ? error.message : 'Video generation failed', 'destructive')
+      } finally {
+        setGenerating(false)
       }
-      setGenerating(false)
       return
     }
     goToStep(6)

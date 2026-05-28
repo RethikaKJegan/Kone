@@ -5,7 +5,7 @@ import { mockApiPlugin } from './src/mocks/vitePlugin'
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
-  const enableMockApi = env.VITE_ENABLE_MOCK_API !== 'false'
+  const enableMockApi = env.VITE_ENABLE_MOCK_API === 'true'
 
   return {
     plugins: [react(), ...(enableMockApi ? [mockApiPlugin()] : [])],
