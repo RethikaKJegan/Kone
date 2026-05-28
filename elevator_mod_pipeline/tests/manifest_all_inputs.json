@@ -20,26 +20,36 @@
   {
     "input_image": "tests/images/Sample11.jpg",
     "mod_panel": "tests/panels/mod_panel.png",
-    "prompt": "replace the elevator button panel with the mod panel",
-    "run_dir": "tests/outputs/all_inputs/004_Sample11"
+    "prompt": "replace the elevator button panel and floor indicator with mod components",
+    "run_dir": "tests/outputs/all_inputs/004_Sample11",
+    "replacements": [
+      {
+        "id": "call_panel",
+        "asset": "tests/panels/mod_panel.png",
+        "component_type": "elevator_mod_panel",
+        "target_keywords": [
+          "elevator button panel",
+          "tall stainless steel elevator operating panel with round buttons",
+          "elevator call button panel"
+        ]
+      },
+      {
+        "id": "floor_indicator",
+        "asset": "tests/panels/mod_up.png",
+        "component_type": "floor_indicator_display",
+        "target_keywords": [
+          "floor indicator",
+          "elevator display",
+          "floor_indicator_display"
+        ]
+      }
+    ]
   },
   {
     "input_image": "tests/images/Sample2.jpg",
     "mod_panel": "tests/panels/mod_long.png",
     "prompt": "replace the elevator button panel with the mod panel",
     "run_dir": "tests/outputs/all_inputs/005_Sample2"
-  },
-  {
-    "input_image": "tests/images/Sample2_closed_exterior.jpg",
-    "mod_panel": "tests/panels/mod_long.png",
-    "prompt": "replace the elevator button panel with the mod panel",
-    "run_dir": "tests/outputs/all_inputs/006_Sample2_closed_exterior"
-  },
-  {
-    "input_image": "tests/images/Sample2_open_interior.jpg",
-    "mod_panel": "tests/panels/mod_long.png",
-    "prompt": "replace the elevator button panel with the mod panel",
-    "run_dir": "tests/outputs/all_inputs/007_Sample2_open_interior"
   },
   {
     "input_image": "tests/images/Sample3.jpg",

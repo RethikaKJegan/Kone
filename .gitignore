@@ -15,12 +15,19 @@ dist/
 venv/
 .venv/
 env/
+node_modules/
 .env
 .env.*
+.codex_deps/
+.codex_min/
 
 # Local caches
 .cache/
 *.cache
+
+# Local agent/tooling
+.agents/
+.claude/
 
 # Model weights, checkpoints, and downloaded model bundles
 weights/
@@ -44,6 +51,7 @@ segment-anything/
 runs/
 outputs/
 tests/outputs/
+uploads/
 Video/
 *.mp4
 *.avi

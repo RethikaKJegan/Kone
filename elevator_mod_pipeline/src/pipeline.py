@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import logging
 import warnings
 from pathlib import Path
+from typing import Any
 
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -13,6 +15,11 @@ import cv2
 from .input_validation import merged_validation_config, validate_elevator_presence, validate_input_image
 from .inpaint import build_removal_mask, inpaint_background
 from .insert_mod import insert_mod_panel, localized_mask_from_bbox, preselect_mod_panel_placement
+from .perspective_mod_placement import (
+    copy_pipeline_handoff,
+    run_auto_perspective_mod_placement,
+    run_from_config as run_perspective_mod_placement_from_config,
+)
 from .preprocess import run_preprocessing
 from .refine import maybe_refine
 from .resource_monitor import ResourceMonitor
@@ -39,7 +46,7 @@ def run(config_path: str | Path) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     input_image = Path(cfg["input_image"])
-    mod_panel = Path(cfg["mod_panel"])
+    replacements = replacement_configs(cfg)
     preprocessed_path = run_dir / "preprocessed_input.png"
     preprocessing_path = run_dir / "preprocessing.json"
     detections_path = run_dir / "elevator_detections.json"
@@ -115,6 +122,21 @@ def run(config_path: str | Path) -> None:
             elevator_presence = validate_elevator_presence(detections, cfg)
             save_json(elevator_presence_path, elevator_presence)
             if not elevator_presence["valid"]:
+                for stale in (
+                    geometry_path,
+                    depth_path,
+                    removal_mask_path,
+                    cleaned_path,
+                    final_path,
+                    video_path,
+                    video_path.with_suffix(".json"),
+                    run_dir / "component_placements.json",
+                    run_dir / "component_placement_debug.json",
+                ):
+                    stale.unlink(missing_ok=True)
+                for pattern in ("composite*.png", "harmonization_mask*.png"):
+                    for stale in run_dir.glob(pattern):
+                        stale.unlink(missing_ok=True)
                 status("elevator_presence_failed", f"[VALIDATION] Image is not valid: {elevator_presence['reason']}")
                 save_json(
                     manifest_path,
@@ -145,14 +167,22 @@ def run(config_path: str | Path) -> None:
         original = load_image_rgb(working_image)
         save_detection_visuals(working_image, detections, run_dir)
         monitor.mark("inpaint_start")
-        preselected_bbox = preselect_mod_panel_placement(original, mod_panel, detections, cfg)
-        if preselected_bbox is not None:
-            pad = int(cfg.get("removal", {}).get("box_mask_padding_px", 2))
-            removal_mask = localized_mask_from_bbox(original.shape, preselected_bbox, pad=pad)
-            status("inpaint", f"[INPAINT] Running inpaint.py on bbox={preselected_bbox}")
-        else:
-            status("inpaint", "[INPAINT] Running inpainting")
-            removal_mask = build_removal_mask(original, detections, cfg)
+        component_cfgs: list[dict[str, Any]] = []
+        removal_mask = None
+        for replacement in replacements:
+            component_cfg = component_config(cfg, replacement)
+            component_cfgs.append(component_cfg)
+            mod_path = Path(replacement["asset"])
+            preselected_bbox = preselect_mod_panel_placement(original, mod_path, detections, component_cfg)
+            if preselected_bbox is not None:
+                pad = int(component_cfg.get("removal", {}).get("box_mask_padding_px", 2))
+                component_mask = localized_mask_from_bbox(original.shape, preselected_bbox, pad=pad)
+            else:
+                component_mask = build_removal_mask(original, detections, component_cfg)
+            removal_mask = component_mask if removal_mask is None else cv2.max(removal_mask, component_mask)
+        if removal_mask is None:
+            raise RuntimeError("No configured components were available for replacement")
+        status("inpaint", f"[INPAINT] Running inpainting for {len(replacements)} component(s)")
         cv2.imwrite(str(removal_mask_path), removal_mask)
         cleaned_override = cfg["inpainting"].get("cleaned_background")
         if cleaned_override:
@@ -161,8 +191,61 @@ def run(config_path: str | Path) -> None:
             inpaint_background(working_image, removal_mask, cfg, cleaned_path)
         monitor.mark("inpaint_done")
         monitor.mark("insertion_start")
-        status("place", "[PLACE] Placing elevator_mod_panel")
-        insert_mod_panel(cleaned_path, mod_panel, detections, geometry, cfg, composite_path, panel_mask_path, removal_mask)
+        current_background = cleaned_path
+        combined_panel_mask = None
+        component_placements: list[dict[str, Any]] = []
+        for index, (replacement, component_cfg) in enumerate(zip(replacements, component_cfgs), start=1):
+            replacement_id = replacement["id"]
+            component_out = composite_path if index == len(replacements) else run_dir / f"composite_{replacement_id}.png"
+            component_mask_path = run_dir / f"harmonization_mask_{replacement_id}.png"
+            status("place", f"[PLACE] Placing component: {replacement_id}")
+            insert_mod_panel(
+                current_background,
+                Path(replacement["asset"]),
+                detections,
+                geometry,
+                component_cfg,
+                component_out,
+                component_mask_path,
+                removal_mask,
+            )
+            mask = cv2.imread(str(component_mask_path), cv2.IMREAD_GRAYSCALE)
+            if mask is not None:
+                combined_panel_mask = mask if combined_panel_mask is None else cv2.max(combined_panel_mask, mask)
+            placement_debug = _load_optional_json(run_dir / "component_placement_debug.json")
+            placement_debug["id"] = replacement_id
+            placement_debug["asset"] = replacement["asset"]
+            perspective_cfg = cfg.get("perspective_mod_placement", {})
+            if perspective_cfg.get("enabled", False) and perspective_cfg.get("auto", True):
+                status("perspective_mod_placement", f"[PLACE] Auto perspective-grid placement: {replacement_id}")
+                perspective_outputs = run_auto_perspective_mod_placement(
+                    current_background,
+                    Path(replacement["asset"]),
+                    perspective_cfg.get("out_dir") or (run_dir / f"perspective_mod_placement_{replacement_id}"),
+                    geometry,
+                    placement_debug,
+                    int(perspective_cfg.get("grid_cols", 8)),
+                    int(perspective_cfg.get("grid_rows", 12)),
+                    bool(perspective_cfg.get("match_lighting", False)),
+                )
+                copy_pipeline_handoff(perspective_outputs, component_out, component_mask_path)
+                mask = cv2.imread(str(component_mask_path), cv2.IMREAD_GRAYSCALE)
+                if mask is not None:
+                    combined_panel_mask = mask if combined_panel_mask is None else cv2.max(combined_panel_mask, mask)
+            component_placements.append(placement_debug)
+            current_background = component_out
+        if combined_panel_mask is not None:
+            cv2.imwrite(str(panel_mask_path), combined_panel_mask)
+        save_json(run_dir / "component_placements.json", component_placements)
+        perspective_outputs = run_perspective_mod_placement_from_config(
+            cfg,
+            cfg.get("perspective_mod_placement", {}).get("base_image") or cleaned_path,
+            cfg.get("perspective_mod_placement", {}).get("panel") or replacements[-1]["asset"],
+            cfg.get("perspective_mod_placement", {}).get("out_dir") or (run_dir / "perspective_mod_placement"),
+        )
+        if perspective_outputs:
+            status("perspective_mod_placement", "[PLACE] Applying perspective-grid MOD panel placement")
+            copy_pipeline_handoff(perspective_outputs, composite_path, panel_mask_path)
         maybe_refine(composite_path, panel_mask_path, cfg, final_path)
         monitor.mark("insertion_done")
         if cfg.get("video", {}).get("enabled", False):
@@ -216,11 +299,44 @@ def run(config_path: str | Path) -> None:
     print(f"Resource log: {resource_log_path}")
 
 
+def replacement_configs(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    configured = cfg.get("replacements")
+    if not configured:
+        return [{"id": "mod_panel", "asset": str(cfg["mod_panel"])}]
+    replacements: list[dict[str, Any]] = []
+    for index, item in enumerate(configured, start=1):
+        if not isinstance(item, dict) or not item.get("asset"):
+            raise ValueError(f"Replacement #{index} must define an asset")
+        replacement = dict(item)
+        replacement["id"] = str(replacement.get("id") or f"component_{index}")
+        replacements.append(replacement)
+    return replacements
+
+
+def component_config(cfg: dict[str, Any], replacement: dict[str, Any]) -> dict[str, Any]:
+    component_cfg = copy.deepcopy(cfg)
+    component_cfg.pop("replacements", None)
+    component_cfg["mod_panel"] = replacement["asset"]
+    component_cfg["removal"].update(replacement.get("removal", {}))
+    component_cfg["insertion"].update(replacement.get("insertion", {}))
+    if replacement.get("target_keywords"):
+        keywords = list(replacement["target_keywords"])
+        component_cfg["removal"]["target_keywords"] = keywords
+        component_cfg["insertion"]["target_keywords"] = keywords
+    if "manual_box_xyxy" in replacement:
+        component_cfg["insertion"]["manual_box_xyxy"] = replacement["manual_box_xyxy"]
+    if replacement.get("component_type"):
+        component_cfg["_requested_component_type"] = replacement["component_type"]
+    component_cfg["_replacement_id"] = replacement["id"]
+    return component_cfg
+
+
 def write_pipeline_manifest(path: Path, detections: dict, run_dir: Path, status_entries: list[dict[str, str]]) -> None:
     input_validation = _load_optional_json(run_dir / "input_validation.json")
     elevator_presence_validation = _load_optional_json(run_dir / "elevator_presence_validation.json")
     roi_debug = _load_optional_json(run_dir / "elevator_roi_debug.json")
     placement_debug = _load_optional_json(run_dir / "component_placement_debug.json")
+    component_placements = _load_optional_list(run_dir / "component_placements.json")
     video_debug = _load_optional_json(run_dir / "elevator_animation.json")
     video_skip_debug = _load_optional_json(run_dir / "video_skip_debug.json")
     if video_skip_debug:
@@ -299,6 +415,7 @@ def write_pipeline_manifest(path: Path, detections: dict, run_dir: Path, status_
         ],
         "rejected_component_detections": placement_debug.get("rejected_component_detections", []),
         "final_component_placement": placement_debug.get("final_component_placement"),
+        "component_placements": component_placements,
         "pipeline_steps": status_entries,
     }
     save_json(path, payload)
@@ -312,6 +429,16 @@ def _load_optional_json(path: Path) -> dict:
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+
+def _load_optional_list(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        data = load_json(path)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
 
 
 def validation_failure_message(validation: dict) -> str:
@@ -348,15 +475,17 @@ def elevator_present_for_video(detections: dict) -> bool:
         if det.get("source") == "image_structure_fallback":
             continue
         score = float(det.get("score", 0.0))
-        if score < 0.28:
+        source = str(det.get("source", "")).lower()
+        min_score = 0.22 if source in {"closed_door_header_recovery", "groundingdino_open_door_entrance_repair"} else 0.28
+        if score < min_score:
             continue
         x1, y1, x2, y2 = [float(v) for v in det.get("box_xyxy", [0, 0, 0, 0])]
         bw, bh = max(1.0, x2 - x1), max(1.0, y2 - y1)
         area_ratio = (bw * bh) / max(width * height, 1)
         aspect = bh / bw
-        if norm == "elevator_door" and 0.03 <= area_ratio <= 0.65 and aspect >= 1.05:
+        if norm == "elevator_door" and 0.05 <= area_ratio <= 0.65 and aspect >= 0.85:
             return True
-        if norm == "elevator_cabin" and 0.08 <= area_ratio <= 0.65 and aspect >= 1.05:
+        if norm == "elevator_cabin" and 0.08 <= area_ratio <= 0.65 and aspect >= 0.85:
             return True
         if norm == "elevator_cabin" and area_ratio > 0.65 and aspect >= 1.05 and not has_valid_panel_target:
             return True

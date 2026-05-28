@@ -17,6 +17,7 @@ VALID_MOD_PANEL_TARGETS = {OPERATING_PANEL_CLASS, "elevator call button panel"}
 INVALID_MOD_PANEL_TARGETS = {
     "accessibility_control_panel",
     "wheelchair button",
+    "wheelchair_indicator",
     "weight_limit_sign",
     "floor_indicator_display",
     "elevator_door",
@@ -34,6 +35,7 @@ def insert_mod_panel(background_path: str | Path, mod_path: str | Path, detectio
     height, width = bg.shape[:2]
     target_box, placement_reason = _target_box(width, height, detections, cfg, mod.shape[:2], removal_mask, bg)
     LOGGER.info("[PLACE] Final component placement: %s reason=%s", target_box, placement_reason)
+    mod = match_mod_appearance_to_cleaned_region(mod, bg, target_box)
     warped = (
         _warp_long_panel_to_exact_box(mod, target_box, bg.shape[:2])
         if _is_long_panel_track_case(cfg, mod.shape[:2])
@@ -115,8 +117,11 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
     credible_elevator_roi = elevator_roi if has_credible_elevator_detection(detections, width, height) else None
     rejected_components: list[dict[str, Any]] = []
     if ins["placement"] == "detection":
-        LOGGER.info("[TARGET] Requested component: elevator_mod_panel")
-        is_mod_panel_request = _needs_contextual_panel_fallback(ins.get("target_keywords", [])) or cfg.get("_requested_component_type") == "elevator_mod_panel"
+        requested_type = cfg.get("_requested_component_type")
+        LOGGER.info("[TARGET] Requested component: %s", requested_type or "auto")
+        is_mod_panel_request = requested_type == "elevator_mod_panel" or (
+            not requested_type and _needs_contextual_panel_fallback(ins.get("target_keywords", []))
+        )
         if is_mod_panel_request:
             det = select_mod_panel_target(detections["detections"], height, width, credible_elevator_roi, rejected_components)
             cfg["_placement_debug"] = {"rejected_component_detections": rejected_components}
@@ -174,7 +179,18 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
         if det:
             detection_box = [int(round(v)) for v in det["box_xyxy"]]
             erased_box = _select_erased_long_panel_box(removal_mask, detection_box, cfg, mod_hw)
-            return erased_box or detection_box, f"detected_{det.get('normalized_component_type') or det.get('phrase')}"
+            target_box = erased_box or detection_box
+            cfg["_placement_debug"].update(
+                {
+                    "requested_component_type": cfg.get("_requested_component_type"),
+                    "selected_replacement_target_type": det.get("normalized_component_type"),
+                    "selected_replacement_target_bbox": detection_box,
+                    "inpaint_bbox": target_box,
+                    "scale_to_target_bbox": True,
+                    "placement_mode": "existing_component",
+                }
+            )
+            return target_box, f"detected_{det.get('normalized_component_type') or det.get('phrase')}"
     rx1, ry1, rx2, ry2 = ins["fallback_box_ratio_xyxy"]
     return [int(width * rx1), int(height * ry1), int(width * rx2), int(height * ry2)], "configured_fallback_ratio"
 
@@ -185,8 +201,9 @@ def _needs_contextual_panel_fallback(keywords: list[str]) -> bool:
 
 
 def _is_elevator_mod_panel_request(cfg: dict[str, Any], mod_path: str | Path) -> bool:
-    if cfg.get("_requested_component_type") == "elevator_mod_panel":
-        return True
+    requested_type = cfg.get("_requested_component_type")
+    if requested_type:
+        return requested_type == "elevator_mod_panel"
     stem = Path(mod_path).stem.lower()
     if "mod" not in stem or _is_long_panel_track_case(cfg, (999, 1)):
         return False
@@ -1071,6 +1088,52 @@ def mask_stats(alpha: np.ndarray) -> tuple[float, list[int] | None, bool]:
     bbox_area_ratio = ((bbox[2] - bbox[0]) * (bbox[3] - bbox[1])) / max(w * h, 1)
     nearly_full = bbox_area_ratio > 0.82 or (bbox[0] <= 2 and bbox[1] <= 2 and bbox[2] >= w - 2 and bbox[3] >= h - 2)
     return ratio, bbox, nearly_full
+
+
+def match_mod_appearance_to_cleaned_region(mod_rgba: np.ndarray, cleaned_bg: np.ndarray, target_box: list[int]) -> np.ndarray:
+    """Match panel appearance to the cleaned target surface before geometric placement."""
+    height, width = cleaned_bg.shape[:2]
+    x1, y1, x2, y2 = [int(round(value)) for value in target_box]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(width, x2), min(height, y2)
+    if x2 <= x1 or y2 <= y1:
+        return mod_rgba
+
+    target = cleaned_bg[y1:y2, x1:x2]
+    visible = mod_rgba[:, :, 3] > 8
+    if int(visible.sum()) < 20 or target.size == 0:
+        return mod_rgba
+
+    panel_lab = cv2.cvtColor(mod_rgba[:, :, :3], cv2.COLOR_RGB2LAB).astype(np.float32)
+    target_lab = cv2.cvtColor(target, cv2.COLOR_RGB2LAB).astype(np.float32)
+    panel_l = panel_lab[:, :, 0][visible]
+    target_l = target_lab[:, :, 0].reshape(-1)
+
+    percentiles = [5, 25, 50, 75, 95]
+    source_levels = np.percentile(panel_l, percentiles).astype(np.float32)
+    target_levels = np.percentile(target_l, percentiles).astype(np.float32)
+    source_levels = np.maximum.accumulate(source_levels + np.arange(len(source_levels), dtype=np.float32) * 0.01)
+
+    current_l = panel_lab[:, :, 0]
+    mapped_l = np.interp(current_l, source_levels, target_levels).astype(np.float32)
+    correction = np.clip(mapped_l - current_l, -55.0, 55.0)
+    panel_lab[:, :, 0] = np.clip(current_l + correction * 0.78, 0, 255)
+
+    panel_color_mean = panel_lab[:, :, 1:3][visible].mean(axis=0)
+    target_color_mean = target_lab[:, :, 1:3].reshape(-1, 2).mean(axis=0)
+    color_shift = np.clip((target_color_mean - panel_color_mean) * 0.70, -18.0, 18.0)
+    panel_lab[:, :, 1:3] = np.clip(panel_lab[:, :, 1:3] + color_shift, 0, 255)
+
+    out = mod_rgba.copy()
+    out[:, :, :3] = cv2.cvtColor(panel_lab.astype(np.uint8), cv2.COLOR_LAB2RGB)
+    LOGGER.info(
+        "[PLACE] Pre-matched MOD appearance to cleaned region levels L50=%.1f->%.1f color_shift=(%.1f, %.1f)",
+        float(source_levels[2]),
+        float(target_levels[2]),
+        float(color_shift[0]),
+        float(color_shift[1]),
+    )
+    return out
 
 
 def harmonize_foreground(fg: np.ndarray, bg: np.ndarray, alpha: np.ndarray) -> np.ndarray:

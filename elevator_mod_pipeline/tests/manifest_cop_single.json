@@ -1,0 +1,8 @@
+[
+  {
+    "input_image": "tests/images/COP.jpg",
+    "mod_panel": "tests/panels/mod_long.png",
+    "prompt": "replace the elevator button panel with the mod panel",
+    "run_dir": "tests/outputs/cop_auto_perspective"
+  }
+]

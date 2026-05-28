@@ -35,6 +35,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "door_min_score": 0.30,
         "cabin_min_score": 0.34,
         "panel_min_score": 0.25,
+        "door_min_area_ratio": 0.05,
+        "standalone_panel_min_score": 0.30,
+        "standalone_panel_min_area_ratio": 0.02,
         "valid_types": [
             "tall stainless steel elevator operating panel with round buttons",
             "elevator call button panel",
@@ -331,6 +334,8 @@ def validate_elevator_presence(detections: dict[str, Any], cfg: dict[str, Any]) 
     image_w = int(meta.get("image_width", 0) or 0)
     image_h = int(meta.get("image_height", 0) or 0)
     matches = []
+    match_types: list[str] = []
+    match_detections: list[dict[str, Any]] = []
     rejected = []
     for det in detections.get("detections", []):
         norm = str(det.get("normalized_component_type") or det.get("phrase") or "").strip().lower()
@@ -343,12 +348,21 @@ def validate_elevator_presence(detections: dict[str, Any], cfg: dict[str, Any]) 
             "bbox": det.get("box_xyxy"),
         }
         if valid:
-            matches.append(
-                record
-            )
+            matches.append(record)
+            match_types.append(norm)
+            match_detections.append(det)
         elif norm in valid_types:
             record["reason"] = reason
             rejected.append(record)
+    if matches and not any(norm in {"elevator_door", "elevator_cabin"} for norm in match_types):
+        has_standalone_panel = any(
+            _is_convincing_standalone_panel(det, norm, image_w, image_h, presence_cfg)
+            for det, norm in zip(match_detections, match_types)
+        )
+        if not has_standalone_panel:
+            for record in matches:
+                rejected.append({**record, "reason": "no credible doorway or close-up elevator panel anchor"})
+            matches = []
     valid = bool(matches)
     return {
         "result": "PASS" if valid else "FAIL",
@@ -401,9 +415,12 @@ def elevator_detection_is_reliable(
         return True, None
 
     if norm == "elevator_door":
-        if score < float(presence_cfg.get("door_min_score", 0.30)):
+        repaired_sources = {"closed_door_header_recovery", "groundingdino_open_door_entrance_repair"}
+        door_min_score = min_score if source in repaired_sources else float(presence_cfg.get("door_min_score", 0.30))
+        if score < door_min_score:
             return False, "door confidence too low"
-        if not (0.015 <= area_ratio <= 0.55):
+        min_door_area = float(presence_cfg.get("door_min_area_ratio", 0.05))
+        if not (min_door_area <= area_ratio <= 0.55):
             return False, "door area is not plausible"
         if aspect < 0.85:
             return False, "door is not vertical enough"
@@ -426,3 +443,25 @@ def elevator_detection_is_reliable(
         return True, None
 
     return False, "unsupported validation type"
+
+
+def _is_convincing_standalone_panel(
+    det: dict[str, Any],
+    norm: str,
+    image_w: int,
+    image_h: int,
+    presence_cfg: dict[str, Any],
+) -> bool:
+    if norm not in {
+        "tall stainless steel elevator operating panel with round buttons",
+        "elevator call button panel",
+        "accessibility_control_panel",
+    }:
+        return False
+    x1, y1, x2, y2 = [float(v) for v in det.get("box_xyxy", [0, 0, 0, 0])]
+    area_ratio = max(0.0, x2 - x1) * max(0.0, y2 - y1) / max(float(image_w * image_h), 1.0)
+    score = float(det.get("score", 0.0) or 0.0)
+    return (
+        score >= float(presence_cfg.get("standalone_panel_min_score", 0.30))
+        and area_ratio >= float(presence_cfg.get("standalone_panel_min_area_ratio", 0.02))
+    )

@@ -73,6 +73,8 @@ geometry:
   enabled: true
   depth_model_id: depth-anything/Depth-Anything-V2-Base-hf
   known_door_width_mm: 900
+  max_plane_points: 4000
+  ransac_iterations: 64
   min_plane_inlier_ratio: 0.60
   max_plane_residual: 0.05
 
@@ -128,6 +130,20 @@ insertion:
   shadow_strength: 0.12
   texture_strength: 0.04
   max_shadow_radius_px: 18
+
+perspective_mod_placement:
+  # Runs after normal MOD insertion. In auto mode, wall-plane corners and the
+  # MOD grid box are inferred from geometry and placement debug data.
+  enabled: true
+  auto: true
+  base_image: null
+  panel: null
+  out_dir: null
+  plane: null           # Example: "420,180 780,220 750,680 390,640"
+  grid_cols: 8
+  grid_rows: 12
+  mod_box: null         # Example: "5.2,4.0 6.5,7.2"
+  match_lighting: false
 
 refinement:
   enabled: false

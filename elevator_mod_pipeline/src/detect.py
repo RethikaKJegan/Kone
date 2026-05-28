@@ -37,6 +37,7 @@ NORMALIZED_COMPONENT_PROMPTS: dict[str, list[str]] = {
 	OPERATING_PANEL_CLASS: [OPERATING_PANEL_CLASS],
 	"elevator call button panel": ["elevator call button panel"],
 	"wheelchair button": ["wheelchair button"],
+	"wheelchair_indicator": ["wheelchair indicator", "accessibility indicator"],
 	"floor_indicator_display": [
     "floor indicator display",
     "elevator floor indicator",
@@ -65,6 +66,7 @@ CANONICAL_COMPONENT_LABELS = {
 	OPERATING_PANEL_CLASS,
 	"elevator call button panel",
 	"wheelchair button",
+	"wheelchair indicator",
 	"accessibility control panel",
 	"security camera",
 	"floor indicator",
@@ -116,6 +118,7 @@ def run_detection(image_path: str | Path, cfg: dict[str, Any], out_json: str | P
 	)
 
 	detections = [_detection_to_dict(det, idx, labels) for idx, det in enumerate(chosen)]
+	detections = _filter_unmapped_component_detections(detections)
 	LOGGER.info("[NORMALIZE] Mapping raw labels to normalized component types")
 	if bool(cfg.get("detection", {}).get("enable_geometry_validation", True)):
 		detections = _apply_cross_label_nms(
@@ -124,10 +127,16 @@ def run_detection(image_path: str | Path, cfg: dict[str, Any], out_json: str | P
 		)
 		detections = _apply_component_geometry_validation(detections, width, height, image_np)
 	_refine_closed_elevator_door_detection(image_np, detections)
+	_recover_elevator_door_header(image_np, detections)
+	_promote_visual_floor_indicator_detections(image_np, detections)
 	_add_structural_floor_indicator_detection(image_np, detections)
-	_add_structural_emergency_phone_detection(image_np, detections)
+	_add_structural_call_panel_detection(image_np, detections)
+	_split_stacked_accessibility_panel_detection(image_np, detections)
 	detections = _dedupe_contained_component_detections(detections)
+	detections = _suppress_conflicting_panel_part_labels(detections)
+	_filter_false_elevator_interior_detections(image_np, detections)
 	_repair_nested_elevator_door_detection(image_np, detections)
+	_add_confirmed_open_interior_detection(image_np, detections)
 	_expand_car_operating_panels(image_np, detections)
 
 	output = {
@@ -179,7 +188,14 @@ def add_sam2_masks(image_path: str | Path, cfg: dict[str, Any], detection_data: 
 	predictor = _SAM2_CACHE[device]
 	image_np = load_image_rgb(image_path)
 	for det in detection_data["detections"]:
-		if det.get("source") in {"open_door_interior_inset", "expanded_car_operating_panel_plate"}:
+		if det.get("source") in {
+			"open_door_interior_inset",
+			"expanded_car_operating_panel_plate",
+			"closed_door_header_recovery",
+			"split_operating_panel_fixture",
+			"split_wheelchair_indicator",
+			"image_structure_call_panel",
+		}:
 			mask = _box_mask(det["box_xyxy"], image_np.shape[:2])
 			det["mask_area_px"] = int(mask.sum())
 			det["mask"] = mask_to_rle(mask)
@@ -290,6 +306,8 @@ def _detection_to_dict(det: Any, idx: int, labels: list[str]) -> dict[str, Any]:
 
 def _canonical_phrase(phrase: str, labels: list[str]) -> str:
 	lower = phrase.lower().strip()
+	if lower in {"elevator elevator", "elevator doors door", "lift lift"}:
+		return "elevator door"
 	if lower in {"elevator_button_panel", "elevator button panel"}:
 		return OPERATING_PANEL_CLASS
 	if lower in CANONICAL_COMPONENT_LABELS:
@@ -311,6 +329,8 @@ def _canonical_phrase(phrase: str, labels: list[str]) -> str:
 
 def _normalized_component_type(phrase: str) -> str | None:
 	lower = phrase.lower().strip()
+	if lower in {"elevator elevator", "elevator doors door", "lift lift"}:
+		return "elevator_door"
 	if lower in {"elevator_button_panel", "elevator button panel", "car operating panel", "cop"}:
 		return OPERATING_PANEL_CLASS
 	if OPERATING_PANEL_CLASS in lower:
@@ -319,6 +339,8 @@ def _normalized_component_type(phrase: str) -> str | None:
 		return "elevator call button panel"
 	if lower == "wheelchair button":
 		return "wheelchair button"
+	if any(term in lower for term in ("wheelchair indicator", "accessibility indicator")):
+		return "wheelchair_indicator"
 	if any(term in lower for term in ("accessibility control panel", "accessible elevator panel", "accessible panel")):
 		return "accessibility_control_panel"
 	if any(term in lower for term in ("capacity", "weight limit", "load limit", "maximum load")):
@@ -398,9 +420,12 @@ def _apply_component_geometry_validation(
 			_mark_rejected(det, "vertical_wall_fixture_not_floor_indicator_display")
 			continue
 		if norm == OPERATING_PANEL_CLASS:
+			if x1 <= width * 0.01 or x2 >= width * 0.99:
+				_mark_rejected(det, "cropped_image_edge_not_complete_operating_panel")
+				continue
 			fixture = _dark_wall_fixture_box(image_rgb, box, width, height) if image_rgb is not None else None
 			if fixture is not None:
-				_remap_detection(det, "emergency_phone", "emergency phone", "geometry_remap_dark_wall_fixture_not_car_operating_panel")
+				_remap_detection(det, "elevator call button panel", "elevator call button panel", "geometry_refine_dark_wall_call_panel")
 				_update_detection_box(det, fixture)
 			elif not _is_plausible_operating_panel_detection(det, width, height, image_rgb):
 				_mark_rejected(det, "wall_region_without_operating_panel_evidence")
@@ -420,8 +445,8 @@ def _apply_component_geometry_validation(
 				_remap_detection(det, "floor_indicator_display", "floor indicator display", "geometry_remap_top_indicator_not_weight_limit")
 				kept.append(det)
 				continue
-			if ("emergency phone" in phrase or "emergency" in phrase) and overlap_door > 0.15 and area_ratio > 0.01:
-				_mark_rejected(det, "poster_inside_cabin_not_emergency_phone")
+			if norm == "emergency_phone" and overlap_door > 0.45:
+				_mark_rejected(det, "interior_control_detail_not_emergency_phone")
 				continue
 			if norm == "floor_indicator_display" and not in_door_x and in_door_y and cy > dy1 + dh * 0.20:
 				_remap_detection(det, "accessibility_control_panel", "accessibility control panel", "geometry_remap_side_accessibility_plate_not_display")
@@ -481,6 +506,17 @@ def _update_detection_box(det: dict[str, Any], box: list[float]) -> None:
 def _mark_rejected(det: dict[str, Any], reason: str) -> None:
 	LOGGER.info("[DETECT] Rejected component: %s reason=%s", det.get("phrase"), reason)
 	det["geometry_validation"] = {"status": "rejected", "reason": reason}
+
+
+def _filter_unmapped_component_detections(detections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+	kept: list[dict[str, Any]] = []
+	for det in detections:
+		if det.get("normalized_component_type") is None:
+			_mark_rejected(det, "grounding_phrase_not_a_requested_component")
+			continue
+		det["id"] = len(kept)
+		kept.append(det)
+	return kept
 
 
 def _box_overlap_fraction(a: list[float], b: list[float]) -> float:
@@ -605,6 +641,7 @@ def _dark_wall_fixture_box(
 	seed_box: list[float],
 	width: int,
 	height: int,
+	max_aspect: float = 2.2,
 ) -> list[float] | None:
 	if image_rgb is None:
 		return None
@@ -632,7 +669,7 @@ def _dark_wall_fixture_box(
 		fx1, fy1, fx2, fy2 = sx1 + cx, sy1 + cy, sx1 + cx + cw, sy1 + cy + ch
 		fw, fh = max(1, fx2 - fx1), max(1, fy2 - fy1)
 		aspect = fh / fw
-		if not (0.55 <= aspect <= 2.2):
+		if not (0.55 <= aspect <= max_aspect):
 			continue
 		if fw < width * 0.035 or fw > width * 0.22 or fh < height * 0.035 or fh > height * 0.20:
 			continue
@@ -741,6 +778,37 @@ def _dedupe_contained_component_detections(detections: list[dict[str, Any]]) -> 
 	return kept
 
 
+def _suppress_conflicting_panel_part_labels(detections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+	panels = [
+		det
+		for det in detections
+		if det.get("normalized_component_type") in {OPERATING_PANEL_CLASS, "elevator call button panel"}
+	]
+	displays = [det for det in detections if det.get("normalized_component_type") == "floor_indicator_display"]
+	if not panels and not displays:
+		return detections
+	kept: list[dict[str, Any]] = []
+	for det in detections:
+		norm = det.get("normalized_component_type")
+		box = det.get("box_xyxy", [0, 0, 0, 0])
+		if norm == "emergency_phone" and any(
+			_box_overlap_fraction(box, candidate.get("box_xyxy", [0, 0, 0, 0])) > 0.20
+			or _box_overlap_fraction(candidate.get("box_xyxy", [0, 0, 0, 0]), box) > 0.20
+			for candidate in panels + displays
+		):
+			_mark_rejected(det, "overlapping_verified_control_panel_not_emergency_phone")
+			continue
+		if norm == "wheelchair button" and any(
+			_box_overlap_fraction(box, panel.get("box_xyxy", [0, 0, 0, 0])) > 0.60 for panel in panels
+		):
+			_mark_rejected(det, "button_is_part_of_detected_control_panel")
+			continue
+		kept.append(det)
+	for idx, det in enumerate(kept):
+		det["id"] = idx
+	return kept
+
+
 def _refine_closed_elevator_door_detection(image_rgb: np.ndarray, detections: list[dict[str, Any]]) -> None:
 	door = _best_detection_of_type(detections, "elevator_door")
 	if door is None:
@@ -800,6 +868,67 @@ def _refine_closed_elevator_door_detection(image_rgb: np.ndarray, detections: li
 				}
 			)
 			_update_detection_box(door, refined)
+
+
+def _recover_elevator_door_header(image_rgb: np.ndarray, detections: list[dict[str, Any]]) -> None:
+	door = _best_detection_of_type(detections, "elevator_door")
+	if door is None or door.get("source") == "groundingdino_open_door_entrance_repair":
+		return
+	try:
+		import cv2
+	except ImportError:
+		return
+	height, width = image_rgb.shape[:2]
+	x1, y1, x2, y2 = [float(v) for v in door.get("box_xyxy", [0, 0, 0, 0])]
+	bw, bh = max(1.0, x2 - x1), max(1.0, y2 - y1)
+	if bw < width * 0.18 or bh < height * 0.42 or y2 < height * 0.78:
+		return
+	if _has_open_elevator_interior_evidence(image_rgb, [x1, y1, x2, y2]):
+		return
+	search_top = max(0, int(round(y1 - height * 0.20)))
+	search_bottom = max(search_top + 1, int(round(y1 - height * 0.025)))
+	search_left = max(0, int(round(x1 - bw * 0.07)))
+	search_right = min(width, int(round(x2 + bw * 0.07)))
+	if search_bottom <= search_top or search_right <= search_left:
+		return
+	gray = cv2.cvtColor(np.asarray(image_rgb)[search_top:search_bottom, search_left:search_right], cv2.COLOR_RGB2GRAY)
+	edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 35, 110)
+	min_span = max(24, int(round(bw * 0.68)))
+	lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=max(16, min_span // 5), minLineLength=min_span, maxLineGap=12)
+	if lines is None:
+		return
+	candidates: list[tuple[float, float, int]] = []
+	for line in lines[:, 0]:
+		lx1, ly1, lx2, ly2 = [int(v) for v in line]
+		span = abs(lx2 - lx1)
+		if span < min_span or abs(ly2 - ly1) > max(3, int(span * 0.04)):
+			continue
+		global_x1 = search_left + min(lx1, lx2)
+		global_x2 = search_left + max(lx1, lx2)
+		overlap = max(0.0, min(x2, global_x2) - max(x1, global_x1))
+		if overlap < bw * 0.65:
+			continue
+		header_y = search_top + int(round((ly1 + ly2) * 0.5))
+		candidates.append((overlap, -abs((global_x1 + global_x2) * 0.5 - (x1 + x2) * 0.5), header_y))
+	if not candidates:
+		return
+	header_y = max(candidates, key=lambda item: (item[0], item[1], item[2]))[2]
+	if not (height * 0.02 <= y1 - header_y <= height * 0.20):
+		return
+	original = list(door.get("box_xyxy", [x1, y1, x2, y2]))
+	recovered = [x1, float(header_y), x2, y2]
+	door.setdefault("geometry_validation", {})
+	door["geometry_validation"].update(
+		{
+			"status": "recovered",
+			"reason": "horizontal_header_edge_extends_closed_door_to_full_height",
+			"original_box_xyxy": original,
+			"recovered_box_xyxy": recovered,
+		}
+	)
+	door["source"] = "closed_door_header_recovery"
+	LOGGER.info("[DETECT] Recovered full door height from header edge: %s -> %s", [round(v) for v in original], [round(v) for v in recovered])
+	_update_detection_box(door, recovered)
 
 
 def _add_structural_floor_indicator_detection(image_rgb: np.ndarray, detections: list[dict[str, Any]]) -> None:
@@ -865,12 +994,62 @@ def _add_structural_floor_indicator_detection(image_rgb: np.ndarray, detections:
 		det["id"] = idx
 
 
-def _add_structural_emergency_phone_detection(image_rgb: np.ndarray, detections: list[dict[str, Any]]) -> None:
+def _promote_visual_floor_indicator_detections(image_rgb: np.ndarray, detections: list[dict[str, Any]]) -> None:
+	"""Promote a side-mounted digital position display before generic wall panels win."""
+	door = _best_detection_of_type(detections, "elevator_door")
+	if door is None:
+		return
+	try:
+		import cv2
+	except ImportError:
+		return
+	height, width = image_rgb.shape[:2]
+	door_box = [float(v) for v in door.get("box_xyxy", [0, 0, 0, 0])]
+	dx1, dy1, dx2, dy2 = door_box
+	dh = max(1.0, dy2 - dy1)
+	promoted: list[dict[str, Any]] = []
+	for det in detections:
+		norm = det.get("normalized_component_type")
+		if norm not in {"accessibility_control_panel", "emergency_phone"}:
+			continue
+		box = [float(v) for v in det.get("box_xyxy", [0, 0, 0, 0])]
+		x1, y1, x2, y2 = [int(round(v)) for v in box]
+		x1, y1 = max(0, x1), max(0, y1)
+		x2, y2 = min(width, x2), min(height, y2)
+		cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+		beside_door = cx < dx1 or cx > dx2
+		upper_fixture = dy1 + dh * 0.18 <= cy <= dy1 + dh * 0.54
+		if x2 <= x1 or y2 <= y1 or not (beside_door and upper_fixture):
+			continue
+		hsv = cv2.cvtColor(np.asarray(image_rgb)[y1:y2, x1:x2], cv2.COLOR_RGB2HSV)
+		red = cv2.inRange(hsv, np.array([0, 65, 55]), np.array([12, 255, 255]))
+		red |= cv2.inRange(hsv, np.array([165, 65, 55]), np.array([179, 255, 255]))
+		if int(np.count_nonzero(red)) < max(5, int(red.size * 0.006)):
+			continue
+		_remap_detection(det, "floor_indicator_display", "floor indicator display", "visual_red_digits_on_side_floor_indicator")
+		promoted.append(det)
+	if not promoted:
+		return
+	# A prominent sign above the opening is often mistaken for the indicator
+	# when the actual numeric landing display is mounted on the side jamb.
+	promoted_best = max(promoted, key=lambda det: float(det.get("score", 0.0)))
+	detections[:] = [
+		det
+		for det in detections
+		if det is promoted_best
+		or det.get("normalized_component_type") != "floor_indicator_display"
+		or det in promoted
+	]
+	for idx, det in enumerate(detections):
+		det["id"] = idx
+
+
+def _add_structural_call_panel_detection(image_rgb: np.ndarray, detections: list[dict[str, Any]]) -> None:
 	door = _best_detection_of_type(detections, "elevator_door")
 	if door is None:
 		return
 	height, width = image_rgb.shape[:2]
-	dx1, dy1, _, dy2 = [float(v) for v in door.get("box_xyxy", [0, 0, 0, 0])]
+	dx1, dy1, dx2, dy2 = [float(v) for v in door.get("box_xyxy", [0, 0, 0, 0])]
 	search_box = [
 		max(0.0, dx1 - width * 0.205),
 		dy1 + (dy2 - dy1) * 0.28,
@@ -878,28 +1057,177 @@ def _add_structural_emergency_phone_detection(image_rgb: np.ndarray, detections:
 		dy1 + (dy2 - dy1) * 0.72,
 	]
 	box = _dark_wall_fixture_box(image_rgb, search_box, width, height)
-	if box is None:
-		return
+	if box is not None:
+		for det in detections:
+			if det.get("normalized_component_type") in {"emergency_phone", OPERATING_PANEL_CLASS, "elevator call button panel", "wheelchair button"} and _box_iou(det.get("box_xyxy", [0, 0, 0, 0]), box) > 0.10:
+				_remap_detection(det, "elevator call button panel", "elevator call button panel", "dark_wall_call_panel_left_of_door")
+				_update_detection_box(det, box)
+				return
 	for det in detections:
-		if det.get("normalized_component_type") in {"emergency_phone", OPERATING_PANEL_CLASS, "elevator call button panel"} and _box_iou(det.get("box_xyxy", [0, 0, 0, 0]), box) > 0.10:
-			_remap_detection(det, "emergency_phone", "emergency phone", "dark_wall_fixture_left_of_door")
-			_update_detection_box(det, box)
-			return
-	detections.append(
-		{
-			"id": len(detections),
-			"phrase": "emergency phone",
-			"raw_detection_label": "image_structure_emergency_phone",
-			"source_prompt": "emergency phone",
-			"normalized_component_type": "emergency_phone",
-			"score": 0.44,
-			"box_xyxy": box,
-			"box_xywh": [box[0], box[1], box[2] - box[0], box[3] - box[1]],
-			"box_area": float(_box_area(box)),
-			"source": "image_structure_emergency_phone",
-			"geometry_validation": {"status": "derived", "reason": "dark_wall_fixture_left_of_door"},
-		}
-	)
+		if det.get("normalized_component_type") != "wheelchair button":
+			continue
+		bx1, by1, bx2, by2 = [float(v) for v in det.get("box_xyxy", [0, 0, 0, 0])]
+		button_center = [(bx1 + bx2) * 0.5, (by1 + by2) * 0.5]
+		if dx1 <= button_center[0] <= dx2 and dy1 <= button_center[1] <= dy2:
+			continue
+		button_search = [
+			bx1 - width * 0.055,
+			by1 - height * 0.16,
+			bx2 + width * 0.055,
+			by2 + height * 0.12,
+		]
+		panel_box = _dark_wall_fixture_box(image_rgb, button_search, width, height, max_aspect=5.5)
+		if panel_box is None or _box_overlap_fraction(det.get("box_xyxy", [0, 0, 0, 0]), panel_box) < 0.55:
+			button_w, button_h = max(1.0, bx2 - bx1), max(1.0, by2 - by1)
+			panel_box = [
+				max(0.0, bx1 - max(button_w * 0.42, width * 0.012)),
+				max(0.0, by1 - max(button_h * 1.70, height * 0.035)),
+				min(float(width), bx2 + max(button_w * 0.42, width * 0.012)),
+				min(float(height), by2 + max(button_h * 0.82, height * 0.020)),
+			]
+		_remap_detection(det, "elevator call button panel", "elevator call button panel", "button_nested_in_dark_call_panel_fixture")
+		_update_detection_box(det, panel_box)
+		return
+
+
+def _split_stacked_accessibility_panel_detection(image_rgb: np.ndarray, detections: list[dict[str, Any]]) -> None:
+	try:
+		import cv2
+	except ImportError:
+		return
+	height, width = image_rgb.shape[:2]
+	new_indicators: list[dict[str, Any]] = []
+	nested_button_ids: set[int] = set()
+	for det in detections:
+		if det.get("normalized_component_type") != OPERATING_PANEL_CLASS:
+			continue
+		x1, y1, x2, y2 = [int(round(v)) for v in det.get("box_xyxy", [0, 0, 0, 0])]
+		x1, y1 = max(0, x1), max(0, y1)
+		x2, y2 = min(width, x2), min(height, y2)
+		if x2 <= x1 or y2 <= y1:
+			continue
+		roi = np.asarray(image_rgb)[y1:y2, x1:x2]
+		hsv = cv2.cvtColor(roi, cv2.COLOR_RGB2HSV)
+		blue_mask = cv2.inRange(hsv, np.array([85, 40, 40]), np.array([135, 255, 255]))
+		indicator = _best_stacked_indicator_component(blue_mask, x1, y1, width, height)
+		if indicator is None:
+			continue
+		control_box = _lower_control_fixture_box(image_rgb, [x1, y1, x2, y2], indicator)
+		if control_box is None:
+			continue
+		original = [float(v) for v in det.get("box_xyxy", [x1, y1, x2, y2])]
+		LOGGER.info("[DETECT] Split stacked accessibility fixture: %s -> panel=%s wheelchair_indicator=%s", [round(v) for v in original], [round(v) for v in control_box], [round(v) for v in indicator])
+		det.setdefault("geometry_validation", {})
+		det["geometry_validation"].update(
+			{
+				"status": "split",
+				"reason": "separated_wheelchair_indicator_above_operating_panel",
+				"original_box_xyxy": original,
+				"operating_panel_box_xyxy": control_box,
+				"wheelchair_indicator_box_xyxy": indicator,
+			}
+		)
+		det["source"] = "split_operating_panel_fixture"
+		_update_detection_box(det, control_box)
+		new_indicators.append(
+			{
+				"id": len(detections) + len(new_indicators),
+				"phrase": "wheelchair indicator",
+				"raw_detection_label": "image_structure_wheelchair_indicator",
+				"source_prompt": "wheelchair indicator",
+				"normalized_component_type": "wheelchair_indicator",
+				"score": float(det.get("score", 0.0)),
+				"box_xyxy": indicator,
+				"box_xywh": [indicator[0], indicator[1], indicator[2] - indicator[0], indicator[3] - indicator[1]],
+				"box_area": float(_box_area(indicator)),
+				"source": "split_wheelchair_indicator",
+				"geometry_validation": {"status": "derived", "reason": "separated_from_stacked_operating_panel_detection"},
+			}
+		)
+		for candidate in detections:
+			if candidate.get("normalized_component_type") != "wheelchair button":
+				continue
+			if _box_overlap_fraction(candidate.get("box_xyxy", [0, 0, 0, 0]), control_box) > 0.50:
+				nested_button_ids.add(id(candidate))
+	if nested_button_ids:
+		detections[:] = [det for det in detections if id(det) not in nested_button_ids]
+	detections.extend(new_indicators)
+	for idx, det in enumerate(detections):
+		det["id"] = idx
+
+
+def _best_stacked_indicator_component(mask: np.ndarray, offset_x: int, offset_y: int, width: int, height: int) -> list[float] | None:
+	import cv2
+
+	num, _, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
+	best: tuple[int, list[float]] | None = None
+	for idx in range(1, num):
+		x, y, w, h, area = [int(v) for v in stats[idx]]
+		if area < 60 or w < width * 0.025 or h < height * 0.025:
+			continue
+		aspect = h / max(w, 1)
+		if not 0.55 <= aspect <= 1.70:
+			continue
+		box = [float(offset_x + x), float(offset_y + y), float(offset_x + x + w), float(offset_y + y + h)]
+		if best is None or area > best[0]:
+			best = (area, box)
+	return best[1] if best is not None else None
+
+
+def _lower_control_fixture_box(image_rgb: np.ndarray, stacked_box: list[int], indicator_box: list[float]) -> list[float] | None:
+	import cv2
+
+	height, width = image_rgb.shape[:2]
+	x1, _, x2, y2 = stacked_box
+	indicator_x1, _, indicator_x2, indicator_y2 = indicator_box
+	fixture_x1 = max(x1, int(round(indicator_x1)) + 1)
+	fixture_x2 = min(x2, int(round(indicator_x2)) - 1)
+	start_y = max(0, int(round(indicator_y2 + height * 0.04)))
+	if y2 <= start_y or fixture_x2 <= fixture_x1:
+		return None
+	# The stacked GroundingDINO box can touch the dark door surround. Restrict
+	# the lower search to the indicator column so the frame is not merged in.
+	roi = np.asarray(image_rgb)[start_y:y2, fixture_x1:fixture_x2]
+	gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
+	mask = (gray < 140).astype(np.uint8)
+	num, _, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+	indicator_cx = (indicator_box[0] + indicator_box[2]) * 0.5
+	best: tuple[float, list[float]] | None = None
+	for idx in range(1, num):
+		x, y, w, h, area = [int(v) for v in stats[idx]]
+		if area < 80 or h < height * 0.045 or w < width * 0.018:
+			continue
+		box = [float(fixture_x1 + x), float(start_y + y), float(fixture_x1 + x + w), float(start_y + y + h)]
+		cx = (box[0] + box[2]) * 0.5
+		score = float(area) - abs(cx - indicator_cx) * 6.0
+		if best is None or score > best[0]:
+			best = (score, box)
+	return best[1] if best is not None else None
+
+
+def _filter_false_elevator_interior_detections(image_rgb: np.ndarray, detections: list[dict[str, Any]]) -> None:
+	door = _best_detection_of_type(detections, "elevator_door")
+	if door is None:
+		return
+	height, width = image_rgb.shape[:2]
+	door_box = [float(v) for v in door.get("box_xyxy", [0, 0, 0, 0])]
+	opening = _open_entrance_box(door_box, width, height)
+	has_open_interior = _has_open_elevator_interior_evidence(image_rgb, opening)
+	kept: list[dict[str, Any]] = []
+	for det in detections:
+		if det.get("normalized_component_type") != "elevator_cabin" or det.get("source") == "open_door_interior_inset":
+			kept.append(det)
+			continue
+		box = [float(v) for v in det.get("box_xyxy", [0, 0, 0, 0])]
+		overlaps_opening = (
+			_box_overlap_fraction(box, opening) >= 0.35
+			or _box_overlap_fraction(opening, box) >= 0.35
+		)
+		if has_open_interior and overlaps_opening:
+			kept.append(det)
+			continue
+		_mark_rejected(det, "cabin_without_confirmed_open_elevator_interior")
+	detections[:] = kept
 	for idx, det in enumerate(detections):
 		det["id"] = idx
 
@@ -976,6 +1304,39 @@ def _repair_nested_elevator_door_detection(image_rgb: np.ndarray, detections: li
 		det["id"] = idx
 
 
+def _add_confirmed_open_interior_detection(image_rgb: np.ndarray, detections: list[dict[str, Any]]) -> None:
+	if _best_detection_of_type(detections, "elevator_cabin") is not None:
+		return
+	door = _best_detection_of_type(detections, "elevator_door")
+	if door is None:
+		return
+	height, width = image_rgb.shape[:2]
+	door_box = [float(v) for v in door.get("box_xyxy", [0, 0, 0, 0])]
+	bw, bh = door_box[2] - door_box[0], door_box[3] - door_box[1]
+	if bw < width * 0.18 or bh < height * 0.35 or not _has_open_elevator_interior_evidence(image_rgb, door_box):
+		return
+	interior = _cabin_interior_box(image_rgb, door_box, width, height)
+	detections.append(
+		{
+			"id": len(detections),
+			"phrase": "elevator interior",
+			"raw_detection_label": "derived_from_confirmed_open_door",
+			"source_prompt": "elevator interior",
+			"normalized_component_type": "elevator_cabin",
+			"score": float(door.get("score", 0.0)),
+			"box_xyxy": interior,
+			"box_xywh": [interior[0], interior[1], interior[2] - interior[0], interior[3] - interior[1]],
+			"box_area": float(_box_area(interior)),
+			"source": "open_door_interior_inset",
+			"geometry_validation": {
+				"status": "derived",
+				"reason": "cabin_region_inset_from_confirmed_open_door",
+				"door_box_xyxy": door_box,
+			},
+		}
+	)
+
+
 def _open_entrance_box(structural_box: list[float], width: int, height: int) -> list[float]:
 	x1, y1, x2, y2 = structural_box
 	bw, bh = max(1.0, x2 - x1), max(1.0, y2 - y1)
@@ -1043,12 +1404,20 @@ def _has_open_elevator_interior_evidence(image_rgb: np.ndarray, door_box: list[f
 	dark_fraction = float((inner < 75).mean())
 	texture = float(inner.std())
 	center = gray[:, int(cw * 0.42) : max(int(cw * 0.58), int(cw * 0.42) + 1)]
+	center_seam = sobel_x[:, int(cw * 0.47) : max(int(cw * 0.53), int(cw * 0.47) + 1)]
 	side_width = max(1, int(cw * 0.12))
 	sides = np.concatenate([gray[:, :side_width].ravel(), gray[:, cw - side_width :].ravel()])
 	center_side_delta = float(center.mean() - sides.mean()) if sides.size else 0.0
+	center_seam_energy = float(center_seam.mean()) if center_seam.size else 0.0
 	if dark_fraction > 0.65 and texture < 24.0:
 		return False
 	if dark_fraction < 0.08 and center_side_delta < -5.0:
+		return False
+	if dark_fraction < 0.03 and center_seam_energy > max(60.0, vertical_energy * 2.2):
+		return False
+	if edge_ratio < 0.70 and center_seam_energy > vertical_energy * 1.55:
+		return False
+	if center_seam_energy > 45.0 and center_seam_energy > vertical_energy * 1.70:
 		return False
 	return texture >= 24.0 and (edge_ratio >= 0.85 or dark_fraction >= 0.08)
 
