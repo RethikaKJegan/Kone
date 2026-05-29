@@ -75,20 +75,6 @@ def preselect_mod_panel_placement(
     cfg: dict[str, Any],
     removal_mask: np.ndarray | None = None,
 ) -> list[int] | None:
-    manual_box = cfg.get("insertion", {}).get("manual_box_xyxy")
-    if manual_box:
-        box = [int(v) for v in manual_box]
-        cfg.setdefault("_placement_debug", {})
-        cfg["_placement_debug"].update(
-            {
-                "placement_preselected": True,
-                "preselected_reason": "manual_box_xyxy",
-                "insert_bbox": box,
-                "inpaint_bbox": box,
-                "aligned_artifact_cleanup": {"status": "manual_box_xyxy"},
-            }
-        )
-        return box
     requested_type = cfg.get("_requested_component_type")
     if requested_type not in {"elevator_ceiling", "elevator_door"} and not _is_elevator_mod_panel_request(cfg, mod_path):
         return None

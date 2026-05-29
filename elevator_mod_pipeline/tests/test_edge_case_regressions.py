@@ -105,6 +105,7 @@ def test_multi_component_config_preserves_legacy_and_overrides_targets() -> None
     lci_cfg = component_config(base, replacement_configs({"selected_components": ["lci"], **base})[0])
     assert lci_cfg["_requested_component_type"] == "landing_call_indicator"
     assert "floor indicator" not in " ".join(lci_cfg["insertion"]["target_keywords"]).lower()
+    assert "elevator button panel" in " ".join(lci_cfg["insertion"]["target_keywords"]).lower()
 
 
 def test_batch_component_and_video_defaults_support_manifest_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -468,7 +469,7 @@ def test_car_operating_panel_is_a_replaceable_cop_target() -> None:
     assert detect._normalized_component_type("car operating panel") == detect.OPERATING_PANEL_CLASS
 
 
-def test_lci_targets_landing_call_indicator_not_floor_display() -> None:
+def test_lci_targets_elevator_button_panel_not_floor_display() -> None:
     detections = [
         {
             "phrase": "floor indicator display",
@@ -477,8 +478,8 @@ def test_lci_targets_landing_call_indicator_not_floor_display() -> None:
             "box_xyxy": [54, 20, 106, 42],
         },
         {
-            "phrase": "landing call indicator",
-            "normalized_component_type": "landing_call_indicator",
+            "phrase": "elevator call button panel",
+            "normalized_component_type": "elevator call button panel",
             "score": 0.7,
             "box_xyxy": [52, 110, 90, 166],
         },
@@ -486,13 +487,13 @@ def test_lci_targets_landing_call_indicator_not_floor_display() -> None:
 
     selected = select_valid_component_detection(
         detections,
-        ["landing call indicator", "hall call button"],
+        ["elevator button panel", "elevator call button panel", "call button"],
         240,
         160,
         (90, 30),
     )
 
-    assert detect._normalized_component_type("landing call indicator") == "landing_call_indicator"
+    assert detect._normalized_component_type("elevator call button panel") == "elevator call button panel"
     assert selected is detections[1]
 
 

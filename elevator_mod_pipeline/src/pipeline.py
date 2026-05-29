@@ -55,13 +55,12 @@ COMPONENT_REPLACEMENT_PRESETS: dict[str, dict[str, Any]] = {
         "asset": "tests/panels/mod_up.png",
         "component_type": "landing_call_indicator",
         "target_keywords": [
-            "landing call indicator",
-            "landing call button",
-            "hall call button",
-            "hall call indicator",
+            "elevator button panel",
+            "elevator call button panel",
             "elevator call button",
+            "call button",
         ],
-        "detection_labels": ["landing_call_indicator", "elevator call button panel", "elevator_door"],
+        "detection_labels": ["elevator_button_panel", "elevator call button panel", "elevator_door"],
     },
     "door": {
         "id": "door",
@@ -394,19 +393,6 @@ def _component_replacement(component: str, cfg: dict[str, Any]) -> dict[str, Any
         replacement["asset"] = str(asset_override)
     elif component == "ceiling":
         replacement["asset"] = str(_ensure_generated_ceiling_asset(cfg))
-    manual_box = (cfg.get("component_manual_boxes") or {}).get(component)
-    if manual_box:
-        replacement["manual_box_xyxy"] = [int(v) for v in manual_box]
-        insertion = dict(replacement.get("insertion") or {})
-        insertion.update(
-            {
-                "target_height_multiplier": 1.0,
-                "allow_upscale": True,
-                "max_insert_area_ratio": 0.45,
-                "max_harmonization_mask_area_ratio": 0.50,
-            }
-        )
-        replacement["insertion"] = insertion
     return replacement
 
 

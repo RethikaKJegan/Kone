@@ -28,7 +28,6 @@ class ProjectPayload(BaseModel):
     storage_dir: str
     selected_components: list[str] | None = None
     component_assets: dict[str, str] | None = None
-    component_pins: list[dict[str, Any]] | None = None
     environments: list[str] | None = None
     video_options: dict[str, Any] | None = None
 
@@ -78,37 +77,6 @@ def selected_component_asset_paths(component_assets: dict[str, str] | None) -> d
     return resolved
 
 
-def component_manual_boxes(input_image: Path, pins: list[dict[str, Any]] | None, assets: dict[str, str]) -> dict[str, list[int]]:
-    if not pins or not input_image.exists():
-        return {}
-    width, height = Image.open(input_image).size
-    width_ratios = {"lci": 0.15, "cop": 0.13, "door": 0.34, "ceiling": 0.44}
-    max_height_ratios = {"lci": 0.22, "cop": 0.34, "door": 0.52, "ceiling": 0.24}
-    boxes: dict[str, list[int]] = {}
-    for pin in pins:
-        component = str(pin.get("componentKey") or pin.get("component_key") or "").lower()
-        if component not in assets:
-            continue
-        try:
-            asset_w, asset_h = Image.open(assets[component]).size
-            px = float(pin.get("x"))
-            py = float(pin.get("y"))
-        except Exception:
-            continue
-        box_w = max(8, int(width * width_ratios.get(component, 0.15)))
-        box_h = max(8, int(box_w * asset_h / max(asset_w, 1)))
-        max_h = max(8, int(height * max_height_ratios.get(component, 0.25)))
-        if box_h > max_h:
-            box_h = max_h
-            box_w = max(8, int(box_h * asset_w / max(asset_h, 1)))
-        cx = int(width * px / 100.0)
-        cy = int(height * py / 100.0)
-        x1 = max(0, min(width - box_w, cx - box_w // 2))
-        y1 = max(0, min(height - box_h, cy - box_h // 2))
-        boxes[component] = [x1, y1, min(width, x1 + box_w), min(height, y1 + box_h)]
-    return boxes
-
-
 def public_status(status: str, error: Any = None) -> dict[str, Any]:
     return {
         "status": status,
@@ -153,7 +121,6 @@ def run_components(payload: ProjectPayload):
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     panel_path = repo_root() / "tests" / "panels" / "mod_panel.png"
     component_assets = selected_component_asset_paths(payload.component_assets)
-    manual_boxes = component_manual_boxes(input_image, payload.component_pins, component_assets)
     cfg.update(
         {
             "run_dir": str(pipeline_dir),
@@ -163,7 +130,6 @@ def run_components(payload: ProjectPayload):
             "video": {**cfg.get("video", {}), "enabled": False},
             "selected_components": payload.selected_components or [],
             "component_assets": component_assets,
-            "component_manual_boxes": manual_boxes,
             "environment": payload.environments or [],
         }
     )

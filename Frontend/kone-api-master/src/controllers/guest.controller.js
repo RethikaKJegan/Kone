@@ -82,7 +82,6 @@ const runComponents = catchAsync(async (req, res) => {
     project_name: projectName,
     selected_components: selectedComponents,
     component_assets: componentAssets,
-    component_pins: componentPins,
     environments,
   } = req.body;
   const root = projectDir(sessionId, projectId);
@@ -94,7 +93,6 @@ const runComponents = catchAsync(async (req, res) => {
     storage_dir: root,
     selected_components: selectedComponents,
     component_assets: componentAssets,
-    component_pins: componentPins,
     environments,
   }).catch((error) => writeStatus(root, { status: 'failed', preview_url: null, video_url: null, download_url: null, error: error.message }));
   res.send({ ok: true, status: 'processing' });

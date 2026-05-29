@@ -210,12 +210,6 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
 
     if (isGuestSession()) {
       const sessionId = await getGuestSessionId()
-      const componentPins: ComponentPin[] = selectedComponents.map(key => ({
-        componentKey: key,
-        x: AI_PLACEMENT_DEFAULTS[key]?.x ?? 50,
-        y: AI_PLACEMENT_DEFAULTS[key]?.y ?? 50,
-        aiPlaced: true,
-      }))
       const componentAssets = Object.fromEntries(
         KONE_COMPONENTS
           .filter(component => selectedComponents.includes(component.key))
@@ -229,7 +223,6 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
         environments,
         selected_components: selectedComponents,
         component_assets: componentAssets,
-        component_pins: componentPins,
       })
     } else {
       await apiClient.patch(`/offerings/${currentOffering.id}`, updates)
