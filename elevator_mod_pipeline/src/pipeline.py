@@ -11,6 +11,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 import cv2
+import numpy as np
 
 from .input_validation import merged_validation_config, validate_elevator_presence, validate_input_image
 from .inpaint import build_removal_mask, inpaint_background
@@ -71,10 +72,10 @@ COMPONENT_REPLACEMENT_PRESETS: dict[str, dict[str, Any]] = {
     },
     "ceiling": {
         "id": "ceiling",
-        "asset": "tests/panels/mod_panel.png",
-        "component_type": "elevator_cabin",
-        "target_keywords": ["elevator ceiling", "ceiling light", "elevator cabin", "elevator interior"],
-        "detection_labels": ["elevator ceiling", "elevator_cabin"],
+        "asset": "__generated_ceiling_panel__",
+        "component_type": "elevator_ceiling",
+        "target_keywords": ["elevator ceiling", "ceiling light", "elevator_ceiling"],
+        "detection_labels": ["elevator ceiling", "ceiling light", "elevator_ceiling", "elevator_door", "elevator_cabin"],
     },
 }
 
@@ -266,8 +267,9 @@ def run(config_path: str | Path) -> None:
             if (
                 perspective_cfg.get("enabled", False)
                 and perspective_cfg.get("auto", True)
-                and placement_debug.get("placement_mode") != "existing_panel"
+                and placement_debug.get("placement_mode") not in {"existing_panel", "existing_component", "existing_ceiling"}
                 and placement_debug.get("homography_alignment", {}).get("mode") != "existing_panel_rectified_homography"
+                and placement_debug.get("homography_alignment", {}).get("mode") != "existing_ceiling_rectified_homography"
             ):
                 status("perspective_mod_placement", f"[PLACE] Auto perspective-grid placement: {replacement_id}")
                 perspective_outputs = run_auto_perspective_mod_placement(
@@ -289,15 +291,21 @@ def run(config_path: str | Path) -> None:
         if combined_panel_mask is not None:
             cv2.imwrite(str(panel_mask_path), combined_panel_mask)
         save_json(run_dir / "component_placements.json", component_placements)
-        perspective_outputs = run_perspective_mod_placement_from_config(
-            cfg,
-            cfg.get("perspective_mod_placement", {}).get("base_image") or cleaned_path,
-            cfg.get("perspective_mod_placement", {}).get("panel") or replacements[-1]["asset"],
-            cfg.get("perspective_mod_placement", {}).get("out_dir") or (run_dir / "perspective_mod_placement"),
+        skip_global_perspective = any(
+            placement.get("placement_mode") in {"existing_panel", "existing_component", "existing_ceiling"}
+            for placement in component_placements
         )
-        if perspective_outputs:
-            status("perspective_mod_placement", "[PLACE] Applying perspective-grid MOD panel placement")
-            copy_pipeline_handoff(perspective_outputs, composite_path, panel_mask_path)
+        perspective_outputs = None
+        if not skip_global_perspective:
+            perspective_outputs = run_perspective_mod_placement_from_config(
+                cfg,
+                cfg.get("perspective_mod_placement", {}).get("base_image") or cleaned_path,
+                cfg.get("perspective_mod_placement", {}).get("panel") or replacements[-1]["asset"],
+                cfg.get("perspective_mod_placement", {}).get("out_dir") or (run_dir / "perspective_mod_placement"),
+            )
+            if perspective_outputs:
+                status("perspective_mod_placement", "[PLACE] Applying perspective-grid MOD panel placement")
+                copy_pipeline_handoff(perspective_outputs, composite_path, panel_mask_path)
         maybe_refine(composite_path, panel_mask_path, cfg, final_path)
         monitor.mark("insertion_done")
         if cfg.get("video", {}).get("enabled", False):
@@ -359,7 +367,7 @@ def replacement_configs(cfg: dict[str, Any]) -> list[dict[str, Any]]:
             for component in cfg.get("selected_components", [])
             if str(component).strip()
         ]
-        replacements = [_component_replacement(component) for component in selected]
+        replacements = [_component_replacement(component, cfg) for component in selected]
         replacements = [replacement for replacement in replacements if replacement is not None]
         if replacements:
             _extend_detection_labels(cfg, replacements)
@@ -376,11 +384,31 @@ def replacement_configs(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     return replacements
 
 
-def _component_replacement(component: str) -> dict[str, Any] | None:
+def _component_replacement(component: str, cfg: dict[str, Any]) -> dict[str, Any] | None:
     preset = COMPONENT_REPLACEMENT_PRESETS.get(component)
     if preset is None:
         return None
-    return {key: value for key, value in preset.items() if key != "detection_labels"}
+    replacement = {key: value for key, value in preset.items() if key != "detection_labels"}
+    if component == "ceiling":
+        replacement["asset"] = str(_ensure_generated_ceiling_asset(cfg))
+    return replacement
+
+
+def _ensure_generated_ceiling_asset(cfg: dict[str, Any]) -> Path:
+    asset_path = Path(cfg["run_dir"]) / "generated_assets" / "ceiling_mod.png"
+    if asset_path.exists():
+        return asset_path
+
+    asset_path.parent.mkdir(parents=True, exist_ok=True)
+    height, width = 180, 640
+    panel = np.full((height, width, 3), 218, dtype=np.uint8)
+    for y in range(0, height, 36):
+        cv2.line(panel, (0, y), (width, y), (190, 190, 190), 1)
+    for x in range(0, width, 80):
+        cv2.line(panel, (x, 0), (x, height), (202, 202, 202), 1)
+    cv2.rectangle(panel, (0, 0), (width - 1, height - 1), (168, 168, 168), 3)
+    cv2.imwrite(str(asset_path), panel)
+    return asset_path
 
 
 def _extend_detection_labels(cfg: dict[str, Any], replacements: list[dict[str, Any]]) -> None:

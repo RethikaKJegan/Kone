@@ -51,6 +51,7 @@ NORMALIZED_COMPONENT_PROMPTS: dict[str, list[str]] = {
 	"weight_limit_sign": ["weight limit sign", "elevator capacity sign", "capacity sign"],
 	"accessibility_control_panel": ["accessibility control panel"],
 	"elevator_door": ["elevator door", "elevator doors"],
+	"elevator_ceiling": ["elevator ceiling", "ceiling light", "lift ceiling", "ceiling panel"],
 	"elevator_cabin": ["elevator cabin", "elevator interior", "inside elevator"],
 	"threshold_plate": ["elevator threshold plate", "door sill", "metal threshold plate"],
 	"handrail": ["elevator handrail", "handrail"],
@@ -349,6 +350,8 @@ def _normalized_component_type(phrase: str) -> str | None:
 		return "floor_indicator_display"
 	if any(term in lower for term in ("elevator door", "elevator doors", "door frame", "elevator opening", "lift entrance")):
 		return "elevator_door"
+	if any(term in lower for term in ("elevator ceiling", "ceiling light", "lift ceiling", "ceiling panel")):
+		return "elevator_ceiling"
 	if any(term in lower for term in ("threshold plate", "door sill", "metal threshold plate", "door track")):
 		return "threshold_plate"
 	if "handrail" in lower:
@@ -357,7 +360,7 @@ def _normalized_component_type(phrase: str) -> str | None:
 		return "security_camera"
 	if any(term in lower for term in ("emergency phone", "intercom phone", "emergency call phone")):
 		return "emergency_phone"
-	if any(term in lower for term in ("elevator cabin", "elevator interior", "inside elevator", "elevator ceiling", "elevator floor", "mirror")):
+	if any(term in lower for term in ("elevator cabin", "elevator interior", "inside elevator", "elevator floor", "mirror")):
 		return "elevator_cabin"
 	return None
 
