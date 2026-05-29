@@ -76,7 +76,15 @@ const precheck = catchAsync(async (req, res) => {
 });
 
 const runComponents = catchAsync(async (req, res) => {
-  const { session_id: sessionId, project_id: projectId, project_name: projectName, selected_components: selectedComponents, environments } = req.body;
+  const {
+    session_id: sessionId,
+    project_id: projectId,
+    project_name: projectName,
+    selected_components: selectedComponents,
+    component_assets: componentAssets,
+    component_pins: componentPins,
+    environments,
+  } = req.body;
   const root = projectDir(sessionId, projectId);
   await writeStatus(root, { status: 'processing', preview_url: null, video_url: null, download_url: null, error: null });
   axios.post(`${LOGIC_URL}/run-components`, {
@@ -85,6 +93,8 @@ const runComponents = catchAsync(async (req, res) => {
     project_name: projectName,
     storage_dir: root,
     selected_components: selectedComponents,
+    component_assets: componentAssets,
+    component_pins: componentPins,
     environments,
   }).catch((error) => writeStatus(root, { status: 'failed', preview_url: null, video_url: null, download_url: null, error: error.message }));
   res.send({ ok: true, status: 'processing' });

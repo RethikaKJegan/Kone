@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import apiClient from '../api/client'
 import { getGuestSessionId, isGuestSession } from '../api/guestWorkflow'
+import { AI_PLACEMENT_DEFAULTS, KONE_COMPONENTS } from '../lib/constants'
 import type { Offering, OfferingStep, Environment, ComponentKey, ComponentPin } from '../types'
 
 function getGuestData<T>(key: string): T | null {
@@ -209,6 +210,17 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
 
     if (isGuestSession()) {
       const sessionId = await getGuestSessionId()
+      const componentPins: ComponentPin[] = selectedComponents.map(key => ({
+        componentKey: key,
+        x: AI_PLACEMENT_DEFAULTS[key]?.x ?? 50,
+        y: AI_PLACEMENT_DEFAULTS[key]?.y ?? 50,
+        aiPlaced: true,
+      }))
+      const componentAssets = Object.fromEntries(
+        KONE_COMPONENTS
+          .filter(component => selectedComponents.includes(component.key))
+          .map(component => [component.key, component.imageUrl])
+      )
       await apiClient.post('/guest/components', {
         is_guest: true,
         session_id: sessionId,
@@ -216,6 +228,8 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
         project_name: currentOffering.name,
         environments,
         selected_components: selectedComponents,
+        component_assets: componentAssets,
+        component_pins: componentPins,
       })
     } else {
       await apiClient.patch(`/offerings/${currentOffering.id}`, updates)
@@ -254,7 +268,6 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
     try {
       if (isGuestSession()) {
         await new Promise(r => setTimeout(r, 800))
-        const { AI_PLACEMENT_DEFAULTS } = await import('../lib/constants')
         const pins: ComponentPin[] = currentOffering.selectedComponents.map(key => ({
           componentKey: key,
           x: AI_PLACEMENT_DEFAULTS[key]?.x ?? 50,

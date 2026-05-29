@@ -27,6 +27,8 @@ class ProjectPayload(BaseModel):
     project_name: str | None = None
     storage_dir: str
     selected_components: list[str] | None = None
+    component_assets: dict[str, str] | None = None
+    component_pins: list[dict[str, Any]] | None = None
     environments: list[str] | None = None
     video_options: dict[str, Any] | None = None
 
@@ -48,6 +50,63 @@ def write_status(storage_dir: str, data: dict[str, Any]) -> None:
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def workspace_root() -> Path:
+    return repo_root().parent
+
+
+def selected_component_asset_paths(component_assets: dict[str, str] | None) -> dict[str, str]:
+    default_dir = workspace_root() / "Frontend" / "kone-ui-master" / "public" / "components"
+    default_files = {
+        "ceiling": default_dir / "ceiling.jpg",
+        "lci": default_dir / "lci.png",
+        "door": default_dir / "door.jpg",
+        "cop": default_dir / "cop.png",
+    }
+    resolved: dict[str, str] = {}
+    for component, default_path in default_files.items():
+        raw = (component_assets or {}).get(component)
+        candidates: list[Path] = []
+        if raw and raw.startswith("/components/"):
+            candidates.append(workspace_root() / "Frontend" / "kone-ui-master" / "public" / raw.lstrip("/"))
+        candidates.append(default_path)
+        for candidate in candidates:
+            if candidate.exists():
+                resolved[component] = str(candidate)
+                break
+    return resolved
+
+
+def component_manual_boxes(input_image: Path, pins: list[dict[str, Any]] | None, assets: dict[str, str]) -> dict[str, list[int]]:
+    if not pins or not input_image.exists():
+        return {}
+    width, height = Image.open(input_image).size
+    width_ratios = {"lci": 0.15, "cop": 0.13, "door": 0.34, "ceiling": 0.44}
+    max_height_ratios = {"lci": 0.22, "cop": 0.34, "door": 0.52, "ceiling": 0.24}
+    boxes: dict[str, list[int]] = {}
+    for pin in pins:
+        component = str(pin.get("componentKey") or pin.get("component_key") or "").lower()
+        if component not in assets:
+            continue
+        try:
+            asset_w, asset_h = Image.open(assets[component]).size
+            px = float(pin.get("x"))
+            py = float(pin.get("y"))
+        except Exception:
+            continue
+        box_w = max(8, int(width * width_ratios.get(component, 0.15)))
+        box_h = max(8, int(box_w * asset_h / max(asset_w, 1)))
+        max_h = max(8, int(height * max_height_ratios.get(component, 0.25)))
+        if box_h > max_h:
+            box_h = max_h
+            box_w = max(8, int(box_h * asset_w / max(asset_h, 1)))
+        cx = int(width * px / 100.0)
+        cy = int(height * py / 100.0)
+        x1 = max(0, min(width - box_w, cx - box_w // 2))
+        y1 = max(0, min(height - box_h, cy - box_h // 2))
+        boxes[component] = [x1, y1, min(width, x1 + box_w), min(height, y1 + box_h)]
+    return boxes
 
 
 def public_status(status: str, error: Any = None) -> dict[str, Any]:
@@ -93,6 +152,8 @@ def run_components(payload: ProjectPayload):
     cfg_path = repo_root() / "config.yaml"
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     panel_path = repo_root() / "tests" / "panels" / "mod_panel.png"
+    component_assets = selected_component_asset_paths(payload.component_assets)
+    manual_boxes = component_manual_boxes(input_image, payload.component_pins, component_assets)
     cfg.update(
         {
             "run_dir": str(pipeline_dir),
@@ -101,6 +162,8 @@ def run_components(payload: ProjectPayload):
             "input_validation": {"enabled": False},
             "video": {**cfg.get("video", {}), "enabled": False},
             "selected_components": payload.selected_components or [],
+            "component_assets": component_assets,
+            "component_manual_boxes": manual_boxes,
             "environment": payload.environments or [],
         }
     )

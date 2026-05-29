@@ -389,8 +389,24 @@ def _component_replacement(component: str, cfg: dict[str, Any]) -> dict[str, Any
     if preset is None:
         return None
     replacement = {key: value for key, value in preset.items() if key != "detection_labels"}
-    if component == "ceiling":
+    asset_override = (cfg.get("component_assets") or {}).get(component)
+    if asset_override:
+        replacement["asset"] = str(asset_override)
+    elif component == "ceiling":
         replacement["asset"] = str(_ensure_generated_ceiling_asset(cfg))
+    manual_box = (cfg.get("component_manual_boxes") or {}).get(component)
+    if manual_box:
+        replacement["manual_box_xyxy"] = [int(v) for v in manual_box]
+        insertion = dict(replacement.get("insertion") or {})
+        insertion.update(
+            {
+                "target_height_multiplier": 1.0,
+                "allow_upscale": True,
+                "max_insert_area_ratio": 0.45,
+                "max_harmonization_mask_area_ratio": 0.50,
+            }
+        )
+        replacement["insertion"] = insertion
     return replacement
 
 

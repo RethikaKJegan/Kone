@@ -5,25 +5,25 @@ export const KONE_COMPONENTS: ComponentItem[] = [
     key: 'ceiling',
     label: 'Ceiling',
     description: 'KONE ceiling panel unit',
-    imageUrl: 'https://res.cloudinary.com/dsqeawg67/image/upload/v1779956411/Sample2_open_interior_nsjzxl.jpg',
+    imageUrl: '/components/ceiling.jpg',
   },
   {
     key: 'lci',
     label: 'LCI',
     description: 'Landing Call Indicator',
-    imageUrl: 'https://res.cloudinary.com/dsqeawg67/image/upload/v1779956260/mod_panel_ozvmsu.png',
+    imageUrl: '/components/lci.png',
   },
   {
     key: 'door',
     label: 'Door',
     description: 'KONE door system',
-    imageUrl: 'https://res.cloudinary.com/dsqeawg67/image/upload/v1779956327/Sample2_closed_exterior_vmjb5s.jpg',
+    imageUrl: '/components/door.jpg',
   },
   {
     key: 'cop',
     label: 'COP',
     description: 'Car Operating Panel',
-    imageUrl: 'https://res.cloudinary.com/dsqeawg67/image/upload/v1779956181/mod_long_mvhhhi.png',
+    imageUrl: '/components/cop.png',
   },
 ]
 
