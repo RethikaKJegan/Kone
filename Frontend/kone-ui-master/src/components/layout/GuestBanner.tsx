@@ -1,28 +1,32 @@
 import { X } from 'lucide-react'
 import { Link } from 'react-router-dom'
-import { useState } from 'react'
 import { useAuthStore } from '../../store/authStore'
 
 export function GuestBanner() {
-  const [dismissed, setDismissed] = useState(false)
-  const { isGuest } = useAuthStore()
+  const { isGuest, guestBannerDismissed, dismissGuestBanner } = useAuthStore()
 
-  if (!isGuest || dismissed) return null
+  if (!isGuest || guestBannerDismissed) return null
 
   return (
     <div className="flex items-center justify-between gap-4 bg-[#0A0A0A] px-4 py-2.5">
       <p className="text-[13px] text-white/70">
-        You're using a guest session. The workflow is fully enabled for demo use.
+        You're browsing as a guest. Your work is saved for this session only.
       </p>
-      <div className="flex shrink-0 items-center gap-3">
+      <div className="flex items-center gap-3 shrink-0">
         <Link
           to="/signup"
           className="rounded-[5px] bg-white px-3 py-1 text-xs font-medium text-[#0A0A0A] transition-colors duration-[120ms] hover:bg-white/90"
         >
-          Create account
+          Sign up to save permanently
+        </Link>
+        <Link
+          to="/signin"
+          className="text-[13px] text-[#A3A3A3] transition-colors duration-[120ms] hover:text-white"
+        >
+          Sign in
         </Link>
         <button
-          onClick={() => setDismissed(true)}
+          onClick={dismissGuestBanner}
           aria-label="Dismiss banner"
           className="text-white/30 transition-colors duration-[120ms] hover:text-white/60"
         >

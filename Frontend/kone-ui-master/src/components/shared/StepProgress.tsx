@@ -7,11 +7,12 @@ interface Props {
   currentStep: OfferingStep
   completedSteps: OfferingStep[]
   onStepClick?: (step: OfferingStep) => void
+  hiddenSteps?: OfferingStep[]
 }
 
 const STEPS = [1, 2, 3, 4, 5, 6] as OfferingStep[]
 
-export function StepProgress({ currentStep, completedSteps, onStepClick }: Props) {
+export function StepProgress({ currentStep, completedSteps, onStepClick, hiddenSteps = [] }: Props) {
   return (
     <div
       role="progressbar"
@@ -21,7 +22,7 @@ export function StepProgress({ currentStep, completedSteps, onStepClick }: Props
       aria-label="Visualization progress"
       className="px-3 py-2"
     >
-      {STEPS.map((step, idx) => {
+      {STEPS.filter(step => !hiddenSteps.includes(step)).map((step, idx) => {
         const isCompleted = completedSteps.includes(step)
         const isCurrent = step === currentStep
         const isOptional = OPTIONAL_STEPS.includes(step)

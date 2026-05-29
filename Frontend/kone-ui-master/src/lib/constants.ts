@@ -1,10 +1,30 @@
-import type { ComponentItem, Environment, OfferingStep, BrochureSection } from '../types'
+import type { ComponentItem, Environment, OfferingStep, BrochureSection, User } from '../types'
 
 export const KONE_COMPONENTS: ComponentItem[] = [
-  { key: 'ceiling', label: 'Ceiling', description: 'KONE ceiling panel unit' },
-  { key: 'lci', label: 'LCI', description: 'Landing Call Indicator' },
-  { key: 'door', label: 'Door', description: 'KONE door system' },
-  { key: 'cop', label: 'COP', description: 'Car Operating Panel' },
+  {
+    key: 'ceiling',
+    label: 'Ceiling',
+    description: 'KONE ceiling panel unit',
+    imageUrl: 'https://res.cloudinary.com/dsqeawg67/image/upload/v1779956411/Sample2_open_interior_nsjzxl.jpg',
+  },
+  {
+    key: 'lci',
+    label: 'LCI',
+    description: 'Landing Call Indicator',
+    imageUrl: 'https://res.cloudinary.com/dsqeawg67/image/upload/v1779956260/mod_panel_ozvmsu.png',
+  },
+  {
+    key: 'door',
+    label: 'Door',
+    description: 'KONE door system',
+    imageUrl: 'https://res.cloudinary.com/dsqeawg67/image/upload/v1779956327/Sample2_closed_exterior_vmjb5s.jpg',
+  },
+  {
+    key: 'cop',
+    label: 'COP',
+    description: 'Car Operating Panel',
+    imageUrl: 'https://res.cloudinary.com/dsqeawg67/image/upload/v1779956181/mod_long_mvhhhi.png',
+  },
 ]
 
 export const ENVIRONMENTS: { key: Environment; label: string }[] = [
@@ -27,6 +47,7 @@ export const VIDEO_MOTION_STYLES = [
   { value: 'zoom-in', label: 'Zoom In' },
   { value: 'pan-lr', label: 'Pan L–R' },
   { value: 'pan-rl', label: 'Pan R–L' },
+  { value: 'door-functionality', label: 'Door Functionality' },
 ] as const
 
 export const VIDEO_SPEEDS = [0.5, 1, 1.5] as const
@@ -68,6 +89,15 @@ export const BROCHURE_SECTIONS: {
       'Include any additional commercial terms, project timelines, or post-installation support details.',
   },
 ]
+
+export const GUEST_USER: User = {
+  id: 'guest',
+  email: 'guest@kone.com',
+  name: 'Guest User',
+  role: 'guest',
+  company: 'KONE',
+  avatarInitials: 'GU',
+}
 
 export const AI_PLACEMENT_DEFAULTS = {
   ceiling: { x: 50, y: 10 },

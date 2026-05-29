@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate, Link } from 'react-router-dom'
 import { Loader2, Image as ImageIcon, Layers, Video, Download, Eye, EyeOff } from 'lucide-react'
+import apiClient from '../../../api/client'
+import { getGuestSessionId } from '../../../api/guestWorkflow'
 import { useOfferingStore } from '../../../store/offeringStore'
+import { useAuthStore } from '../../../store/authStore'
 import { AnnotatedPreview } from '../../../components/shared/AnnotatedPreview'
 import { KONE_COMPONENTS } from '../../../lib/constants'
 import { toast } from '../../../hooks/useToast'
@@ -21,13 +24,42 @@ export default function Step6Download() {
   const { projectId, offeringId } = useParams()
   const navigate = useNavigate()
   const { currentOffering, triggerRender, completeOffering, goToStep } = useOfferingStore()
+  const { isGuest } = useAuthStore()
   const [rendered, setRendered] = useState(currentOffering?.renderComplete ?? false)
   const [annotationsOn, setAnnotationsOn] = useState(true)
   const [activeFilters, setActiveFilters] = useState<ComponentKey[]>(
     currentOffering?.selectedComponents ?? []
   )
+  const [downloadUrl, setDownloadUrl] = useState<string | null>(null)
 
   useEffect(() => {
+    if (isGuest && projectId && currentOffering) {
+      getGuestSessionId()
+        .then(sessionId => apiClient.post('/guest/finalize', {
+          is_guest: true,
+          session_id: sessionId,
+          project_id: projectId,
+          project_name: currentOffering.name,
+        }).then(() => sessionId))
+        .then(async sessionId => {
+          for (;;) {
+            const { data } = await apiClient.get('/guest/status', {
+              params: { session_id: sessionId, project_id: projectId },
+            })
+            if (data.status === 'ready_for_download') {
+              setDownloadUrl(data.download_url)
+              setRendered(true)
+              toast('Your outputs are ready to download')
+              return
+            }
+            if (data.status === 'failed') throw new Error(data.error || 'Finalize failed')
+            await new Promise(resolve => setTimeout(resolve, 1500))
+          }
+        })
+        .catch(error => toast(error.message || 'Final files are not ready'))
+      return
+    }
+
     if (!currentOffering?.renderComplete) {
       triggerRender().then(() => {
         setRendered(true)
@@ -44,7 +76,13 @@ export default function Step6Download() {
     }
   }, [currentOffering?.id])
 
-  const handleDownload = (url: string | null, filename: string) => {
+  const handleDownload = async (url: string | null, filename: string) => {
+    if (isGuest) {
+      const sessionId = await getGuestSessionId()
+      const base = import.meta.env.VITE_API_BASE_URL || '/api/v1'
+      window.location.href = downloadUrl ?? `${base}/guest/download?session_id=${encodeURIComponent(sessionId)}&project_id=${encodeURIComponent(projectId ?? '')}`
+      return
+    }
     if (!url) {
       toast('Output file not available yet')
       return
@@ -85,7 +123,7 @@ export default function Step6Download() {
       icon: ImageIcon,
       title: 'Rendered Image',
       subtitle: 'High-quality composite render',
-      url: offering?.outputImageUrl ?? null,
+      url: isGuest ? downloadUrl : offering?.outputImageUrl ?? null,
       file: 'final_output.png',
       highlight: false,
     },
@@ -93,7 +131,7 @@ export default function Step6Download() {
       icon: Layers,
       title: 'Image with Callouts',
       subtitle: 'Render with annotation overlay',
-      url: offering?.outputImageUrl ?? null,
+      url: isGuest ? downloadUrl : offering?.outputImageUrl ?? null,
       file: 'salesnxt-callouts.png',
       highlight: true,
     },
@@ -101,7 +139,7 @@ export default function Step6Download() {
       icon: Video,
       title: 'Video',
       subtitle: `${offering?.videoQuality} · ${offering?.videoMotionStyle === 'zoom-in' ? 'Zoom In' : offering?.videoMotionStyle === 'pan-lr' ? 'Pan L–R' : 'Pan R–L'}`,
-      url: offering?.outputVideoUrl ?? null,
+      url: isGuest ? downloadUrl : offering?.outputVideoUrl ?? null,
       file: 'elevator_animation.mp4',
       highlight: false,
     },
@@ -109,10 +147,10 @@ export default function Step6Download() {
 
   return (
     <div className="space-y-6">
-      <div className="rounded-lg border border-[#E4E4E4] bg-white p-8">
+      <div className="rounded-xl border border-[#E9ECEF] bg-white p-8 shadow-sm">
         <div className="mb-6 flex items-start justify-between">
-          <h2 className="text-base font-semibold text-[#0A0A0A]">6 &nbsp; Render & Download</h2>
-          <button onClick={handleBack} className="text-xs text-[#A3A3A3] transition-colors duration-[120ms] hover:text-[#525252]">Back</button>
+          <h2 className="text-heading text-[15px] font-semibold text-[#111827]">6 &nbsp; Render & Download</h2>
+          <button onClick={handleBack} className="text-xs font-medium text-[#9CA3AF] transition-colors duration-[120ms] hover:text-[#6B7280]">Back</button>
         </div>
 
         {/* Download cards */}
@@ -162,9 +200,9 @@ export default function Step6Download() {
                     className="relative overflow-hidden bg-[#F5F5F5]"
                     style={{ aspectRatio: '1', height: 120 }}
                   >
-                    {offering?.uploadedFileUrl ? (
+                    {(offering?.outputImageUrl ?? offering?.uploadedFileUrl) ? (
                       <img
-                        src={offering.uploadedFileUrl}
+                        src={offering.outputImageUrl ?? offering.uploadedFileUrl ?? ''}
                         alt={`${COMP_LABELS[pin.componentKey]} zoomed view`}
                         className="absolute w-full h-full object-cover"
                         style={{
@@ -260,7 +298,7 @@ export default function Step6Download() {
             </div>
           </div>
           <AnnotatedPreview
-            imageUrl={offering?.uploadedFileUrl ?? null}
+            imageUrl={offering?.outputImageUrl ?? offering?.uploadedFileUrl ?? null}
             pins={pins}
             annotationsEnabled={annotationsOn}
             activeFilters={activeFilters}
@@ -273,7 +311,9 @@ export default function Step6Download() {
       <div className="rounded-lg bg-[#0A0A0A] p-6 text-white">
         <h3 className="text-base font-semibold">Visualization complete</h3>
         <p className="mt-1 text-sm text-white/60">
-          Save this visualization to your project. You'll then be able to build a Sales Brochure from the project screen.
+          {isGuest
+            ? 'Sign up to save this visualization permanently and access it across sessions.'
+            : "Save this visualization to your project. You'll then be able to build a Sales Brochure from the project screen."}
         </p>
         {offering && (
           <div className="mt-3 flex flex-wrap gap-1.5">
@@ -286,13 +326,23 @@ export default function Step6Download() {
           </div>
         )}
         <div className="mt-4 flex items-center gap-3">
-          <button
-            onClick={handleSave}
-            className="rounded-[5px] bg-white px-4 text-sm font-medium text-[#0A0A0A] transition-colors duration-[120ms] hover:bg-white/90"
-            style={{ paddingTop: 8, paddingBottom: 8 }}
-          >
-            Save & Return to Project
-          </button>
+          {isGuest ? (
+            <Link
+              to="/signup"
+              className="rounded-[5px] bg-white px-4 text-sm font-medium text-[#0A0A0A] transition-colors duration-[120ms] hover:bg-white/90"
+              style={{ paddingTop: 8, paddingBottom: 8 }}
+            >
+              Sign up to save
+            </Link>
+          ) : (
+            <button
+              onClick={handleSave}
+              className="rounded-[5px] bg-white px-4 text-sm font-medium text-[#0A0A0A] transition-colors duration-[120ms] hover:bg-white/90"
+              style={{ paddingTop: 8, paddingBottom: 8 }}
+            >
+              Save & Return to Project
+            </button>
+          )}
         </div>
       </div>
     </div>

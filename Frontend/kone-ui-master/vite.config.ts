@@ -5,7 +5,7 @@ import { mockApiPlugin } from './src/mocks/vitePlugin'
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
-  const enableMockApi = env.VITE_ENABLE_MOCK_API !== 'false'
+  const enableMockApi = env.VITE_ENABLE_MOCK_API === 'true'
 
   return {
     plugins: [react(), ...(enableMockApi ? [mockApiPlugin()] : [])],
@@ -41,6 +41,10 @@ export default defineConfig(({ mode }) => {
             }),
         '/output': {
           target: 'http://localhost:4000',
+          changeOrigin: true,
+        },
+        '/storage': {
+          target: env.VITE_API_BASE_URL?.replace('/api/v1', '') || 'http://localhost:4000',
           changeOrigin: true,
         },
       },

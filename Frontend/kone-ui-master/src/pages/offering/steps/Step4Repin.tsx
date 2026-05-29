@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { Check, RotateCcw } from 'lucide-react'
+import { isGuestSession } from '../../../api/guestWorkflow'
 import { useOfferingStore } from '../../../store/offeringStore'
 import { ImageCanvas } from '../../../components/shared/ImageCanvas'
 import { AIBadge } from '../../../components/shared/AIBadge'
@@ -21,18 +22,27 @@ export default function Step4Repin() {
   const components = offering?.selectedComponents ?? []
   const pins = offering?.componentPins ?? []
 
-  const handlePinMove = async (componentKey: ComponentKey, x: number, y: number) => {
+  if (isGuestSession() && !offering?.renderComplete) {
+    return (
+      <div className="rounded-xl border border-[#E9ECEF] bg-white p-8 shadow-sm">
+        <h2 className="text-heading text-[15px] font-semibold text-[#111827]">4 &nbsp; Adjust Placement</h2>
+        <p className="mt-4 text-sm text-[#6B7280]">Preview is still being generated.</p>
+      </div>
+    )
+  }
+
+  const handlePinMove = (componentKey: ComponentKey, x: number, y: number) => {
     const newPins = pins.map(p =>
       p.componentKey === componentKey ? { ...p, x, y, aiPlaced: false } : p
     )
     const exists = newPins.find(p => p.componentKey === componentKey)
     if (!exists) newPins.push({ componentKey, x, y, aiPlaced: false })
-    await setPins(newPins)
+    setPins(newPins)
     setSelectedComp(null)
   }
 
   const handleRestore = async () => {
-    await setPins([])
+    setPins([])
     await runAIPlacement()
     toast('Components restored to AI placement')
   }
@@ -53,20 +63,20 @@ export default function Step4Repin() {
   }
 
   return (
-    <div className="overflow-hidden rounded-lg border border-[#E4E4E4] bg-white">
+    <div className="overflow-hidden rounded-xl border border-[#E9ECEF] bg-white shadow-sm">
       <div className="flex items-start justify-between px-8 pb-2 pt-8">
         <div>
-          <h2 className="text-base font-semibold text-[#0A0A0A]">4 &nbsp; Adjust Placement</h2>
-          <p className="mt-1 text-xs text-[#A3A3A3]">Optional — click a component then click the image to reposition its pin</p>
+          <h2 className="text-heading text-[15px] font-semibold text-[#111827]">4 &nbsp; Adjust Placement</h2>
+          <p className="mt-1 text-[12px] text-[#9CA3AF]">Optional — click a component then click the image to reposition its pin</p>
         </div>
-        <button onClick={handleBack} className="text-xs text-[#A3A3A3] transition-colors duration-[120ms] hover:text-[#525252]">Back</button>
+        <button onClick={handleBack} className="text-xs font-medium text-[#9CA3AF] transition-colors duration-[120ms] hover:text-[#6B7280]">Back</button>
       </div>
 
-      <div className="flex gap-0 border-t border-[#E4E4E4] mt-4">
+      <div className="flex gap-0 border-t border-[#E9ECEF] mt-4">
         {/* Canvas */}
         <div className="relative flex-[3] p-6 pr-3">
           <ImageCanvas
-            imageUrl={offering?.uploadedFileUrl ?? null}
+            imageUrl={offering?.outputImageUrl ?? offering?.uploadedFileUrl ?? null}
             pins={pins}
             selectedComponent={selectedComp}
             labels={COMP_LABELS}
@@ -75,8 +85,8 @@ export default function Step4Repin() {
         </div>
 
         {/* Right panel */}
-        <div className="flex flex-[2] flex-col border-l border-[#E4E4E4] p-6 pl-4">
-          <p className="mb-4 text-[11px] font-medium uppercase tracking-[0.05em] text-[#6B7280]">Component Placement</p>
+        <div className="flex flex-[2] flex-col border-l border-[#E9ECEF] p-6 pl-4">
+          <p className="label-caps mb-4">Component Placement</p>
 
           <div className="flex-1 space-y-2">
             {components.map(comp => {

@@ -39,6 +39,7 @@ export function Sidebar() {
   }
 
   const completedSteps = getCompletedSteps()
+  const hiddenSteps: OfferingStep[] = currentOffering?.renderComplete ? [] : [4]
 
   return (
     <aside className="flex h-screen w-[300px] shrink-0 flex-col bg-[#0C0C0C] max-xl:w-14" style={{ borderRight: '1px solid rgba(255,255,255,0.07)' }}>
@@ -76,12 +77,13 @@ export function Sidebar() {
               currentStep={currentStep}
               completedSteps={completedSteps}
               onStepClick={handleStepClick}
+              hiddenSteps={hiddenSteps}
             />
           </div>
 
           {/* Collapsed view: show step number only */}
           <div className="hidden max-xl:flex max-xl:flex-1 max-xl:flex-col max-xl:items-center max-xl:py-2 max-xl:gap-1">
-            {([1, 2, 3, 4, 5, 6] as OfferingStep[]).map(step => {
+            {([1, 2, 3, 4, 5, 6] as OfferingStep[]).filter(step => !hiddenSteps.includes(step)).map(step => {
               const isCompleted = completedSteps.includes(step)
               const isCurrent = step === currentStep
               return (
@@ -137,9 +139,9 @@ export function Sidebar() {
             </div>
             <div className="flex-1 min-w-0 max-xl:hidden">
               <p className="truncate font-semibold text-white/85" style={{ fontSize: 13 }}>{user.name}</p>
-              <p className="truncate text-white/35" style={{ fontSize: 11, marginTop: 1 }}>
-                {isGuest ? 'Guest session' : user.email}
-              </p>
+              {!isGuest && (
+                <p className="truncate text-white/35" style={{ fontSize: 11, marginTop: 1 }}>{user.email}</p>
+              )}
             </div>
             <button
               onClick={handleSignOut}

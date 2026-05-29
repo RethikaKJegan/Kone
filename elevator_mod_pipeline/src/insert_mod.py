@@ -73,13 +73,18 @@ def preselect_mod_panel_placement(
     cfg: dict[str, Any],
     removal_mask: np.ndarray | None = None,
 ) -> list[int] | None:
-    if not _is_elevator_mod_panel_request(cfg, mod_path):
+    requested_type = cfg.get("_requested_component_type")
+    if requested_type not in {"elevator_ceiling", "elevator_door"} and not _is_elevator_mod_panel_request(cfg, mod_path):
         return None
-    cfg["_requested_component_type"] = "elevator_mod_panel"
+    if requested_type not in {"elevator_ceiling", "elevator_door"}:
+        cfg["_requested_component_type"] = "elevator_mod_panel"
     mod = close_internal_alpha_holes(load_image_rgba(mod_path))
     height, width = image_rgb.shape[:2]
     target_box, reason = _target_box(width, height, detections, cfg, mod.shape[:2], removal_mask, image_rgb)
-    inpaint_box, cleanup_debug = extend_inpaint_bbox_for_aligned_panel_artifacts(target_box, detections.get("detections", []), width, height)
+    if cfg.get("_requested_component_type") == "elevator_mod_panel":
+        inpaint_box, cleanup_debug = extend_inpaint_bbox_for_aligned_panel_artifacts(target_box, detections.get("detections", []), width, height)
+    else:
+        inpaint_box, cleanup_debug = target_box, {"status": "not_needed"}
     cfg.setdefault("_placement_debug", {})
     cfg["_placement_debug"].update(
         {
@@ -119,6 +124,30 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
     if ins["placement"] == "detection":
         requested_type = cfg.get("_requested_component_type")
         LOGGER.info("[TARGET] Requested component: %s", requested_type or "auto")
+        if requested_type == "elevator_ceiling":
+            box, reason = select_ceiling_target_box(detections["detections"], width, height)
+            cfg["_placement_debug"] = {
+                "requested_component_type": requested_type,
+                "selected_replacement_target_type": "elevator_ceiling",
+                "selected_replacement_target_bbox": box,
+                "inpaint_bbox": box,
+                "scale_to_target_bbox": True,
+                "placement_mode": "existing_ceiling",
+            }
+            return box, reason
+        if requested_type == "elevator_door":
+            det = _largest_detection_of_type(detections["detections"], {"elevator_door"}, width, height, 0.70)
+            if det:
+                box = padded_box([int(round(v)) for v in det["box_xyxy"]], width, height, int(ins.get("existing_panel_padding_px", 2)))
+                cfg["_placement_debug"] = {
+                    "requested_component_type": requested_type,
+                    "selected_replacement_target_type": "elevator_door",
+                    "selected_replacement_target_bbox": box,
+                    "inpaint_bbox": box,
+                    "scale_to_target_bbox": True,
+                    "placement_mode": "existing_component",
+                }
+                return box, "detected_elevator_door"
         is_mod_panel_request = requested_type == "elevator_mod_panel" or (
             not requested_type and _needs_contextual_panel_fallback(ins.get("target_keywords", []))
         )
@@ -134,7 +163,7 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
                     width,
                     height,
                     cfg,
-                    max_ratio_override=0.18 if det.get("source") == "expanded_car_operating_panel_plate" else None,
+                    max_ratio_override=0.55 if det.get("normalized_component_type") == OPERATING_PANEL_CLASS else None,
                 )
                 cfg["_placement_debug"].update(
                     {
@@ -200,6 +229,55 @@ def _needs_contextual_panel_fallback(keywords: list[str]) -> bool:
     return any(term in joined for term in ("button", "panel", "control", "mod"))
 
 
+def select_ceiling_target_box(detections: list[dict[str, Any]], width: int, height: int) -> tuple[list[int], str]:
+    ceiling = _largest_detection_of_type(detections, {"elevator_ceiling"}, width, height, 0.35)
+    if ceiling:
+        return padded_box([int(round(v)) for v in ceiling["box_xyxy"]], width, height, 4), "detected_elevator_ceiling"
+
+    door = _largest_detection_of_type(detections, {"elevator_door"}, width, height, 0.70)
+    if door:
+        x1, y1, x2, y2 = [float(v) for v in door.get("box_xyxy", [0, 0, 0, 0])]
+        door_w, door_h = max(1.0, x2 - x1), max(1.0, y2 - y1)
+        band_h = max(height * 0.10, door_h * 0.16)
+        box = [
+            int(np.clip(x1 - door_w * 0.12, 0, width - 1)),
+            int(np.clip(y1 - band_h, 0, height - 2)),
+            int(np.clip(x2 + door_w * 0.12, 1, width)),
+            int(np.clip(y1 + door_h * 0.04, 1, height)),
+        ]
+        if box[2] - box[0] > 8 and box[3] - box[1] > 8:
+            return box, "synthesized_ceiling_above_elevator_door"
+
+    cabin = _largest_detection_of_type(detections, {"elevator_cabin"}, width, height, 0.75)
+    if cabin:
+        x1, y1, x2, y2 = [float(v) for v in cabin.get("box_xyxy", [0, 0, 0, 0])]
+        box = [int(x1), int(y1), int(x2), int(y1 + max(12.0, (y2 - y1) * 0.18))]
+        return padded_box(box, width, height, 2), "synthesized_ceiling_from_elevator_interior"
+
+    return [int(width * 0.14), int(height * 0.04), int(width * 0.86), int(height * 0.20)], "fallback_top_ceiling_band"
+
+
+def _largest_detection_of_type(
+    detections: list[dict[str, Any]],
+    normalized_types: set[str],
+    width: int,
+    height: int,
+    max_area_ratio: float,
+) -> dict[str, Any] | None:
+    candidates: list[dict[str, Any]] = []
+    for det in detections:
+        if str(det.get("normalized_component_type") or "").lower() not in normalized_types:
+            continue
+        if det.get("source") == "image_structure_fallback":
+            continue
+        if float(det.get("score", 0.0)) < 0.20:
+            continue
+        area_ratio = _box_area(det.get("box_xyxy", [])) / max(width * height, 1)
+        if 0.0005 <= area_ratio <= max_area_ratio:
+            candidates.append(det)
+    return max(candidates, key=lambda item: _box_area(item.get("box_xyxy", []))) if candidates else None
+
+
 def _is_elevator_mod_panel_request(cfg: dict[str, Any], mod_path: str | Path) -> bool:
     requested_type = cfg.get("_requested_component_type")
     if requested_type:
@@ -247,12 +325,13 @@ def invalid_mod_panel_target_reason(det: dict[str, Any], width: int, height: int
     x1, y1, x2, y2 = [float(v) for v in det.get("box_xyxy", [0, 0, 0, 0])]
     bw, bh = max(1.0, x2 - x1), max(1.0, y2 - y1)
     area_ratio = (bw * bh) / max(width * height, 1)
-    max_area_ratio = 0.18 if det.get("source") == "expanded_car_operating_panel_plate" else 0.10
+    max_area_ratio = 0.55 if norm == OPERATING_PANEL_CLASS else 0.10
     if area_ratio > max_area_ratio:
         return "panel candidate too large"
-    if bh / bw > 8.5 or bh / bw < 0.35:
+    max_aspect = 12.0 if norm == OPERATING_PANEL_CLASS else 8.5
+    if bh / bw > max_aspect or bh / bw < 0.35:
         return "invalid panel aspect"
-    if elevator_roi and box_overlap_fraction([int(x1), int(y1), int(x2), int(y2)], elevator_roi) > 0.35:
+    if norm != OPERATING_PANEL_CLASS and elevator_roi and box_overlap_fraction([int(x1), int(y1), int(x2), int(y2)], elevator_roi) > 0.35:
         return "inside elevator opening"
     return None
 
@@ -582,8 +661,10 @@ def write_component_placement_debug(
         "valid_replacement_targets": placement_debug.get("valid_replacement_targets", []),
         "rejected_replacement_targets": placement_debug.get("rejected_component_detections", []),
         "selected_replacement_target_type": placement_debug.get("selected_replacement_target_type"),
+        "selected_replacement_target_source": placement_debug.get("selected_replacement_target_source"),
         "selected_replacement_target_bbox": placement_debug.get("selected_replacement_target_bbox"),
         "target_panel_bbox": placement_debug.get("target_panel_bbox"),
+        "placement_mode": placement_debug.get("placement_mode"),
         "target_padding_px": placement_debug.get("target_padding_px"),
         "inpaint_bbox": placement_debug.get("inpaint_bbox") or bbox,
         "inpaint_completed": True,
@@ -850,6 +931,25 @@ def build_wall_aligned_destination_quad(
     height = max(2.0, float(y2 - y1))
     cx = (x1 + x2) * 0.5
     cy = (y1 + y2) * 0.5
+    placement_debug = cfg.get("_placement_debug", {})
+    if placement_debug.get("placement_mode") in {"existing_panel", "existing_ceiling"}:
+        quad = np.array(
+            [
+                [x1, y1],
+                [x2, y1],
+                [x2, y2],
+                [x1, y2],
+            ],
+            dtype=np.float32,
+        )
+        return quad, {
+            "mode": f"{placement_debug.get('placement_mode')}_rectified_homography",
+            "reason": "use_detected_or_synthesized_component_bbox_without_wall_shear",
+            "vertical_shear": 0.0,
+            "horizontal_shear": 0.0,
+            "top_shrink": 0.0,
+            "side_skew": 0.0,
+        }
 
     orientation = estimate_local_wall_orientation(image_rgb, target_box)
     normal = geometry.get("wall_plane", {}).get("normal") or [0, 0, 1]
@@ -961,8 +1061,13 @@ def clamp_insertion_scale(
     reasons: list[str] = []
 
     max_area_ratio = float(cfg["insertion"].get("max_insert_area_ratio", 0.12))
-    if cfg.get("_placement_debug", {}).get("selected_replacement_target_source") == "expanded_car_operating_panel_plate":
-        max_area_ratio = max(max_area_ratio, 0.18)
+    target_type = cfg.get("_placement_debug", {}).get("selected_replacement_target_type")
+    if target_type == OPERATING_PANEL_CLASS:
+        max_area_ratio = max(max_area_ratio, 0.55)
+    elif target_type == "elevator_door":
+        max_area_ratio = max(max_area_ratio, 0.70)
+    elif target_type == "elevator_ceiling":
+        max_area_ratio = max(max_area_ratio, 0.35)
     max_area_px = max(1.0, image_w * image_h * max_area_ratio)
     projected_area = (mod_w * original_scale) * (mod_h * original_scale)
     if projected_area > max_area_px:
@@ -997,8 +1102,13 @@ def validate_insertion_size(target_box: list[int], insert_wh: list[int], out_hw:
     insert_w, insert_h = insert_wh
     area_ratio = (insert_w * insert_h) / max(image_w * image_h, 1)
     max_area_ratio = float(cfg["insertion"].get("max_insert_area_ratio", 0.12))
-    if cfg.get("_placement_debug", {}).get("selected_replacement_target_source") == "expanded_car_operating_panel_plate":
-        max_area_ratio = max(max_area_ratio, 0.18)
+    target_type = cfg.get("_placement_debug", {}).get("selected_replacement_target_type")
+    if target_type == OPERATING_PANEL_CLASS:
+        max_area_ratio = max(max_area_ratio, 0.55)
+    elif target_type == "elevator_door":
+        max_area_ratio = max(max_area_ratio, 0.70)
+    elif target_type == "elevator_ceiling":
+        max_area_ratio = max(max_area_ratio, 0.35)
     if area_ratio > max_area_ratio:
         raise RuntimeError(f"Insertion size validation failed: area_ratio={area_ratio:.3f} > {max_area_ratio:.3f}")
     if cfg.get("_placement_debug", {}).get("placement_mode") == "existing_panel":

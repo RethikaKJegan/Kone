@@ -1,37 +1,25 @@
 [
   
-  {
-    "input_image": "tests/images/cafe.jpeg",
+ {
+    "input_image": "tests/images/COP_image_2.jpg",
     "open_reference_image": "tests/images/Sample2_open_interior.jpg",
     "closed_reference_image": "tests/images/Sample2_closed_exterior.jpg",
     "mod_panel": "tests/panels/mod_long.png",
-    "prompt": "replace the elevator display with the mod panel",
-    "mode": "Pan L-R"
-  },
-  {
-    "input_image": "tests/images/side1.jpg",
-    "open_reference_image": "tests/images/Sample2_open_interior.jpg",
-    "closed_reference_image": "tests/images/Sample2_closed_exterior.jpg",
-    "mod_panel": "tests/panels/mod_long.png",
-    "prompt": "replace the elevator display with the mod panel",
-    "mode": "Pan R-L"
-  },
- 
-  {
-    "input_image": "tests/images/Sample8.jpg",
+    "prompt": "replace the car operating panel  with the mod panel",
+    "mode": "Zoom In"
+  },{
+    "input_image": "tests/images/COP_image_3.jpeg",
     "open_reference_image": "tests/images/Sample2_open_interior.jpg",
     "closed_reference_image": "tests/images/Sample2_closed_exterior.jpg",
     "mod_panel": "tests/panels/panel_mod.png",
-    "prompt": "replace the elevator button panel with the mod panel",
+    "prompt": "replace the car operating panel  with the mod panel",
     "mode": "Zoom In"
-  },
-  {
-    "input_image": "tests/images/Sample6.jpg",
+  },{
+    "input_image": "tests/images/COP_image_4.jpg",
     "open_reference_image": "tests/images/Sample2_open_interior.jpg",
     "closed_reference_image": "tests/images/Sample2_closed_exterior.jpg",
     "mod_panel": "tests/panels/mod_long.png",
-    "prompt": "replace the elevator button panel with the mod panel",
-    "mode": "Door Functionality"
-
+    "prompt": "replace the car operating panel  with the mod panel",
+    "mode": "Zoom In"
   }
 ]

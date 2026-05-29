@@ -11,6 +11,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 import cv2
+import numpy as np
 
 from .input_validation import merged_validation_config, validate_elevator_presence, validate_input_image
 from .inpaint import build_removal_mask, inpaint_background
@@ -30,6 +31,53 @@ from .visualize import save_detection_visuals
 
 class PipelineValidationError(RuntimeError):
     pass
+
+
+COMPONENT_REPLACEMENT_PRESETS: dict[str, dict[str, Any]] = {
+    "cop": {
+        "id": "cop",
+        "asset": "tests/panels/mod_long.png",
+        "component_type": "elevator_mod_panel",
+        "target_keywords": [
+            "car operating panel",
+            "tall stainless steel elevator operating panel with round buttons",
+        ],
+        "detection_labels": [
+            "tall stainless steel elevator operating panel with round buttons",
+            "floor_indicator_display",
+            "wheelchair button",
+            "accessibility control panel",
+            "emergency_phone",
+        ],
+    },
+    "lci": {
+        "id": "lci",
+        "asset": "tests/panels/mod_up.png",
+        "component_type": "floor_indicator_display",
+        "target_keywords": [
+            "floor indicator",
+            "floor indicator display",
+            "elevator display",
+            "landing floor indicator",
+            "hall position indicator",
+        ],
+        "detection_labels": ["floor_indicator_display", "elevator_door"],
+    },
+    "door": {
+        "id": "door",
+        "asset": "tests/panels/door_mod.png",
+        "component_type": "elevator_door",
+        "target_keywords": ["elevator door", "elevator doors", "elevator_door"],
+        "detection_labels": ["elevator_door"],
+    },
+    "ceiling": {
+        "id": "ceiling",
+        "asset": "__generated_ceiling_panel__",
+        "component_type": "elevator_ceiling",
+        "target_keywords": ["elevator ceiling", "ceiling light", "elevator_ceiling"],
+        "detection_labels": ["elevator ceiling", "ceiling light", "elevator_ceiling", "elevator_door", "elevator_cabin"],
+    },
+}
 
 
 def run(config_path: str | Path) -> None:
@@ -216,7 +264,13 @@ def run(config_path: str | Path) -> None:
             placement_debug["id"] = replacement_id
             placement_debug["asset"] = replacement["asset"]
             perspective_cfg = cfg.get("perspective_mod_placement", {})
-            if perspective_cfg.get("enabled", False) and perspective_cfg.get("auto", True):
+            if (
+                perspective_cfg.get("enabled", False)
+                and perspective_cfg.get("auto", True)
+                and placement_debug.get("placement_mode") not in {"existing_panel", "existing_component", "existing_ceiling"}
+                and placement_debug.get("homography_alignment", {}).get("mode") != "existing_panel_rectified_homography"
+                and placement_debug.get("homography_alignment", {}).get("mode") != "existing_ceiling_rectified_homography"
+            ):
                 status("perspective_mod_placement", f"[PLACE] Auto perspective-grid placement: {replacement_id}")
                 perspective_outputs = run_auto_perspective_mod_placement(
                     current_background,
@@ -237,15 +291,21 @@ def run(config_path: str | Path) -> None:
         if combined_panel_mask is not None:
             cv2.imwrite(str(panel_mask_path), combined_panel_mask)
         save_json(run_dir / "component_placements.json", component_placements)
-        perspective_outputs = run_perspective_mod_placement_from_config(
-            cfg,
-            cfg.get("perspective_mod_placement", {}).get("base_image") or cleaned_path,
-            cfg.get("perspective_mod_placement", {}).get("panel") or replacements[-1]["asset"],
-            cfg.get("perspective_mod_placement", {}).get("out_dir") or (run_dir / "perspective_mod_placement"),
+        skip_global_perspective = any(
+            placement.get("placement_mode") in {"existing_panel", "existing_component", "existing_ceiling"}
+            for placement in component_placements
         )
-        if perspective_outputs:
-            status("perspective_mod_placement", "[PLACE] Applying perspective-grid MOD panel placement")
-            copy_pipeline_handoff(perspective_outputs, composite_path, panel_mask_path)
+        perspective_outputs = None
+        if not skip_global_perspective:
+            perspective_outputs = run_perspective_mod_placement_from_config(
+                cfg,
+                cfg.get("perspective_mod_placement", {}).get("base_image") or cleaned_path,
+                cfg.get("perspective_mod_placement", {}).get("panel") or replacements[-1]["asset"],
+                cfg.get("perspective_mod_placement", {}).get("out_dir") or (run_dir / "perspective_mod_placement"),
+            )
+            if perspective_outputs:
+                status("perspective_mod_placement", "[PLACE] Applying perspective-grid MOD panel placement")
+                copy_pipeline_handoff(perspective_outputs, composite_path, panel_mask_path)
         maybe_refine(composite_path, panel_mask_path, cfg, final_path)
         monitor.mark("insertion_done")
         if cfg.get("video", {}).get("enabled", False):
@@ -302,6 +362,16 @@ def run(config_path: str | Path) -> None:
 def replacement_configs(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     configured = cfg.get("replacements")
     if not configured:
+        selected = [
+            str(component).strip().lower()
+            for component in cfg.get("selected_components", [])
+            if str(component).strip()
+        ]
+        replacements = [_component_replacement(component, cfg) for component in selected]
+        replacements = [replacement for replacement in replacements if replacement is not None]
+        if replacements:
+            _extend_detection_labels(cfg, replacements)
+            return replacements
         return [{"id": "mod_panel", "asset": str(cfg["mod_panel"])}]
     replacements: list[dict[str, Any]] = []
     for index, item in enumerate(configured, start=1):
@@ -310,7 +380,46 @@ def replacement_configs(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         replacement = dict(item)
         replacement["id"] = str(replacement.get("id") or f"component_{index}")
         replacements.append(replacement)
+    _extend_detection_labels(cfg, replacements)
     return replacements
+
+
+def _component_replacement(component: str, cfg: dict[str, Any]) -> dict[str, Any] | None:
+    preset = COMPONENT_REPLACEMENT_PRESETS.get(component)
+    if preset is None:
+        return None
+    replacement = {key: value for key, value in preset.items() if key != "detection_labels"}
+    if component == "ceiling":
+        replacement["asset"] = str(_ensure_generated_ceiling_asset(cfg))
+    return replacement
+
+
+def _ensure_generated_ceiling_asset(cfg: dict[str, Any]) -> Path:
+    asset_path = Path(cfg["run_dir"]) / "generated_assets" / "ceiling_mod.png"
+    if asset_path.exists():
+        return asset_path
+
+    asset_path.parent.mkdir(parents=True, exist_ok=True)
+    height, width = 180, 640
+    panel = np.full((height, width, 3), 218, dtype=np.uint8)
+    for y in range(0, height, 36):
+        cv2.line(panel, (0, y), (width, y), (190, 190, 190), 1)
+    for x in range(0, width, 80):
+        cv2.line(panel, (x, 0), (x, height), (202, 202, 202), 1)
+    cv2.rectangle(panel, (0, 0), (width - 1, height - 1), (168, 168, 168), 3)
+    cv2.imwrite(str(asset_path), panel)
+    return asset_path
+
+
+def _extend_detection_labels(cfg: dict[str, Any], replacements: list[dict[str, Any]]) -> None:
+    detection_cfg = cfg.setdefault("detection", {})
+    labels = list(detection_cfg.get("labels") or [])
+    for replacement in replacements:
+        preset = COMPONENT_REPLACEMENT_PRESETS.get(str(replacement.get("id", "")).lower())
+        labels.extend(replacement.get("target_keywords", []))
+        if preset:
+            labels.extend(preset.get("detection_labels", []))
+    detection_cfg["labels"] = list(dict.fromkeys(label for label in labels if label))
 
 
 def component_config(cfg: dict[str, Any], replacement: dict[str, Any]) -> dict[str, Any]:

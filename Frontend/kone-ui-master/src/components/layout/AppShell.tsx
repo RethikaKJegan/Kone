@@ -2,16 +2,18 @@ import { Outlet, useLocation } from 'react-router-dom'
 import { useEffect } from 'react'
 import { Sidebar } from './Sidebar'
 import { GuestBanner } from './GuestBanner'
+import { useAuthStore } from '../../store/authStore'
 
 export function AppShell() {
   const location = useLocation()
+  const resetGuestBanner = useAuthStore(s => s.resetGuestBanner)
 
   useEffect(() => {
-    window.scrollTo({ top: 0, behavior: 'auto' })
-  }, [location.pathname])
+    resetGuestBanner()
+  }, [location.pathname, resetGuestBanner])
 
   return (
-    <div className="flex h-screen w-full overflow-hidden bg-[#F7F7F7]">
+    <div className="flex h-screen w-full overflow-hidden bg-[#F5F6F8]">
       <Sidebar />
       <div className="flex flex-1 flex-col overflow-hidden min-w-0">
         <GuestBanner />

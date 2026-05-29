@@ -132,6 +132,115 @@ def validate_input_image(rgb: np.ndarray, cfg: dict[str, Any]) -> dict[str, Any]
     }
 
 
+def validate_elevator_or_cop_upload(rgb: np.ndarray, quality: dict[str, Any]) -> dict[str, Any]:
+    """Upload gate: accept usable images that look like an elevator scene or COP."""
+    metrics = quality.get("metrics", {})
+    image_size = quality.get("image_size", {})
+    if (
+        image_size.get("short_side", 0) < 180
+        or metrics.get("visibility", 1.0) < 0.20
+        or metrics.get("sharpness", 1.0) < 0.03
+    ):
+        return {
+            "valid": False,
+            "image_type": "UNUSABLE",
+            "reason": "Image is technically unusable. Please upload a clearer elevator or COP image.",
+        }
+
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    h, w = gray.shape
+    edges = cv2.Canny(gray, 50, 150)
+    edge_density = float(np.count_nonzero(edges) / max(edges.size, 1))
+    metal_ratio = float(np.mean((hsv[:, :, 1] < 85) & (hsv[:, :, 2] > 45) & (hsv[:, :, 2] < 245)))
+    line_count, vertical_ratio = upload_line_stats(gray)
+    button_count = upload_button_count(gray)
+    aspect = h / max(w, 1)
+
+    has_cop = button_count >= 3 and aspect >= 0.65
+    has_elevator = line_count >= 6 and vertical_ratio >= 0.42 and (metal_ratio >= 0.12 or edge_density >= 0.012)
+
+    if has_cop:
+        return {
+            "valid": True,
+            "image_type": "COP_PANEL",
+            "reason": "Car operating panel detected.",
+            "button_count": button_count,
+        }
+    if has_elevator:
+        return {
+            "valid": True,
+            "image_type": "ELEVATOR_IMAGE",
+            "reason": "Elevator image detected.",
+        }
+    return {
+        "valid": False,
+        "image_type": "NON_ELEVATOR",
+        "reason": "Uploaded image does not appear to contain an elevator or car operating panel.",
+    }
+
+
+def upload_line_stats(gray: np.ndarray) -> tuple[int, float]:
+    lines = cv2.HoughLinesP(
+        cv2.Canny(gray, 60, 160),
+        1,
+        np.pi / 180,
+        threshold=45,
+        minLineLength=max(25, min(gray.shape) // 14),
+        maxLineGap=12,
+    )
+    if lines is None:
+        return 0, 0.0
+    vertical = 0
+    for line in lines[:, 0]:
+        x1, y1, x2, y2 = [int(v) for v in line]
+        angle = abs(math.degrees(math.atan2(y2 - y1, x2 - x1)))
+        angle = angle if angle <= 90 else 180 - angle
+        if angle > 55:
+            vertical += 1
+    return int(len(lines)), vertical / max(len(lines), 1)
+
+
+def upload_button_count(gray: np.ndarray) -> int:
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    circles = cv2.HoughCircles(
+        blur,
+        cv2.HOUGH_GRADIENT,
+        dp=1.2,
+        minDist=max(10, int(min(gray.shape) * 0.045)),
+        param1=80,
+        param2=14,
+        minRadius=max(3, int(min(gray.shape) * 0.008)),
+        maxRadius=max(8, int(min(gray.shape) * 0.08)),
+    )
+    circle_count = 0 if circles is None else int(circles.shape[1])
+    masks = [
+        cv2.threshold(blur, max(40, float(blur.mean()) + 26), 255, cv2.THRESH_BINARY)[1],
+        cv2.threshold(blur, min(215, float(blur.mean()) - 26), 255, cv2.THRESH_BINARY_INV)[1],
+    ]
+    count = 0
+    img_area = max(gray.shape[0] * gray.shape[1], 1)
+    centers: list[tuple[int, int]] = []
+    for mask in masks:
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < img_area * 0.00004 or area > img_area * 0.035:
+                continue
+            perimeter = cv2.arcLength(contour, True)
+            if perimeter <= 0:
+                continue
+            circularity = 4 * math.pi * area / (perimeter * perimeter)
+            x, y, w, h = cv2.boundingRect(contour)
+            aspect = h / max(w, 1)
+            if 0.42 <= circularity <= 1.40 and 0.45 <= aspect <= 2.2:
+                center = (int(x + w / 2), int(y + h / 2))
+                if all(abs(center[0] - cx) > max(3, w // 2) or abs(center[1] - cy) > max(3, h // 2) for cx, cy in centers):
+                    centers.append(center)
+                    count += 1
+    return max(count, circle_count)
+
+
 def perspective_score(rgb: np.ndarray, cfg: dict[str, Any]) -> tuple[float, list[str]]:
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     h, w = gray.shape
@@ -410,6 +519,9 @@ def elevator_detection_is_reliable(
     }:
         if score < float(presence_cfg.get("panel_min_score", 0.25)):
             return False, "panel/sign confidence too low"
+        geometry = det.get("geometry_validation", {}) or {}
+        if norm == "tall stainless steel elevator operating panel with round buttons" and geometry.get("status") == "expanded":
+            return True, None
         if area_ratio > 0.22:
             return False, "panel/sign detection is implausibly large"
         return True, None
@@ -458,6 +570,14 @@ def _is_convincing_standalone_panel(
         "accessibility_control_panel",
     }:
         return False
+    geometry = det.get("geometry_validation", {}) or {}
+    geometry_reason = str(geometry.get("reason", "")).lower()
+    if (
+        norm == "tall stainless steel elevator operating panel with round buttons"
+        and geometry.get("status") in {"accepted", "expanded"}
+        and ("cop" in geometry_reason or "floor_buttons" in geometry_reason)
+    ):
+        return True
     x1, y1, x2, y2 = [float(v) for v in det.get("box_xyxy", [0, 0, 0, 0])]
     area_ratio = max(0.0, x2 - x1) * max(0.0, y2 - y1) / max(float(image_w * image_h), 1.0)
     score = float(det.get("score", 0.0) or 0.0)

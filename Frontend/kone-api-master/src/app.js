@@ -21,6 +21,10 @@ const outputDir = path.join(__dirname, '..', 'output');
 if (!fs.existsSync(outputDir)) {
   fs.mkdirSync(outputDir, { recursive: true });
 }
+const storageDir = path.join(__dirname, '..', 'storage');
+if (!fs.existsSync(storageDir)) {
+  fs.mkdirSync(storageDir, { recursive: true });
+}
 
 const app = express();
 
@@ -60,6 +64,7 @@ if (config.env === 'production') {
 
 // serve pipeline output files
 app.use('/output', express.static(outputDir));
+app.use('/storage', express.static(storageDir));
 
 // v1 api routes
 app.use('/api/v1', routes);

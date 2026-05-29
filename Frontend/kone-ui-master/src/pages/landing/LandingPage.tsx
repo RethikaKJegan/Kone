@@ -169,7 +169,7 @@ const features = [
 ]
 
 const steps = [
-  { n: '01', title: 'Upload',            desc: 'Upload your building photo to get started.' },
+  { n: '01', title: 'Upload',            desc: 'Upload your building photo or video to get started.' },
   { n: '02', title: 'Select & AI Place', desc: 'Select KONE components and let AI position them precisely.' },
   { n: '03', title: 'Export',            desc: 'Export renders, video, and a complete sales brochure.' },
 ]
@@ -197,14 +197,10 @@ function useScrollReveal() {
 
 // ── Page ─────────────────────────────────────────────────────────────────────
 export default function LandingPage() {
-  const navRef          = useRef<HTMLElement>(null)
   const navigate        = useNavigate()
-  const continueAsGuest = useAuthStore(s => s.continueAsGuest)
-
-  const handleGuest = async () => {
-    await continueAsGuest()
-    navigate('/projects')
-  }
+  const continueAsGuest = useAuthStore((s) => s.continueAsGuest)
+  const handleGuest     = () => { continueAsGuest(); navigate('/projects') }
+  const navRef          = useRef<HTMLElement>(null)
 
   useScrollReveal()
 
@@ -370,10 +366,7 @@ export default function LandingPage() {
         {/* ── Features — Architectural Matrix ──────────────────────────── */}
         <section style={{ background: '#FFFFFF', padding: '160px 40px', position: 'relative' }}>
           <div className="mx-auto" style={{ maxWidth: 1200 }}>
-            <div style={{ 
-              display: 'flex', flexDirection: 'column', gap: 24, marginBottom: 80,
-              '@media (min-width: 768px)': { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }
-            } as any}>
+            <div className="flex flex-col justify-between gap-6 md:flex-row md:items-end" style={{ marginBottom: 80 }}>
               <div>
                 <p data-reveal data-delay="0" style={{
                   fontFamily: '"Outfit", sans-serif', fontSize: 13, fontWeight: 700, letterSpacing: '0.15em',

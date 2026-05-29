@@ -10,32 +10,25 @@ afterAll(() => server.close())
 
 describe('auth API', () => {
   it('signs in with valid credentials', async () => {
-    const res = await apiClient.post('/auth/login', {
+    const res = await apiClient.post('/api/auth/signin', {
       email: 'pavan@bellcorpstudio.com',
       password: 'password123',
     })
     expect(res.data.user.email).toBe('pavan@bellcorpstudio.com')
-    expect(res.data.tokens.access.token).toBeTruthy()
+    expect(res.data.token).toBeTruthy()
   })
 
   it('signs in with any @kone.com email', async () => {
-    const res = await apiClient.post('/auth/login', {
+    const res = await apiClient.post('/api/auth/signin', {
       email: 'test@kone.com',
       password: 'anypassword',
     })
     expect(res.data.user.email).toBe('test@kone.com')
   })
 
-  it('creates a backend-backed guest session', async () => {
-    const res = await apiClient.post('/auth/guest-login')
-    expect(res.status).toBe(201)
-    expect(res.data.user.role).toBe('guest')
-    expect(res.data.tokens.access.token).toBeTruthy()
-  })
-
   it('rejects invalid credentials', async () => {
     try {
-      await apiClient.post('/auth/login', {
+      await apiClient.post('/api/auth/signin', {
         email: 'pavan@bellcorpstudio.com',
         password: 'wrongpassword',
       })
@@ -47,7 +40,7 @@ describe('auth API', () => {
   })
 
   it('signs up a new user', async () => {
-    const res = await apiClient.post('/auth/register', {
+    const res = await apiClient.post('/api/auth/signup', {
       name: 'New User',
       email: 'newuser@test.com',
       password: 'password123',
@@ -58,7 +51,7 @@ describe('auth API', () => {
 
   it('rejects duplicate email on signup', async () => {
     try {
-      await apiClient.post('/auth/register', {
+      await apiClient.post('/api/auth/signup', {
         name: 'Pavan Kumar',
         email: 'pavan@bellcorpstudio.com',
         password: 'password123',
@@ -66,7 +59,7 @@ describe('auth API', () => {
       expect.fail('should have thrown')
     } catch (err: unknown) {
       const axiosErr = err as { response?: { status: number } }
-      expect(axiosErr.response?.status).toBe(400)
+      expect(axiosErr.response?.status).toBe(409)
     }
   })
 })
