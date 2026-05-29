@@ -134,7 +134,7 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
                     width,
                     height,
                     cfg,
-                    max_ratio_override=0.18 if det.get("source") == "expanded_car_operating_panel_plate" else None,
+                    max_ratio_override=0.24 if det.get("source") == "expanded_car_operating_panel_plate" else None,
                 )
                 cfg["_placement_debug"].update(
                     {
@@ -247,12 +247,13 @@ def invalid_mod_panel_target_reason(det: dict[str, Any], width: int, height: int
     x1, y1, x2, y2 = [float(v) for v in det.get("box_xyxy", [0, 0, 0, 0])]
     bw, bh = max(1.0, x2 - x1), max(1.0, y2 - y1)
     area_ratio = (bw * bh) / max(width * height, 1)
-    max_area_ratio = 0.18 if det.get("source") == "expanded_car_operating_panel_plate" else 0.10
+    max_area_ratio = 0.24 if det.get("source") == "expanded_car_operating_panel_plate" else 0.10
     if area_ratio > max_area_ratio:
         return "panel candidate too large"
-    if bh / bw > 8.5 or bh / bw < 0.35:
+    max_aspect = 12.0 if det.get("source") == "expanded_car_operating_panel_plate" else 8.5
+    if bh / bw > max_aspect or bh / bw < 0.35:
         return "invalid panel aspect"
-    if elevator_roi and box_overlap_fraction([int(x1), int(y1), int(x2), int(y2)], elevator_roi) > 0.35:
+    if norm != OPERATING_PANEL_CLASS and elevator_roi and box_overlap_fraction([int(x1), int(y1), int(x2), int(y2)], elevator_roi) > 0.35:
         return "inside elevator opening"
     return None
 
@@ -582,8 +583,10 @@ def write_component_placement_debug(
         "valid_replacement_targets": placement_debug.get("valid_replacement_targets", []),
         "rejected_replacement_targets": placement_debug.get("rejected_component_detections", []),
         "selected_replacement_target_type": placement_debug.get("selected_replacement_target_type"),
+        "selected_replacement_target_source": placement_debug.get("selected_replacement_target_source"),
         "selected_replacement_target_bbox": placement_debug.get("selected_replacement_target_bbox"),
         "target_panel_bbox": placement_debug.get("target_panel_bbox"),
+        "placement_mode": placement_debug.get("placement_mode"),
         "target_padding_px": placement_debug.get("target_padding_px"),
         "inpaint_bbox": placement_debug.get("inpaint_bbox") or bbox,
         "inpaint_completed": True,
@@ -850,6 +853,25 @@ def build_wall_aligned_destination_quad(
     height = max(2.0, float(y2 - y1))
     cx = (x1 + x2) * 0.5
     cy = (y1 + y2) * 0.5
+    placement_debug = cfg.get("_placement_debug", {})
+    if placement_debug.get("placement_mode") == "existing_panel":
+        quad = np.array(
+            [
+                [x1, y1],
+                [x2, y1],
+                [x2, y2],
+                [x1, y2],
+            ],
+            dtype=np.float32,
+        )
+        return quad, {
+            "mode": "existing_panel_rectified_homography",
+            "reason": "use_detected_cop_bbox_without_wall_shear",
+            "vertical_shear": 0.0,
+            "horizontal_shear": 0.0,
+            "top_shrink": 0.0,
+            "side_skew": 0.0,
+        }
 
     orientation = estimate_local_wall_orientation(image_rgb, target_box)
     normal = geometry.get("wall_plane", {}).get("normal") or [0, 0, 1]
@@ -962,7 +984,7 @@ def clamp_insertion_scale(
 
     max_area_ratio = float(cfg["insertion"].get("max_insert_area_ratio", 0.12))
     if cfg.get("_placement_debug", {}).get("selected_replacement_target_source") == "expanded_car_operating_panel_plate":
-        max_area_ratio = max(max_area_ratio, 0.18)
+        max_area_ratio = max(max_area_ratio, 0.24)
     max_area_px = max(1.0, image_w * image_h * max_area_ratio)
     projected_area = (mod_w * original_scale) * (mod_h * original_scale)
     if projected_area > max_area_px:
@@ -998,7 +1020,7 @@ def validate_insertion_size(target_box: list[int], insert_wh: list[int], out_hw:
     area_ratio = (insert_w * insert_h) / max(image_w * image_h, 1)
     max_area_ratio = float(cfg["insertion"].get("max_insert_area_ratio", 0.12))
     if cfg.get("_placement_debug", {}).get("selected_replacement_target_source") == "expanded_car_operating_panel_plate":
-        max_area_ratio = max(max_area_ratio, 0.18)
+        max_area_ratio = max(max_area_ratio, 0.24)
     if area_ratio > max_area_ratio:
         raise RuntimeError(f"Insertion size validation failed: area_ratio={area_ratio:.3f} > {max_area_ratio:.3f}")
     if cfg.get("_placement_debug", {}).get("placement_mode") == "existing_panel":

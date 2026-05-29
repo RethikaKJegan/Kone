@@ -423,6 +423,11 @@ def _apply_component_geometry_validation(
 			if x1 <= width * 0.01 or x2 >= width * 0.99:
 				_mark_rejected(det, "cropped_image_edge_not_complete_operating_panel")
 				continue
+			if _image_has_many_cop_buttons(image_rgb, width, height):
+				det.setdefault("geometry_validation", {})
+				det["geometry_validation"].update({"status": "accepted", "reason": "many_floor_buttons_confirm_cop_image"})
+				kept.append(det)
+				continue
 			fixture = _dark_wall_fixture_box(image_rgb, box, width, height) if image_rgb is not None else None
 			if fixture is not None:
 				_remap_detection(det, "elevator call button panel", "elevator call button panel", "geometry_refine_dark_wall_call_panel")
@@ -571,17 +576,24 @@ def _expand_car_operating_panels(image_rgb: np.ndarray, detections: list[dict[st
 			gap = sy1 - cy2
 			if overlap >= 0.45 and 0 <= gap <= max(sh * 0.62, height * 0.22):
 				aligned_displays.append(candidate)
-		if not aligned_displays:
-			continue
-		display = max(aligned_displays, key=lambda item: float(item.get("score", 0.0)))
-		display_box = [float(v) for v in display["box_xyxy"]]
-		union = [
-			min(sx1, display_box[0]),
-			min(sy1, display_box[1]),
-			max(sx2, display_box[2]),
-			max(sy2, display_box[3]),
-		]
-		expanded = _fit_car_operating_panel_plate(image_rgb, union, display_box)
+		if aligned_displays:
+			display = max(aligned_displays, key=lambda item: float(item.get("score", 0.0)))
+			display_box = [float(v) for v in display["box_xyxy"]]
+			union = [
+				min(sx1, display_box[0]),
+				min(sy1, display_box[1]),
+				max(sx2, display_box[2]),
+				max(sy2, display_box[3]),
+			]
+			expanded = _fit_car_operating_panel_plate(image_rgb, union, display_box)
+			reason = "aligned_display_and_button_cluster_form_full_cop_plate"
+			extra = {"aligned_display_box_xyxy": display_box}
+		else:
+			expanded = _fit_car_operating_panel_plate_from_buttons(image_rgb, seed)
+			reason = "button_cluster_expanded_to_full_cop_plate"
+			extra = {}
+			if expanded is None:
+				continue
 		if _box_area(expanded) <= _box_area(seed) * 1.25:
 			continue
 		LOGGER.info("[DETECT] Expanded car operating panel plate: %s -> %s", [round(v) for v in seed], [round(v) for v in expanded])
@@ -593,10 +605,10 @@ def _expand_car_operating_panels(image_rgb: np.ndarray, detections: list[dict[st
 		det["geometry_validation"].update(
 			{
 				"status": "expanded",
-				"reason": "aligned_display_and_button_cluster_form_full_cop_plate",
+				"reason": reason,
 				"original_box_xyxy": seed,
-				"aligned_display_box_xyxy": display_box,
 				"expanded_box_xyxy": expanded,
+				**extra,
 			}
 		)
 
@@ -634,6 +646,28 @@ def _is_plausible_operating_panel_detection(
 	if area_ratio > 0.025 and bright_fraction > 0.35 and dark_fraction < 0.20 and edge_density < 0.16:
 		return False
 	return True
+
+
+def _image_has_many_cop_buttons(image_rgb: np.ndarray | None, width: int, height: int, min_buttons: int = 5) -> bool:
+	if image_rgb is None:
+		return False
+	try:
+		import cv2
+	except ImportError:
+		return False
+	gray = cv2.cvtColor(np.asarray(image_rgb), cv2.COLOR_RGB2GRAY)
+	blur = cv2.GaussianBlur(gray, (5, 5), 0)
+	circles = cv2.HoughCircles(
+		blur,
+		cv2.HOUGH_GRADIENT,
+		dp=1.2,
+		minDist=max(10, int(min(width, height) * 0.035)),
+		param1=80,
+		param2=14,
+		minRadius=max(3, int(min(width, height) * 0.006)),
+		maxRadius=max(8, int(min(width, height) * 0.045)),
+	)
+	return bool(circles is not None and int(circles.shape[1]) >= min_buttons)
 
 
 def _dark_wall_fixture_box(
@@ -740,6 +774,79 @@ def _fit_car_operating_panel_plate(
 
 	bottom = int(round(uy2))
 	return [float(left), float(top), float(right), float(np.clip(bottom, top + 2, height))]
+
+
+def _fit_car_operating_panel_plate_from_buttons(image_rgb: np.ndarray, seed_box: list[float]) -> list[float] | None:
+	import cv2
+
+	height, width = image_rgb.shape[:2]
+	sx1, sy1, sx2, sy2 = [float(v) for v in seed_box]
+	sw, sh = max(1.0, sx2 - sx1), max(1.0, sy2 - sy1)
+	cx = (sx1 + sx2) * 0.5
+	search_x1 = max(0, int(round(cx - max(sw * 2.0, width * 0.09))))
+	search_x2 = min(width, int(round(cx + max(sw * 2.0, width * 0.09))))
+	search_y1 = max(0, int(round(sy1 - max(sh * 2.5, height * 0.35))))
+	search_y2 = min(height, int(round(sy2 + max(sh * 1.4, height * 0.16))))
+	if search_x2 <= search_x1 or search_y2 <= search_y1:
+		return None
+
+	gray = cv2.cvtColor(np.asarray(image_rgb), cv2.COLOR_RGB2GRAY)
+	roi = cv2.GaussianBlur(gray[search_y1:search_y2, search_x1:search_x2], (5, 5), 0)
+	circles = cv2.HoughCircles(
+		roi,
+		cv2.HOUGH_GRADIENT,
+		dp=1.2,
+		minDist=max(10, int(min(width, height) * 0.035)),
+		param1=80,
+		param2=14,
+		minRadius=max(3, int(min(width, height) * 0.006)),
+		maxRadius=max(8, int(min(width, height) * 0.045)),
+	)
+	ys1 = [sy1]
+	ys2 = [sy2]
+	if circles is not None and circles.shape[1] >= 3:
+		points = np.round(circles[0]).astype(int)
+		max_circle_dx = max(sw * 1.8, width * 0.080)
+		points = np.array([point for point in points if abs((search_x1 + int(point[0])) - cx) <= max_circle_dx])
+		if len(points) >= 3:
+			ys1 = [search_y1 + int(y - r) for _, y, r in points]
+			ys2 = [search_y1 + int(y + r) for _, y, r in points]
+
+	button_top = min(float(min(ys1)), sy1)
+	button_bottom = max(float(max(ys2)), sy2)
+	panel_h = max(1.0, button_bottom - button_top)
+	side_pad = max(sw * 0.75, width * 0.025)
+	top_pad = max(panel_h * 0.55, height * 0.090)
+	bottom_pad = max(panel_h * 0.18, height * 0.035)
+	left = int(np.clip(round(sx1 - side_pad), 0, width - 2))
+	right = int(np.clip(round(sx2 + side_pad), left + 2, width))
+	top = int(np.clip(round(button_top - top_pad), 0, height - 2))
+	bottom = int(np.clip(round(button_bottom + bottom_pad), top + 2, height))
+	edge_x1 = max(0, int(round(cx - max(sw * 3.0, width * 0.12))))
+	edge_x2 = min(width, int(round(cx + max(sw * 3.0, width * 0.12))))
+	edge_roi = gray[top:bottom, edge_x1:edge_x2]
+	if edge_roi.size:
+		edges = cv2.Canny(cv2.GaussianBlur(edge_roi, (5, 5), 0), 35, 110)
+		col_energy = edges.mean(axis=0)
+		col_threshold = max(float(np.percentile(col_energy, 78)), float(col_energy.mean() * 1.25))
+		strong_cols = np.where(col_energy >= col_threshold)[0]
+		if strong_cols.size:
+			cand_left = edge_x1 + int(strong_cols[0])
+			cand_right = edge_x1 + int(strong_cols[-1])
+			cand_w = cand_right - cand_left
+			if max(sw * 1.1, width * 0.035) <= cand_w <= width * 0.28:
+				left = int(np.clip(cand_left, 0, right - 2))
+				right = int(np.clip(cand_right, left + 2, width))
+		row_energy = edges[:, max(0, left - edge_x1):max(1, right - edge_x1)].mean(axis=1)
+		row_threshold = max(float(np.percentile(row_energy, 75)), float(row_energy.mean() * 1.2)) if row_energy.size else 0.0
+		strong_rows = np.where(row_energy >= row_threshold)[0]
+		if strong_rows.size:
+			cand_top = top + int(strong_rows[0])
+			cand_bottom = top + int(strong_rows[-1])
+			if cand_bottom - cand_top >= max(panel_h * 1.10, height * 0.16):
+				top = int(np.clip(min(top, cand_top), 0, bottom - 2))
+				bottom = int(np.clip(max(bottom, cand_bottom), top + 2, height))
+	return [float(left), float(top), float(right), float(bottom)]
 
 
 def _outer_panel_edge(energy: np.ndarray, offset: int, split: int, *, from_start: bool) -> int:

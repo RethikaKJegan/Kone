@@ -194,42 +194,44 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
   setComponents: async (environments, components) => {
     const { currentOffering } = get()
     if (!currentOffering) return
+    const selectedComponents = components.slice(0, 1)
     const updates: Partial<Offering> = {
       environments,
-      selectedComponents: components,
+      selectedComponents,
       componentPins: [],
-      activeAnnotationFilters: components,
-    }
-    if (isGuestSession()) {
-      const sessionId = await getGuestSessionId()
-      apiClient.post('/guest/components', {
-        is_guest: true,
-        session_id: sessionId,
-        project_id: currentOffering.projectId,
-        project_name: currentOffering.name,
-        environments,
-        selected_components: components,
-      }).catch(() => {})
-    } else {
-      apiClient.patch(`/offerings/${currentOffering.id}`, updates)
-
-      // Drive the video pipeline steps if an imageId exists
-      if (currentOffering.imageId) {
-        apiClient.post('/video/select-environment', {
-          imageId: currentOffering.imageId,
-          environment: environments[0] ?? '',
-        })
-        apiClient.post('/video/select-components', {
-          imageId: currentOffering.imageId,
-          components,
-        })
-      }
+      activeAnnotationFilters: selectedComponents,
     }
     const updated = patchOffering(currentOffering, updates)
     set(state => {
       saveGuestOfferings({ offerings: state.offerings, currentOffering: updated })
       return { currentOffering: updated }
     })
+
+    if (isGuestSession()) {
+      const sessionId = await getGuestSessionId()
+      await apiClient.post('/guest/components', {
+        is_guest: true,
+        session_id: sessionId,
+        project_id: currentOffering.projectId,
+        project_name: currentOffering.name,
+        environments,
+        selected_components: selectedComponents,
+      })
+    } else {
+      await apiClient.patch(`/offerings/${currentOffering.id}`, updates)
+
+      // Drive the video pipeline steps if an imageId exists
+      if (currentOffering.imageId) {
+        await apiClient.post('/video/select-environment', {
+          imageId: currentOffering.imageId,
+          environment: environments[0] ?? '',
+        })
+        await apiClient.post('/video/select-components', {
+          imageId: currentOffering.imageId,
+          components: selectedComponents,
+        })
+      }
+    }
   },
 
   setPins: pins => {

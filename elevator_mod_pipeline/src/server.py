@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from PIL import Image
 from pydantic import BaseModel
 
-from input_validation import validate_input_image
+from input_validation import validate_elevator_or_cop_upload, validate_input_image
 from video import render_elevator_video
 
 app = FastAPI()
@@ -64,14 +64,19 @@ def public_status(status: str, error: Any = None) -> dict[str, Any]:
 def precheck(payload: ProjectPayload):
     image_path = Path(payload.storage_dir) / "uploads" / "input.jpg"
     image = Image.open(image_path).convert("RGB")
-    result = validate_input_image(np.asarray(image), {})
-    ok = bool(result.get("valid"))
-    write_status(payload.storage_dir, public_status("precheck_passed" if ok else "precheck_failed", None if ok else result))
+    image_array = np.asarray(image)
+    result = validate_input_image(image_array, {})
+    relevance = validate_elevator_or_cop_upload(image_array, result)
+    ok = bool(relevance.get("valid"))
+    write_status(payload.storage_dir, public_status("precheck_passed" if ok else "precheck_failed", None if ok else relevance))
     return {
         "ok": ok,
         "next_action": "continue" if ok else "reupload",
-        "reason": None if ok else "Image failed precheck",
+        "image_type": relevance.get("image_type"),
+        "message": relevance.get("reason"),
+        "reason": None if ok else relevance.get("reason", "Image failed precheck"),
         "validation": result,
+        "relevance": relevance,
     }
 
 
@@ -143,7 +148,10 @@ def generate_video(payload: ProjectPayload):
             "ffmpeg_pan_overscan": 0.20,
             "ffmpeg_zoom_amount": 0.35,
         }
-        if motion:
+        if video_options.get("mode") == "door_functionality":
+            cfg["video"].update({"mode": "door_functionality"})
+            cfg["video"].pop("motion_style", None)
+        elif motion:
             cfg["video"].update({"motion_style": motion, "mode": "motion"})
         detections = json.loads(detections_path.read_text(encoding="utf-8")) if detections_path.exists() else {}
         geometry = json.loads(geometry_path.read_text(encoding="utf-8")) if geometry_path.exists() else {}

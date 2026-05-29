@@ -40,8 +40,7 @@ export default function Step2Components() {
     setComps(prev => prev.filter(c => newAvailable.includes(c)))
   }
 
-  const toggleComp = (k: ComponentKey) =>
-    setComps(prev => prev.includes(k) ? prev.filter(c => c !== k) : [...prev, k])
+  const toggleComp = (k: ComponentKey) => setComps([k])
 
   const canContinue = envs.length > 0 && comps.length > 0
 

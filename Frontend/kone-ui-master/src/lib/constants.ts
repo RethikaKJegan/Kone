@@ -47,6 +47,7 @@ export const VIDEO_MOTION_STYLES = [
   { value: 'zoom-in', label: 'Zoom In' },
   { value: 'pan-lr', label: 'Pan L–R' },
   { value: 'pan-rl', label: 'Pan R–L' },
+  { value: 'door-functionality', label: 'Door Functionality' },
 ] as const
 
 export const VIDEO_SPEEDS = [0.5, 1, 1.5] as const

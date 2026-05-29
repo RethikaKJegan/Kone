@@ -49,6 +49,10 @@ export default function Step5Video() {
   }
 
   const motionLabel = VIDEO_MOTION_STYLES.find(m => m.value === motion)?.label ?? ''
+  const isDoorFunctionality = motion === 'door-functionality'
+  const videoStyles = VIDEO_MOTION_STYLES.filter(
+    s => s.value !== 'door-functionality' || currentOffering?.selectedComponents.includes('door')
+  )
 
   const handleContinue = async () => {
     setVideoSettings({ videoMotionStyle: motion, videoQuality: quality })
@@ -63,7 +67,9 @@ export default function Step5Video() {
           session_id: sessionId,
           project_id: projectId,
           project_name: currentOffering.name,
-          video_options: { motion, speed: currentOffering.videoSpeed, quality },
+          video_options: isDoorFunctionality
+            ? { mode: 'door_functionality', duration_seconds: 8, speed: currentOffering.videoSpeed, quality }
+            : { motion, speed: currentOffering.videoSpeed, quality },
         })
 
         for (let attempt = 0; attempt < 120; attempt += 1) {
@@ -104,8 +110,8 @@ export default function Step5Video() {
   }
 
   const handleBack = () => {
-    navigate(`/projects/${projectId}/offerings/${offeringId}/step/4`)
-    goToStep(4)
+    navigate(`/projects/${projectId}/offerings/${offeringId}/step/3`)
+    goToStep(3)
   }
 
   const btnBase = 'rounded-lg border text-[13px] font-semibold transition-all duration-[150ms]'
@@ -170,7 +176,7 @@ export default function Step5Video() {
           <div>
             <p className="label-caps mb-2">Motion Style</p>
             <div className="flex flex-col gap-1.5">
-              {VIDEO_MOTION_STYLES.map(s => (
+              {videoStyles.map(s => (
                 <button
                   key={s.value}
                   onClick={() => selectMotion(s.value as MotionStyle)}

@@ -32,6 +32,53 @@ class PipelineValidationError(RuntimeError):
     pass
 
 
+COMPONENT_REPLACEMENT_PRESETS: dict[str, dict[str, Any]] = {
+    "cop": {
+        "id": "cop",
+        "asset": "tests/panels/mod_long.png",
+        "component_type": "elevator_mod_panel",
+        "target_keywords": [
+            "car operating panel",
+            "tall stainless steel elevator operating panel with round buttons",
+        ],
+        "detection_labels": [
+            "tall stainless steel elevator operating panel with round buttons",
+            "floor_indicator_display",
+            "wheelchair button",
+            "accessibility control panel",
+            "emergency_phone",
+        ],
+    },
+    "lci": {
+        "id": "lci",
+        "asset": "tests/panels/mod_up.png",
+        "component_type": "floor_indicator_display",
+        "target_keywords": [
+            "floor indicator",
+            "floor indicator display",
+            "elevator display",
+            "landing floor indicator",
+            "hall position indicator",
+        ],
+        "detection_labels": ["floor_indicator_display", "elevator_door"],
+    },
+    "door": {
+        "id": "door",
+        "asset": "tests/panels/door_mod.png",
+        "component_type": "elevator_door",
+        "target_keywords": ["elevator door", "elevator doors", "elevator_door"],
+        "detection_labels": ["elevator_door"],
+    },
+    "ceiling": {
+        "id": "ceiling",
+        "asset": "tests/panels/mod_panel.png",
+        "component_type": "elevator_cabin",
+        "target_keywords": ["elevator ceiling", "ceiling light", "elevator cabin", "elevator interior"],
+        "detection_labels": ["elevator ceiling", "elevator_cabin"],
+    },
+}
+
+
 def run(config_path: str | Path) -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     logger = logging.getLogger(__name__)
@@ -216,7 +263,12 @@ def run(config_path: str | Path) -> None:
             placement_debug["id"] = replacement_id
             placement_debug["asset"] = replacement["asset"]
             perspective_cfg = cfg.get("perspective_mod_placement", {})
-            if perspective_cfg.get("enabled", False) and perspective_cfg.get("auto", True):
+            if (
+                perspective_cfg.get("enabled", False)
+                and perspective_cfg.get("auto", True)
+                and placement_debug.get("placement_mode") != "existing_panel"
+                and placement_debug.get("homography_alignment", {}).get("mode") != "existing_panel_rectified_homography"
+            ):
                 status("perspective_mod_placement", f"[PLACE] Auto perspective-grid placement: {replacement_id}")
                 perspective_outputs = run_auto_perspective_mod_placement(
                     current_background,
@@ -302,6 +354,16 @@ def run(config_path: str | Path) -> None:
 def replacement_configs(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     configured = cfg.get("replacements")
     if not configured:
+        selected = [
+            str(component).strip().lower()
+            for component in cfg.get("selected_components", [])
+            if str(component).strip()
+        ]
+        replacements = [_component_replacement(component) for component in selected]
+        replacements = [replacement for replacement in replacements if replacement is not None]
+        if replacements:
+            _extend_detection_labels(cfg, replacements)
+            return replacements
         return [{"id": "mod_panel", "asset": str(cfg["mod_panel"])}]
     replacements: list[dict[str, Any]] = []
     for index, item in enumerate(configured, start=1):
@@ -310,7 +372,26 @@ def replacement_configs(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         replacement = dict(item)
         replacement["id"] = str(replacement.get("id") or f"component_{index}")
         replacements.append(replacement)
+    _extend_detection_labels(cfg, replacements)
     return replacements
+
+
+def _component_replacement(component: str) -> dict[str, Any] | None:
+    preset = COMPONENT_REPLACEMENT_PRESETS.get(component)
+    if preset is None:
+        return None
+    return {key: value for key, value in preset.items() if key != "detection_labels"}
+
+
+def _extend_detection_labels(cfg: dict[str, Any], replacements: list[dict[str, Any]]) -> None:
+    detection_cfg = cfg.setdefault("detection", {})
+    labels = list(detection_cfg.get("labels") or [])
+    for replacement in replacements:
+        preset = COMPONENT_REPLACEMENT_PRESETS.get(str(replacement.get("id", "")).lower())
+        labels.extend(replacement.get("target_keywords", []))
+        if preset:
+            labels.extend(preset.get("detection_labels", []))
+    detection_cfg["labels"] = list(dict.fromkeys(label for label in labels if label))
 
 
 def component_config(cfg: dict[str, Any], replacement: dict[str, Any]) -> dict[str, Any]:

@@ -194,6 +194,11 @@ def render_elevator_video(
             previous = hold_progress
             frame_index += 1
 
+    if auto_door_functionality:
+        min_frames = max(len(frames), int(round(fps * max(duration, 8.0))))
+        if frames and len(frames) < min_frames:
+            frames.extend([frames[-1].copy() for _ in range(min_frames - len(frames))])
+
     if state == "closed":
         enforce_closed_branch_endpoints(frames, img, actions, fps)
     elif state == "open":

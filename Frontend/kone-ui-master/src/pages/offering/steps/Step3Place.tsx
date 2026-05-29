@@ -72,13 +72,8 @@ export default function Step3Place() {
   const placedCount = components.filter(k => pins.some(p => p.componentKey === k)).length
 
   const handleContinue = () => {
-    goToStep(4)
-    navigate(`/projects/${projectId}/offerings/${offeringId}/step/4`)
-  }
-
-  const handleAdjustPlacement = () => {
-    goToStep(4)
-    navigate(`/projects/${projectId}/offerings/${offeringId}/step/4`)
+    goToStep(5)
+    navigate(`/projects/${projectId}/offerings/${offeringId}/step/5`)
   }
 
   const handleBack = () => {
@@ -114,7 +109,7 @@ export default function Step3Place() {
         <Sparkles className="shrink-0 text-[#1450F5] mt-0.5" style={{ width: 15, height: 15 }} />
         <div>
           <p className="text-sm font-medium text-[#1e3a5f]">AI has pre-placed all components based on spatial intelligence.</p>
-          <p className="mt-0.5 text-xs text-[#3b82f6]">✦ pins are AI-placed. Use the optional step to manually adjust placement.</p>
+          <p className="mt-0.5 text-xs text-[#3b82f6]">Final preview is ready.</p>
         </div>
       </div>
 
@@ -205,13 +200,7 @@ export default function Step3Place() {
       </div>
 
       <div className="flex items-center justify-between border-t border-[#E4E4E4] px-8 py-5">
-        <button
-          onClick={handleAdjustPlacement}
-          disabled={!allPlaced || isProcessing}
-          className="text-xs text-[#6B7280] transition-colors duration-[120ms] hover:text-[#1450F5] disabled:opacity-40"
-        >
-          Adjust placement (optional) →
-        </button>
+        <span />
         <button
           onClick={handleContinue}
           disabled={!allPlaced}

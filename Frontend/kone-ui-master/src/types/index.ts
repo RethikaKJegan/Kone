@@ -55,7 +55,7 @@ export interface Offering {
   componentPins: ComponentPin[]
   annotationsEnabled: boolean
   activeAnnotationFilters: ComponentKey[]
-  videoMotionStyle: 'zoom-in' | 'pan-lr' | 'pan-rl'
+  videoMotionStyle: 'zoom-in' | 'pan-lr' | 'pan-rl' | 'door-functionality'
   videoSpeed: 0.5 | 1 | 1.5
   videoQuality: '360p' | '480p' | '720p' | '1080p'
   renderComplete: boolean
