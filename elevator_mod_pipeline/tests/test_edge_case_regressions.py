@@ -10,7 +10,7 @@ import pytest
 import src.detect as detect
 import run_batch
 from src.input_validation import validate_elevator_presence
-from src.insert_mod import expand_control_panel_bbox, invalid_mod_panel_target_reason
+from src.insert_mod import expand_control_panel_bbox, extend_inpaint_bbox_for_aligned_panel_artifacts, invalid_mod_panel_target_reason, preselect_mod_panel_placement
 from src.perspective_mod_placement import parse_points, run_perspective_mod_placement
 from src.pipeline import component_config, elevator_present_for_video, replacement_configs
 from src.video import normalize_video_mode_request, pan_metadata, render_motion_style_frame
@@ -597,6 +597,61 @@ def test_cop_panel_expands_to_include_aligned_display_plate() -> None:
     assert 300 <= x2 <= 320
     assert y2 >= 580
     assert invalid_mod_panel_target_reason(panel, image.shape[1], image.shape[0], None) is None
+
+
+def test_cop_preselection_preserves_floor_indicator_by_default(tmp_path: Path) -> None:
+    image = np.full((240, 160, 3), 180, dtype=np.uint8)
+    mod_path = tmp_path / "mod_panel.png"
+    cv2.imwrite(str(mod_path), np.full((90, 30, 4), 255, dtype=np.uint8))
+    detections = {
+        "detections": [
+            {
+                "phrase": "floor indicator display",
+                "normalized_component_type": "floor_indicator_display",
+                "score": 0.6,
+                "box_xyxy": [55, 40, 105, 62],
+            },
+            {
+                "phrase": detect.OPERATING_PANEL_CLASS,
+                "normalized_component_type": detect.OPERATING_PANEL_CLASS,
+                "score": 0.7,
+                "box_xyxy": [50, 80, 110, 190],
+            },
+        ]
+    }
+    cfg = {
+        "_requested_component_type": "elevator_mod_panel",
+        "removal": {"box_mask_padding_px": 0},
+        "insertion": {
+            "placement": "detection",
+            "target_keywords": ["car operating panel"],
+            "existing_panel_padding_px": 0,
+            "max_existing_panel_target_area_ratio": 0.50,
+        },
+    }
+
+    bbox = preselect_mod_panel_placement(image, mod_path, detections, cfg)
+
+    assert bbox[1] > 70
+    assert bbox[3] >= 190
+    assert cfg["_placement_debug"]["aligned_artifact_cleanup"]["status"] == "preserved_floor_indicator_display"
+
+
+def test_floor_indicator_cleanup_extension_requires_explicit_opt_in() -> None:
+    target = [50, 80, 110, 190]
+    detections = [
+        {
+            "phrase": "floor indicator display",
+            "normalized_component_type": "floor_indicator_display",
+            "score": 0.6,
+            "box_xyxy": [55, 40, 105, 62],
+        }
+    ]
+
+    expanded, debug = extend_inpaint_bbox_for_aligned_panel_artifacts(target, detections, 160, 240)
+
+    assert expanded[1] < target[1]
+    assert debug["status"] == "extended"
 
 
 def test_door_functionality_wins_over_motion_style() -> None:

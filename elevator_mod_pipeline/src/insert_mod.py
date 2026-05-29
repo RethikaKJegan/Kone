@@ -81,10 +81,13 @@ def preselect_mod_panel_placement(
     mod = close_internal_alpha_holes(load_image_rgba(mod_path))
     height, width = image_rgb.shape[:2]
     target_box, reason = _target_box(width, height, detections, cfg, mod.shape[:2], removal_mask, image_rgb)
-    if cfg.get("_requested_component_type") == "elevator_mod_panel":
+    preserve_floor_indicator = bool(cfg.get("removal", {}).get("preserve_floor_indicator_display", True))
+    if cfg.get("_requested_component_type") == "elevator_mod_panel" and not preserve_floor_indicator:
         inpaint_box, cleanup_debug = extend_inpaint_bbox_for_aligned_panel_artifacts(target_box, detections.get("detections", []), width, height)
     else:
-        inpaint_box, cleanup_debug = target_box, {"status": "not_needed"}
+        inpaint_box, cleanup_debug = target_box, {
+            "status": "preserved_floor_indicator_display" if cfg.get("_requested_component_type") == "elevator_mod_panel" else "not_needed"
+        }
     cfg.setdefault("_placement_debug", {})
     cfg["_placement_debug"].update(
         {
