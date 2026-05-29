@@ -53,15 +53,15 @@ COMPONENT_REPLACEMENT_PRESETS: dict[str, dict[str, Any]] = {
     "lci": {
         "id": "lci",
         "asset": "tests/panels/mod_up.png",
-        "component_type": "floor_indicator_display",
+        "component_type": "landing_call_indicator",
         "target_keywords": [
-            "floor indicator",
-            "floor indicator display",
-            "elevator display",
-            "landing floor indicator",
-            "hall position indicator",
+            "landing call indicator",
+            "landing call button",
+            "hall call button",
+            "hall call indicator",
+            "elevator call button",
         ],
-        "detection_labels": ["floor_indicator_display", "elevator_door"],
+        "detection_labels": ["landing_call_indicator", "elevator call button panel", "elevator_door"],
     },
     "door": {
         "id": "door",

@@ -13,8 +13,10 @@ from .utils import load_image_rgba, load_image_rgb, save_rgb, select_detection, 
 LOGGER = logging.getLogger(__name__)
 
 OPERATING_PANEL_CLASS = "tall stainless steel elevator operating panel with round buttons"
+LANDING_CALL_INDICATOR_CLASS = "landing_call_indicator"
 VALID_MOD_PANEL_TARGETS = {OPERATING_PANEL_CLASS, "elevator call button panel"}
 INVALID_MOD_PANEL_TARGETS = {
+    LANDING_CALL_INDICATOR_CLASS,
     "accessibility_control_panel",
     "wheelchair button",
     "wheelchair_indicator",
@@ -755,6 +757,20 @@ def _valid_component_detection(det: dict[str, Any], keywords: list[str], width: 
     cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
     target_text = " ".join(k.lower() for k in keywords)
 
+    if any(term in target_text for term in ("landing call", "hall call", "lci")):
+        norm = str(det.get("normalized_component_type") or "").lower()
+        if norm in {OPERATING_PANEL_CLASS, "floor_indicator_display", "weight_limit_sign"}:
+            return False, "not_landing_call_indicator"
+        if any(term in phrase for term in ("floor", "display", "capacity", "weight", "car operating panel")):
+            return False, "not_landing_call_indicator"
+        aspect = bh / bw
+        near_side_wall = cx < width * 0.45 or cx > width * 0.55
+        return (
+            norm in {LANDING_CALL_INDICATOR_CLASS, "elevator call button panel", "accessibility_control_panel", "wheelchair button"}
+            and 0.00004 <= area_ratio <= 0.10
+            and 0.35 <= aspect <= 5.5
+            and near_side_wall
+        ), "invalid_landing_call_indicator_geometry"
     if "floor indicator" in target_text or "display" in target_text:
         return (cy < height * 0.42 and area_ratio < 0.08 and bw > 6 and bh > 4), "invalid_floor_indicator_geometry"
     if "button panel" in target_text or "elevator panel" in target_text or "call button" in target_text:

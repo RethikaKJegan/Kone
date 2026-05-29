@@ -10,7 +10,13 @@ import pytest
 import src.detect as detect
 import run_batch
 from src.input_validation import validate_elevator_presence
-from src.insert_mod import expand_control_panel_bbox, extend_inpaint_bbox_for_aligned_panel_artifacts, invalid_mod_panel_target_reason, preselect_mod_panel_placement
+from src.insert_mod import (
+    expand_control_panel_bbox,
+    extend_inpaint_bbox_for_aligned_panel_artifacts,
+    invalid_mod_panel_target_reason,
+    preselect_mod_panel_placement,
+    select_valid_component_detection,
+)
 from src.perspective_mod_placement import parse_points, run_perspective_mod_placement
 from src.pipeline import component_config, elevator_present_for_video, replacement_configs
 from src.video import normalize_video_mode_request, pan_metadata, render_motion_style_frame
@@ -96,6 +102,10 @@ def test_multi_component_config_preserves_legacy_and_overrides_targets() -> None
     assert cfg["insertion"]["target_keywords"] == ["floor indicator"]
     assert cfg["_requested_component_type"] == "floor_indicator_display"
 
+    lci_cfg = component_config(base, replacement_configs({"selected_components": ["lci"], **base})[0])
+    assert lci_cfg["_requested_component_type"] == "landing_call_indicator"
+    assert "floor indicator" not in " ".join(lci_cfg["insertion"]["target_keywords"]).lower()
+
 
 def test_batch_component_and_video_defaults_support_manifest_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     base = {
@@ -178,6 +188,7 @@ def test_component_detection_vocabulary_is_normalized() -> None:
         detect.OPERATING_PANEL_CLASS,
         "wheelchair button",
         "wheelchair_indicator",
+        "landing_call_indicator",
         "floor_indicator_display",
         "weight_limit_sign",
         "accessibility_control_panel",
@@ -455,6 +466,34 @@ def test_panel_expansion_ignores_off_column_same_type_detection() -> None:
 
 def test_car_operating_panel_is_a_replaceable_cop_target() -> None:
     assert detect._normalized_component_type("car operating panel") == detect.OPERATING_PANEL_CLASS
+
+
+def test_lci_targets_landing_call_indicator_not_floor_display() -> None:
+    detections = [
+        {
+            "phrase": "floor indicator display",
+            "normalized_component_type": "floor_indicator_display",
+            "score": 0.9,
+            "box_xyxy": [54, 20, 106, 42],
+        },
+        {
+            "phrase": "landing call indicator",
+            "normalized_component_type": "landing_call_indicator",
+            "score": 0.7,
+            "box_xyxy": [52, 110, 90, 166],
+        },
+    ]
+
+    selected = select_valid_component_detection(
+        detections,
+        ["landing call indicator", "hall call button"],
+        240,
+        160,
+        (90, 30),
+    )
+
+    assert detect._normalized_component_type("landing call indicator") == "landing_call_indicator"
+    assert selected is detections[1]
 
 
 def test_duplicate_elevator_label_is_normalized_as_elevator_door() -> None:

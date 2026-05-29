@@ -32,10 +32,18 @@ _GDINO_CACHE: dict[str, Any] = {}
 _SAM2_CACHE: dict[str, Any] = {}
 LOGGER = logging.getLogger(__name__)
 OPERATING_PANEL_CLASS = "tall stainless steel elevator operating panel with round buttons"
+LANDING_CALL_INDICATOR_CLASS = "landing_call_indicator"
 
 NORMALIZED_COMPONENT_PROMPTS: dict[str, list[str]] = {
 	OPERATING_PANEL_CLASS: [OPERATING_PANEL_CLASS],
 	"elevator call button panel": ["elevator call button panel"],
+	LANDING_CALL_INDICATOR_CLASS: [
+		"landing call indicator",
+		"landing call button",
+		"hall call button",
+		"hall call indicator",
+		"elevator call button",
+	],
 	"wheelchair button": ["wheelchair button"],
 	"wheelchair_indicator": ["wheelchair indicator", "accessibility indicator"],
 	"floor_indicator_display": [
@@ -336,6 +344,8 @@ def _normalized_component_type(phrase: str) -> str | None:
 		return OPERATING_PANEL_CLASS
 	if OPERATING_PANEL_CLASS in lower:
 		return OPERATING_PANEL_CLASS
+	if any(term in lower for term in ("landing call indicator", "landing call button", "hall call button", "hall call indicator")):
+		return LANDING_CALL_INDICATOR_CLASS
 	if lower == "elevator call button panel":
 		return "elevator call button panel"
 	if lower == "wheelchair button":
