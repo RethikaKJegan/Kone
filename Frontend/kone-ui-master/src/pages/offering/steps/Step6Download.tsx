@@ -9,15 +9,59 @@ import { AnnotatedPreview } from '../../../components/shared/AnnotatedPreview'
 import { KONE_COMPONENTS } from '../../../lib/constants'
 import { toast } from '../../../hooks/useToast'
 import { cn } from '../../../lib/utils'
-import type { ComponentKey } from '../../../types'
+import type { ComponentKey, ComponentPin } from '../../../types'
 
 const COMP_LABELS = Object.fromEntries(KONE_COMPONENTS.map(c => [c.key, c.label])) as Record<ComponentKey, string>
+type DownloadType = 'image' | 'annotations' | 'video'
 
 function downloadFromUrl(url: string, filename: string) {
   const a = document.createElement('a')
   a.href = url
   a.download = filename
   a.click()
+}
+
+async function downloadAnnotatedImage(imageUrl: string, pins: ComponentPin[], labels: Record<ComponentKey, string>, filename: string) {
+  const image = new Image()
+  image.crossOrigin = 'anonymous'
+  image.src = imageUrl
+  await new Promise<void>((resolve, reject) => {
+    image.onload = () => resolve()
+    image.onerror = () => reject(new Error('Annotated image is not available'))
+  })
+
+  const canvas = document.createElement('canvas')
+  canvas.width = image.naturalWidth
+  canvas.height = image.naturalHeight
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('Could not create annotated image')
+
+  ctx.drawImage(image, 0, 0)
+  pins.forEach(pin => {
+    const x = (pin.x / 100) * canvas.width
+    const y = (pin.y / 100) * canvas.height
+    const label = labels[pin.componentKey]
+    ctx.font = '600 18px Arial'
+    const labelWidth = ctx.measureText(label).width
+    const boxWidth = labelWidth + 24
+    const boxHeight = 30
+    const boxX = Math.max(8, Math.min(canvas.width - boxWidth - 8, x + 10))
+    const boxY = Math.max(8, y - boxHeight - 12)
+
+    ctx.fillStyle = 'rgba(10,10,10,0.85)'
+    ctx.fillRect(boxX, boxY, boxWidth, boxHeight)
+    ctx.fillStyle = '#ffffff'
+    ctx.fillText(label, boxX + 12, boxY + 21)
+    ctx.beginPath()
+    ctx.arc(x, y, 7, 0, Math.PI * 2)
+    ctx.fillStyle = '#ffffff'
+    ctx.fill()
+    ctx.lineWidth = 4
+    ctx.strokeStyle = 'rgba(10,10,10,0.85)'
+    ctx.stroke()
+  })
+
+  downloadFromUrl(canvas.toDataURL('image/png'), filename)
 }
 
 export default function Step6Download() {
@@ -81,14 +125,28 @@ export default function Step6Download() {
     }
   }, [currentOffering?.id])
 
-  const handleDownload = async (url: string | null, filename: string) => {
+  const handleDownload = async (url: string | null, filename: string, type: DownloadType) => {
+    if (type === 'annotations') {
+      const imageUrl = offering?.outputImageUrl ?? offering?.uploadedFileUrl ?? null
+      if (!imageUrl) {
+        toast('Output file not available yet')
+        return
+      }
+      try {
+        await downloadAnnotatedImage(imageUrl, pins, COMP_LABELS, filename)
+      } catch (error) {
+        toast(error instanceof Error ? error.message : 'Annotated image is not available', 'destructive')
+      }
+      return
+    }
+
     if (isGuest) {
       const sessionId = await getGuestSessionId()
       const base = import.meta.env.VITE_API_BASE_URL || '/api/v1'
       const quality = currentOffering?.videoQuality ?? '1080p'
       const href = downloadUrl ?? `${base}/guest/download?session_id=${encodeURIComponent(sessionId)}&project_id=${encodeURIComponent(projectId ?? '')}`
       const separator = href.includes('?') ? '&' : '?'
-      window.location.href = `${href}${separator}video_quality=${encodeURIComponent(quality)}`
+      window.location.href = `${href}${separator}type=${encodeURIComponent(type)}&video_quality=${encodeURIComponent(quality)}`
       return
     }
     if (!url) {
@@ -133,6 +191,7 @@ export default function Step6Download() {
       subtitle: 'High-quality composite render',
       url: isGuest ? downloadUrl : offering?.outputImageUrl ?? null,
       file: 'final_output.png',
+      type: 'image' as const,
       highlight: false,
     },
     {
@@ -141,6 +200,7 @@ export default function Step6Download() {
       subtitle: 'Render with annotation overlay',
       url: isGuest ? downloadUrl : offering?.outputImageUrl ?? null,
       file: 'salesnxt-callouts.png',
+      type: 'annotations' as const,
       highlight: true,
     },
     {
@@ -149,6 +209,7 @@ export default function Step6Download() {
       subtitle: `${offering?.videoQuality} · ${offering?.videoMotionStyle === 'zoom-in' ? 'Zoom In' : offering?.videoMotionStyle === 'pan-lr' ? 'Pan L–R' : 'Pan R–L'}`,
       url: isGuest ? downloadUrl : offering?.outputVideoUrl ?? null,
       file: 'elevator_animation.mp4',
+      type: 'video' as const,
       highlight: false,
     },
   ]
@@ -180,7 +241,7 @@ export default function Step6Download() {
                 <p className="mt-0.5 text-xs text-[#A3A3A3]">{d.subtitle}</p>
               </div>
               <button
-                onClick={() => handleDownload(d.url, d.file)}
+                onClick={() => handleDownload(d.url, d.file, d.type)}
                 className={cn(
                   'mt-auto flex items-center gap-1.5 rounded-[5px] px-3 text-xs font-medium transition-colors duration-[120ms]',
                   d.highlight

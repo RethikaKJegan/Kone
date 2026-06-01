@@ -222,9 +222,22 @@ const finalize = catchAsync(async (req, res) => {
 });
 
 const download = catchAsync(async (req, res) => {
-  const { session_id: sessionId, project_id: projectId } = req.query;
+  const { session_id: sessionId, project_id: projectId, type } = req.query;
   const downloads = path.join(projectDir(sessionId, projectId), 'downloads');
   await fsp.rm(path.join(downloads, 'metadata.json'), { force: true });
+  const selectedType = String(type || 'all');
+  const singleFiles = {
+    image: { path: path.join(downloads, 'final_output.png'), name: 'final_output.png' },
+    video: { path: path.join(downloads, 'elevator_animation.mp4'), name: 'elevator_animation.mp4' },
+  };
+  if (Object.prototype.hasOwnProperty.call(singleFiles, selectedType)) {
+    const file = singleFiles[selectedType];
+    if (!fs.existsSync(file.path)) {
+      return res.status(404).send({ ok: false, message: 'Requested output file is not ready' });
+    }
+    return res.download(file.path, file.name);
+  }
+
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', 'attachment; filename="kone-output.zip"');
   const archive = archiver('zip');
