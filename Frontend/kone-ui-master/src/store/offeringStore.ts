@@ -260,8 +260,12 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
     set({ isProcessing: true })
     try {
       if (isGuestSession()) {
-        await new Promise(r => setTimeout(r, 800))
-        const pins: ComponentPin[] = currentOffering.selectedComponents.map(key => ({
+        const sessionId = await getGuestSessionId()
+        const { data } = await apiClient.get('/guest/status', {
+          params: { session_id: sessionId, project_id: currentOffering.projectId },
+        })
+        const placementPins = (data.component_pins ?? []) as ComponentPin[]
+        const pins: ComponentPin[] = currentOffering.selectedComponents.map(key => placementPins.find(pin => pin.componentKey === key) ?? ({
           componentKey: key,
           x: AI_PLACEMENT_DEFAULTS[key]?.x ?? 50,
           y: AI_PLACEMENT_DEFAULTS[key]?.y ?? 50,

@@ -53,6 +53,33 @@ async function readJsonIfExists(file) {
   }
 }
 
+async function componentPinsFromPlacement(root) {
+  const placements = await readJsonIfExists(path.join(root, 'pipeline', 'component_placements.json'));
+  if (!Array.isArray(placements)) return [];
+  const detections = await readJsonIfExists(path.join(root, 'pipeline', 'elevator_detections.json'));
+  const width = Number(detections.metadata?.image_width) || 0;
+  const height = Number(detections.metadata?.image_height) || 0;
+  if (!width || !height) return [];
+
+  const supported = new Set(['lci', 'cop', 'door', 'ceiling']);
+  return placements
+    .map((placement) => {
+      const componentKey = String(placement.id || '').toLowerCase();
+      if (!supported.has(componentKey)) return null;
+      const bbox = placement.final_insertion_bbox || placement.final_component_placement?.bbox || placement.inpaint_bbox;
+      if (!Array.isArray(bbox) || bbox.length !== 4) return null;
+      const [x1, y1, x2, y2] = bbox.map(Number);
+      if (![x1, y1, x2, y2].every(Number.isFinite)) return null;
+      return {
+        componentKey,
+        x: Math.round(((x1 + x2) / 2 / width) * 100),
+        y: Math.round(((y1 + y2) / 2 / height) * 100),
+        aiPlaced: true,
+      };
+    })
+    .filter(Boolean);
+}
+
 const createSession = (req, res) => {
   res.send({ session_id: `guest_${crypto.randomUUID()}` });
 };
@@ -118,11 +145,14 @@ const runComponents = catchAsync(async (req, res) => {
 
 const status = catchAsync(async (req, res) => {
   const { session_id: sessionId, project_id: projectId } = req.query;
-  const current = await readStatus(projectDir(sessionId, projectId));
+  const root = projectDir(sessionId, projectId);
+  const current = await readStatus(root);
+  const componentPins = await componentPinsFromPlacement(root);
   res.send({
     ...current,
     preview_url: publicStorageUrl(sessionId, projectId, current.preview_url),
     video_url: publicStorageUrl(sessionId, projectId, current.video_url),
+    component_pins: componentPins,
     download_url: current.status === 'ready_for_download'
       ? `/api/v1/guest/download?session_id=${encodeURIComponent(sessionId)}&project_id=${encodeURIComponent(projectId)}`
       : null,
@@ -152,6 +182,7 @@ const finalize = catchAsync(async (req, res) => {
   const root = projectDir(sessionId, projectId);
   const downloads = path.join(root, 'downloads');
   await fsp.mkdir(downloads, { recursive: true });
+  await fsp.rm(path.join(downloads, 'metadata.json'), { force: true });
 
   const preview = path.join(root, 'preview', 'final_output.png');
   const video = path.join(root, 'video', 'elevator_animation.mp4');
@@ -177,17 +208,9 @@ const finalize = catchAsync(async (req, res) => {
   }
 
   await fsp.copyFile(preview, path.join(downloads, 'final_output.png'));
-  const downloadedVideoMeta = await readJsonIfExists(videoMeta);
   if (fs.existsSync(video)) {
     await fsp.copyFile(video, path.join(downloads, 'elevator_animation.mp4'));
   }
-  await fsp.writeFile(path.join(downloads, 'metadata.json'), JSON.stringify({
-    session_id: sessionId,
-    project_id: projectId,
-    video_included: fs.existsSync(video),
-    requested_video_quality: requestedQuality,
-    downloaded_video_quality: downloadedVideoMeta.quality || null,
-  }, null, 2));
   await writeStatus(root, {
     status: 'ready_for_download',
     preview_url: 'preview/final_output.png',
@@ -201,6 +224,7 @@ const finalize = catchAsync(async (req, res) => {
 const download = catchAsync(async (req, res) => {
   const { session_id: sessionId, project_id: projectId } = req.query;
   const downloads = path.join(projectDir(sessionId, projectId), 'downloads');
+  await fsp.rm(path.join(downloads, 'metadata.json'), { force: true });
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', 'attachment; filename="kone-output.zip"');
   const archive = archiver('zip');

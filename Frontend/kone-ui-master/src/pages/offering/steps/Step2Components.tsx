@@ -16,32 +16,55 @@ function getAvailableComponents(envs: Environment[]): ComponentKey[] {
   return Array.from(new Set(envs.flatMap(e => ENV_COMPONENTS[e])))
 }
 
+function normalizeEnvironments(envs: Environment[]): Environment[] {
+  return envs.length > 0 ? [envs[0]] : []
+}
+
+function withoutDoorCeilingConflict(components: ComponentKey[]): ComponentKey[] {
+  return components.includes('door') && components.includes('ceiling')
+    ? components.filter(c => c !== 'ceiling')
+    : components
+}
+
 export default function Step2Components() {
   const { projectId, offeringId } = useParams()
   const navigate = useNavigate()
   const { currentOffering, setComponents, goToStep } = useOfferingStore()
 
-  const [envs, setEnvs] = useState<Environment[]>(currentOffering?.environments ?? [])
+  const [envs, setEnvs] = useState<Environment[]>(normalizeEnvironments(currentOffering?.environments ?? []))
   const [comps, setComps] = useState<ComponentKey[]>(currentOffering?.selectedComponents ?? [])
 
   useEffect(() => {
     if (currentOffering) {
-      setEnvs(currentOffering.environments)
-      setComps(currentOffering.selectedComponents)
+      setEnvs(normalizeEnvironments(currentOffering.environments))
+      setComps(withoutDoorCeilingConflict(currentOffering.selectedComponents))
     }
   }, [currentOffering?.id])
 
   const availableComponents = getAvailableComponents(envs)
+  const selectableComponents = availableComponents.filter(c => {
+    if (c === 'door' && comps.includes('ceiling')) return false
+    if (c === 'ceiling' && comps.includes('door')) return false
+    return true
+  })
 
   const toggleEnv = (k: Environment) => {
-    const newEnvs = envs.includes(k) ? envs.filter(e => e !== k) : [...envs, k]
+    const newEnvs = envs.includes(k) ? [] : [k]
     setEnvs(newEnvs)
     const newAvailable = getAvailableComponents(newEnvs)
-    setComps(prev => prev.filter(c => newAvailable.includes(c)))
+    setComps(prev => withoutDoorCeilingConflict(prev.filter(c => newAvailable.includes(c))))
   }
 
   const toggleComp = (k: ComponentKey) => {
-    setComps(prev => prev.includes(k) ? prev.filter(c => c !== k) : [...prev, k])
+    setComps(prev => {
+      if (prev.includes(k)) return prev.filter(c => c !== k)
+      const next = k === 'door'
+        ? prev.filter(c => c !== 'ceiling')
+        : k === 'ceiling'
+          ? prev.filter(c => c !== 'door')
+          : prev
+      return [...next, k]
+    })
   }
 
   const canContinue = envs.length > 0 && comps.length > 0
@@ -88,11 +111,13 @@ export default function Step2Components() {
           <div className="flex flex-wrap gap-2">
             {ENVIRONMENTS.map(env => {
               const isSelected = envs.includes(env.key)
+              const isUnavailable = envs.length > 0 && !isSelected
               return (
                 <button
                   key={env.key}
-                  onClick={() => toggleEnv(env.key)}
+                  onClick={() => !isUnavailable && toggleEnv(env.key)}
                   aria-pressed={isSelected}
+                  disabled={isUnavailable}
                   className={cn(
                     'inline-flex h-9 items-center gap-2 rounded-lg border px-5 text-sm font-semibold transition-all duration-[150ms] select-none',
                     isSelected
@@ -113,7 +138,7 @@ export default function Step2Components() {
           <p className="label-caps mb-4">Which components are needed?</p>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             {KONE_COMPONENTS.map(comp => {
-              const isAvailable = availableComponents.includes(comp.key)
+              const isAvailable = selectableComponents.includes(comp.key)
               const isSelected = comps.includes(comp.key)
               return (
                 <button

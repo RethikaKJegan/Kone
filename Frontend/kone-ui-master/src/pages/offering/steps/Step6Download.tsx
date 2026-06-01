@@ -196,52 +196,6 @@ export default function Step6Download() {
           ))}
         </div>
 
-        {/* Zoomed component views */}
-        {pins.length > 0 && (
-          <div className="mb-8">
-            <p className="mb-1 text-[11px] font-medium uppercase tracking-[0.05em] text-[#6B7280]">Zoomed Component Views in Environment</p>
-            <p className="mb-4 text-xs text-[#A3A3A3]">Each image is a zoomed-in crop of your environment photo, centred on where the component is placed.</p>
-            <div className="flex flex-wrap gap-3">
-              {pins.map(pin => (
-                <div key={pin.componentKey} className="w-44 overflow-hidden rounded-lg border border-[#E4E4E4] bg-white">
-                  <div
-                    className="relative overflow-hidden bg-[#F5F5F5]"
-                    style={{ aspectRatio: '1', height: 120 }}
-                  >
-                    {(offering?.outputImageUrl ?? offering?.uploadedFileUrl) ? (
-                      <img
-                        src={offering.outputImageUrl ?? offering.uploadedFileUrl ?? ''}
-                        alt={`${COMP_LABELS[pin.componentKey]} zoomed view`}
-                        className="absolute w-full h-full object-cover"
-                        style={{
-                          objectPosition: `${pin.x}% ${pin.y}%`,
-                          transform: 'scale(2)',
-                          transformOrigin: `${pin.x}% ${pin.y}%`,
-                        }}
-                      />
-                    ) : (
-                      <div className="w-full h-full bg-[#E4E4E4]" />
-                    )}
-                  </div>
-                  <div className="p-2">
-                    <div className="mb-2 flex items-center gap-1.5">
-                      <span className="text-xs font-medium text-[#0A0A0A]">{COMP_LABELS[pin.componentKey]}</span>
-                      <span className="rounded-[4px] bg-[#F5F5F5] px-1 py-0.5 text-[10px] text-[#A3A3A3]">zoomed</span>
-                    </div>
-                    <button
-                      onClick={() => handleDownload(null, `salesnxt-${pin.componentKey}-zoom.png`)}
-                      className="flex w-full items-center justify-center gap-1 rounded-[4px] border border-[#E4E4E4] py-1 text-[11px] font-medium text-[#525252] transition-colors duration-[120ms] hover:bg-[#F7F7F7]"
-                    >
-                      <Download style={{ width: 11, height: 11 }} />
-                      Download
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
         {/* Final outputs preview */}
         {(offering?.outputImageUrl || offering?.outputVideoUrl) && (
           <div className="mb-8 grid grid-cols-2 gap-4">

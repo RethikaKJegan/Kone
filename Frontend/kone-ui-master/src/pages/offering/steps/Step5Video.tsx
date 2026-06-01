@@ -12,12 +12,16 @@ import type { Offering } from '../../../types'
 type MotionStyle = Offering['videoMotionStyle']
 type Quality = Offering['videoQuality']
 
+function availableMotionStyle(value: MotionStyle | undefined): MotionStyle {
+  return value === 'door-functionality' || !value ? 'zoom-in' : value
+}
+
 export default function Step5Video() {
   const { projectId, offeringId } = useParams()
   const navigate = useNavigate()
   const { currentOffering, setVideoSettings, setCurrentOffering, goToStep } = useOfferingStore()
 
-  const [motion, setMotion] = useState<MotionStyle>(currentOffering?.videoMotionStyle ?? 'zoom-in')
+  const [motion, setMotion] = useState<MotionStyle>(availableMotionStyle(currentOffering?.videoMotionStyle))
   const [quality, setQuality] = useState<Quality>(currentOffering?.videoQuality ?? '1080p')
   const [playing, setPlaying] = useState(false)
   const [generating, setGenerating] = useState(false)
@@ -28,6 +32,7 @@ export default function Step5Video() {
     && !loadFailed
 
   const selectMotion = (value: MotionStyle) => {
+    if (value === 'door-functionality') return
     setMotion(value)
     setLoadFailed(false)
     if (currentOffering?.outputVideoUrl) {
@@ -178,7 +183,14 @@ export default function Step5Video() {
                 <button
                   key={s.value}
                   onClick={() => selectMotion(s.value as MotionStyle)}
-                  className={cn(btnBase, 'px-3', motion === s.value ? btnActive : btnInactive)}
+                  disabled={s.value === 'door-functionality'}
+                  className={cn(
+                    btnBase,
+                    'px-3',
+                    s.value === 'door-functionality'
+                      ? 'cursor-not-allowed border-[#E4E4E4] bg-[#F5F5F5] text-[#A3A3A3]'
+                      : motion === s.value ? btnActive : btnInactive
+                  )}
                   style={{ height: 34 }}
                 >
                   {s.label}

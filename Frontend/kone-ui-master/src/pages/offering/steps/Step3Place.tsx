@@ -45,7 +45,7 @@ export default function Step3Place() {
           params: { session_id: sessionId, project_id: projectId },
         })
         if (data.status === 'preview_ready') {
-          setCurrentOffering({ ...currentOffering, outputImageUrl: `${data.preview_url}?v=${Date.now()}`, renderComplete: true, componentPins: [] })
+          setCurrentOffering({ ...currentOffering, outputImageUrl: `${data.preview_url}?v=${Date.now()}`, renderComplete: true, componentPins: data.component_pins ?? [] })
           return
         }
         if (data.status === 'failed') {
@@ -91,7 +91,7 @@ export default function Step3Place() {
         <div className="mx-8 mb-8 flex min-h-[360px] flex-col items-center justify-center gap-4 rounded-lg border border-[#E4E4E4] bg-white">
           <div className="h-7 w-7 animate-spin rounded-full border-2 border-[#DBEAFE] border-t-[#1450F5]" />
           <p className="text-sm font-medium text-[#111827]">Generating final preview...</p>
-          <p className="text-xs text-[#9CA3AF]">The preview appears here after the Python pipeline is complete.</p>
+          <p className="text-xs text-[#9CA3AF]">The preview appears here after the process is complete.</p>
         </div>
       </div>
     )
