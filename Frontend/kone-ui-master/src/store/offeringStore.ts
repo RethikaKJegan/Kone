@@ -195,7 +195,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
   setComponents: async (environments, components) => {
     const { currentOffering } = get()
     if (!currentOffering) return
-    const selectedComponents = components.slice(0, 1)
+    const selectedComponents = components
     const updates: Partial<Offering> = {
       environments,
       selectedComponents,

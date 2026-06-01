@@ -16,7 +16,6 @@ from PIL import Image
 from pydantic import BaseModel
 
 from input_validation import validate_elevator_or_cop_upload, validate_input_image
-from video import render_elevator_video
 
 app = FastAPI()
 
@@ -91,17 +90,25 @@ def public_status(status: str, error: Any = None) -> dict[str, Any]:
 def precheck(payload: ProjectPayload):
     image_path = Path(payload.storage_dir) / "uploads" / "input.jpg"
     image = Image.open(image_path).convert("RGB")
+    image.thumbnail((900, 900), Image.Resampling.LANCZOS)
     image_array = np.asarray(image)
     result = validate_input_image(image_array, {})
     relevance = validate_elevator_or_cop_upload(image_array, result)
     ok = bool(relevance.get("valid"))
-    write_status(payload.storage_dir, public_status("precheck_passed" if ok else "precheck_failed", None if ok else relevance))
+    reason = None
+    if not ok:
+        reason = relevance.get("reason") or "Invalid image. Please upload a valid elevator image."
+    failure = None if ok else {
+        "reason": reason,
+        "relevance": relevance,
+    }
+    write_status(payload.storage_dir, public_status("precheck_passed" if ok else "precheck_failed", failure))
     return {
         "ok": ok,
         "next_action": "continue" if ok else "reupload",
-        "image_type": relevance.get("image_type"),
-        "message": relevance.get("reason"),
-        "reason": None if ok else relevance.get("reason", "Image failed precheck"),
+        "image_type": "ELEVATOR_IMAGE" if ok else relevance.get("image_type"),
+        "message": None if ok else reason,
+        "reason": None if ok else reason,
         "validation": result,
         "relevance": relevance,
     }
@@ -153,6 +160,8 @@ def run_components(payload: ProjectPayload):
 
 @app.post("/generate-video")
 def generate_video(payload: ProjectPayload):
+    from video import render_elevator_video
+
     storage = Path(payload.storage_dir)
     preview_image = storage / "preview" / "final_output.png"
     pipeline_dir = storage / "pipeline"

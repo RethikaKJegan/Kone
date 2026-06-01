@@ -72,9 +72,9 @@ COMPONENT_REPLACEMENT_PRESETS: dict[str, dict[str, Any]] = {
     "ceiling": {
         "id": "ceiling",
         "asset": "__generated_ceiling_panel__",
-        "component_type": "elevator_ceiling",
-        "target_keywords": ["elevator ceiling", "ceiling light", "elevator_ceiling"],
-        "detection_labels": ["elevator ceiling", "ceiling light", "elevator_ceiling", "elevator_door", "elevator_cabin"],
+        "component_type": "elevator_cabin",
+        "target_keywords": ["elevator interior", "elevator cabin", "inside elevator", "elevator_cabin"],
+        "detection_labels": ["elevator interior", "elevator cabin", "inside elevator", "elevator_door", "elevator_cabin"],
     },
 }
 
@@ -266,7 +266,7 @@ def run(config_path: str | Path) -> None:
             if (
                 perspective_cfg.get("enabled", False)
                 and perspective_cfg.get("auto", True)
-                and placement_debug.get("placement_mode") not in {"existing_panel", "existing_component", "existing_ceiling"}
+                and placement_debug.get("placement_mode") not in {"existing_panel", "existing_component", "existing_ceiling", "existing_interior", "existing_door"}
                 and placement_debug.get("homography_alignment", {}).get("mode") != "existing_panel_rectified_homography"
                 and placement_debug.get("homography_alignment", {}).get("mode") != "existing_ceiling_rectified_homography"
             ):
@@ -291,7 +291,7 @@ def run(config_path: str | Path) -> None:
             cv2.imwrite(str(panel_mask_path), combined_panel_mask)
         save_json(run_dir / "component_placements.json", component_placements)
         skip_global_perspective = any(
-            placement.get("placement_mode") in {"existing_panel", "existing_component", "existing_ceiling"}
+            placement.get("placement_mode") in {"existing_panel", "existing_component", "existing_ceiling", "existing_interior", "existing_door"}
             for placement in component_placements
         )
         perspective_outputs = None

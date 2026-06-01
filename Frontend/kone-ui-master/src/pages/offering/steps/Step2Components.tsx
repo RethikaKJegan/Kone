@@ -7,7 +7,7 @@ import { cn } from '../../../lib/utils'
 import type { Environment, ComponentKey } from '../../../types'
 
 const ENV_COMPONENTS: Record<Environment, ComponentKey[]> = {
-  car: ['cop', 'ceiling'],
+  car: ['cop'],
   lobby: ['lci', 'door', 'ceiling'],
 }
 
@@ -40,7 +40,9 @@ export default function Step2Components() {
     setComps(prev => prev.filter(c => newAvailable.includes(c)))
   }
 
-  const toggleComp = (k: ComponentKey) => setComps([k])
+  const toggleComp = (k: ComponentKey) => {
+    setComps(prev => prev.includes(k) ? prev.filter(c => c !== k) : [...prev, k])
+  }
 
   const canContinue = envs.length > 0 && comps.length > 0
 
@@ -57,11 +59,11 @@ export default function Step2Components() {
 
   const envHint =
     envs.includes('car') && envs.includes('lobby')
-      ? 'COP, Ceiling, LCI, and Door are available'
+      ? 'COP, Elevator Interior, LCI, and Door are available'
       : envs.includes('car')
-        ? 'COP and Ceiling are available for Car'
+        ? 'COP is available for Car'
         : envs.includes('lobby')
-          ? 'LCI, Door, and Ceiling are available for Lobby'
+          ? 'LCI, Door, and Elevator Interior are available for Lobby'
           : 'Select at least one environment'
 
   return (

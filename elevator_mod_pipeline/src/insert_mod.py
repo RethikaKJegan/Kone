@@ -76,9 +76,9 @@ def preselect_mod_panel_placement(
     removal_mask: np.ndarray | None = None,
 ) -> list[int] | None:
     requested_type = cfg.get("_requested_component_type")
-    if requested_type not in {"elevator_ceiling", "elevator_door"} and not _is_elevator_mod_panel_request(cfg, mod_path):
+    if requested_type not in {"elevator_ceiling", "elevator_cabin", "elevator_door"} and not _is_elevator_mod_panel_request(cfg, mod_path):
         return None
-    if requested_type not in {"elevator_ceiling", "elevator_door"}:
+    if requested_type not in {"elevator_ceiling", "elevator_cabin", "elevator_door"}:
         cfg["_requested_component_type"] = "elevator_mod_panel"
     mod = close_internal_alpha_holes(load_image_rgba(mod_path))
     height, width = image_rgb.shape[:2]
@@ -140,19 +140,29 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
                 "placement_mode": "existing_ceiling",
             }
             return box, reason
+        if requested_type == "elevator_cabin":
+            box, reason = select_interior_target_box(detections["detections"], width, height)
+            cfg["_placement_debug"] = {
+                "requested_component_type": requested_type,
+                "selected_replacement_target_type": "elevator_cabin",
+                "selected_replacement_target_bbox": box,
+                "inpaint_bbox": box,
+                "scale_to_target_bbox": True,
+                "placement_mode": "existing_interior",
+            }
+            return box, reason
         if requested_type == "elevator_door":
-            det = _largest_detection_of_type(detections["detections"], {"elevator_door"}, width, height, 0.70)
-            if det:
-                box = padded_box([int(round(v)) for v in det["box_xyxy"]], width, height, int(ins.get("existing_panel_padding_px", 2)))
+            box, reason = select_door_opening_target_box(detections["detections"], width, height)
+            if box:
                 cfg["_placement_debug"] = {
                     "requested_component_type": requested_type,
                     "selected_replacement_target_type": "elevator_door",
                     "selected_replacement_target_bbox": box,
                     "inpaint_bbox": box,
                     "scale_to_target_bbox": True,
-                    "placement_mode": "existing_component",
+                    "placement_mode": "existing_door",
                 }
-                return box, "detected_elevator_door"
+                return box, reason
         is_mod_panel_request = requested_type == "elevator_mod_panel" or (
             not requested_type and _needs_contextual_panel_fallback(ins.get("target_keywords", []))
         )
@@ -260,6 +270,28 @@ def select_ceiling_target_box(detections: list[dict[str, Any]], width: int, heig
         return padded_box(box, width, height, 2), "synthesized_ceiling_from_elevator_interior"
 
     return [int(width * 0.14), int(height * 0.04), int(width * 0.86), int(height * 0.20)], "fallback_top_ceiling_band"
+
+
+def select_interior_target_box(detections: list[dict[str, Any]], width: int, height: int) -> tuple[list[int], str]:
+    door_box, door_reason = select_door_opening_target_box(detections, width, height)
+    if door_box:
+        return door_box, f"{door_reason}_for_elevator_interior"
+
+    cabin = _largest_detection_of_type(detections, {"elevator_cabin"}, width, height, 0.75)
+    if cabin:
+        return padded_box([int(round(v)) for v in cabin["box_xyxy"]], width, height, 2), "detected_elevator_interior"
+
+    raise RuntimeError("No valid elevator interior placement target detected")
+
+
+def select_door_opening_target_box(detections: list[dict[str, Any]], width: int, height: int) -> tuple[list[int] | None, str]:
+    door = _largest_detection_of_type(detections, {"elevator_door"}, width, height, 0.70)
+    if not door:
+        return None, "no_detected_elevator_door_opening"
+    box = padded_box([int(round(v)) for v in door["box_xyxy"]], width, height, 0)
+    if box[2] - box[0] <= 8 or box[3] - box[1] <= 8:
+        return None, "invalid_elevator_door_opening"
+    return box, "detected_elevator_door_opening"
 
 
 def _largest_detection_of_type(
@@ -881,6 +913,34 @@ def _warp_mod_to_scene(
     mh, mw = mod.shape[:2]
     mode = cfg["insertion"].get("size_mode", "fit_box")
     placement_debug = cfg.get("_placement_debug", {})
+    if placement_debug.get("selected_replacement_target_type") in {"elevator_cabin", "elevator_door"} and placement_debug.get("scale_to_target_bbox"):
+        scale = max(box_w / max(mw, 1), box_h / max(mh, 1)) * float(cfg["insertion"].get("target_bbox_fill_ratio", 1.0))
+        scale, scale_clamp_debug = clamp_insertion_scale(scale, [mw, mh], [x1, y1, x2, y2], out_hw, cfg)
+        resized_w, resized_h = max(box_w, int(mw * scale)), max(box_h, int(mh * scale))
+        mod = cv2.resize(mod, (resized_w, resized_h), interpolation=cv2.INTER_LANCZOS4)
+        crop_x = max(0, (resized_w - box_w) // 2)
+        crop_y = max(0, (resized_h - box_h) // 2)
+        mod = mod[crop_y:crop_y + box_h, crop_x:crop_x + box_w]
+        validate_insertion_size([x1, y1, x2, y2], [box_w, box_h], out_hw, cfg)
+        placement_debug["insertion_scale_factor"] = float(scale)
+        placement_debug["insertion_scale_reason"] = "cover_detected_elevator_opening_bbox"
+        placement_debug["opening_cover_crop_xywh"] = [int(crop_x), int(crop_y), int(box_w), int(box_h)]
+        if scale_clamp_debug:
+            placement_debug.update(scale_clamp_debug)
+        placement_debug["insertion_size_validation_status"] = "passed"
+        quad, homography_debug = build_wall_aligned_destination_quad(
+            image_rgb=image_rgb,
+            box=[x1, y1, x2, y2],
+            target_box=[x1, y1, x2, y2],
+            geometry=geometry,
+            cfg=cfg,
+            out_hw=out_hw,
+        )
+        placement_debug["final_insertion_bbox"] = [int(x1), int(y1), int(x2), int(y2)]
+        placement_debug["homography_destination_quad"] = quad.round(3).tolist()
+        placement_debug["homography_alignment"] = homography_debug
+        cfg["_placement_debug"] = placement_debug
+        return warp_rgba_to_quad(mod, quad, out_hw)
     if placement_debug.get("scale_to_target_bbox"):
         scale = min(box_w / max(mw, 1), box_h / max(mh, 1)) * float(cfg["insertion"].get("target_bbox_fill_ratio", 0.96))
         scale_reason = "fit_detected_or_synthesized_target_bbox"
@@ -951,7 +1011,7 @@ def build_wall_aligned_destination_quad(
     cx = (x1 + x2) * 0.5
     cy = (y1 + y2) * 0.5
     placement_debug = cfg.get("_placement_debug", {})
-    if placement_debug.get("placement_mode") in {"existing_panel", "existing_ceiling"}:
+    if placement_debug.get("placement_mode") in {"existing_panel", "existing_ceiling", "existing_interior", "existing_door"}:
         quad = np.array(
             [
                 [x1, y1],
@@ -1087,6 +1147,8 @@ def clamp_insertion_scale(
         max_area_ratio = max(max_area_ratio, 0.70)
     elif target_type == "elevator_ceiling":
         max_area_ratio = max(max_area_ratio, 0.35)
+    elif target_type == "elevator_cabin":
+        max_area_ratio = max(max_area_ratio, 0.75)
     max_area_px = max(1.0, image_w * image_h * max_area_ratio)
     projected_area = (mod_w * original_scale) * (mod_h * original_scale)
     if projected_area > max_area_px:
@@ -1128,6 +1190,8 @@ def validate_insertion_size(target_box: list[int], insert_wh: list[int], out_hw:
         max_area_ratio = max(max_area_ratio, 0.70)
     elif target_type == "elevator_ceiling":
         max_area_ratio = max(max_area_ratio, 0.35)
+    elif target_type == "elevator_cabin":
+        max_area_ratio = max(max_area_ratio, 0.75)
     if area_ratio > max_area_ratio:
         raise RuntimeError(f"Insertion size validation failed: area_ratio={area_ratio:.3f} > {max_area_ratio:.3f}")
     if cfg.get("_placement_debug", {}).get("placement_mode") == "existing_panel":

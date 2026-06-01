@@ -66,13 +66,22 @@ const uploadImage = catchAsync(async (req, res) => {
 
 const precheck = catchAsync(async (req, res) => {
   const { session_id: sessionId, project_id: projectId, project_name: projectName } = req.body;
-  const { data } = await axios.post(`${LOGIC_URL}/precheck`, {
-    session_id: sessionId,
-    project_id: projectId,
-    project_name: projectName,
-    storage_dir: projectDir(sessionId, projectId),
-  });
-  res.send(data);
+  const root = projectDir(sessionId, projectId);
+  try {
+    const { data } = await axios.post(`${LOGIC_URL}/precheck`, {
+      session_id: sessionId,
+      project_id: projectId,
+      project_name: projectName,
+      storage_dir: root,
+    }, { timeout: 15000 });
+    res.send(data);
+  } catch (error) {
+    const message = error.code === 'ECONNABORTED'
+      ? 'Image validation timed out. Please upload a clear elevator image and try again.'
+      : 'Could not validate this image. Please upload a valid elevator image.';
+    await writeStatus(root, { status: 'precheck_failed', preview_url: null, video_url: null, download_url: null, error: message });
+    res.send({ ok: false, next_action: 'reupload', reason: message, message });
+  }
 });
 
 const runComponents = catchAsync(async (req, res) => {

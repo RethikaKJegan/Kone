@@ -39,7 +39,7 @@ export function Sidebar() {
   }
 
   const completedSteps = getCompletedSteps()
-  const hiddenSteps: OfferingStep[] = currentOffering?.renderComplete ? [] : [4]
+  const hiddenSteps: OfferingStep[] = []
 
   return (
     <aside className="flex h-screen w-[300px] shrink-0 flex-col bg-[#0C0C0C] max-xl:w-14" style={{ borderRight: '1px solid rgba(255,255,255,0.07)' }}>

@@ -3,8 +3,8 @@ import type { ComponentItem, Environment, OfferingStep, BrochureSection, User } 
 export const KONE_COMPONENTS: ComponentItem[] = [
   {
     key: 'ceiling',
-    label: 'Ceiling',
-    description: 'KONE ceiling panel unit',
+    label: 'Elevator Interior',
+    description: 'KONE elevator interior unit',
     imageUrl: '/components/ceiling.jpg',
   },
   {

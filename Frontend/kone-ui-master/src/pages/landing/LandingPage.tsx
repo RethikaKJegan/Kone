@@ -161,7 +161,7 @@ const STYLES = `
 // ── Data ─────────────────────────────────────────────────────────────────────
 const features = [
   { num: '01', title: 'AI Placement',           desc: 'Upload any building photo and let spatial intelligence position components automatically.' },
-  { num: '02', title: 'Component Visualisation', desc: 'See exactly how Ceiling, COP, LCI, and Door components look in the real environment.' },
+  { num: '02', title: 'Component Visualisation', desc: 'See exactly how Elevator Interior, COP, LCI, and Door components look in the real environment.' },
   { num: '03', title: 'Annotated Preview',       desc: 'Generate labelled previews with per-component callouts, togglable on the fly.' },
   { num: '04', title: 'Video Export',            desc: 'Render cinematic zoom or pan videos from your static composite at up to 1080p.' },
   { num: '05', title: 'Sales Brochure',          desc: 'Build a client-ready PDF brochure combining your renders with structured sales copy.' },
