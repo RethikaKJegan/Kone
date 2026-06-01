@@ -40,6 +40,11 @@ export default function Step6Download() {
           session_id: sessionId,
           project_id: projectId,
           project_name: currentOffering.name,
+          video_options: {
+            quality: currentOffering.videoQuality,
+            motion: currentOffering.videoMotionStyle,
+            speed: currentOffering.videoSpeed,
+          },
         }).then(() => sessionId))
         .then(async sessionId => {
           for (;;) {
@@ -80,7 +85,10 @@ export default function Step6Download() {
     if (isGuest) {
       const sessionId = await getGuestSessionId()
       const base = import.meta.env.VITE_API_BASE_URL || '/api/v1'
-      window.location.href = downloadUrl ?? `${base}/guest/download?session_id=${encodeURIComponent(sessionId)}&project_id=${encodeURIComponent(projectId ?? '')}`
+      const quality = currentOffering?.videoQuality ?? '1080p'
+      const href = downloadUrl ?? `${base}/guest/download?session_id=${encodeURIComponent(sessionId)}&project_id=${encodeURIComponent(projectId ?? '')}`
+      const separator = href.includes('?') ? '&' : '?'
+      window.location.href = `${href}${separator}video_quality=${encodeURIComponent(quality)}`
       return
     }
     if (!url) {

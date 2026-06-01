@@ -44,6 +44,15 @@ function publicStorageUrl(sessionId, projectId, filePath) {
   return filePath ? `/storage/guest/${safeName(sessionId)}/${safeName(projectId)}/${filePath}` : null;
 }
 
+async function readJsonIfExists(file) {
+  if (!fs.existsSync(file)) return {};
+  try {
+    return JSON.parse(await fsp.readFile(file, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+
 const createSession = (req, res) => {
   res.send({ session_id: `guest_${crypto.randomUUID()}` });
 };
@@ -139,16 +148,36 @@ const generateVideo = catchAsync(async (req, res) => {
 });
 
 const finalize = catchAsync(async (req, res) => {
-  const { session_id: sessionId, project_id: projectId } = req.body;
+  const { session_id: sessionId, project_id: projectId, project_name: projectName, video_options: videoOptions = {} } = req.body;
   const root = projectDir(sessionId, projectId);
   const downloads = path.join(root, 'downloads');
   await fsp.mkdir(downloads, { recursive: true });
 
   const preview = path.join(root, 'preview', 'final_output.png');
   const video = path.join(root, 'video', 'elevator_animation.mp4');
+  const videoMeta = path.join(root, 'video', 'elevator_animation.json');
+  const requestedQuality = ['360p', '480p', '720p', '1080p'].includes(videoOptions.quality) ? videoOptions.quality : '1080p';
   if (!fs.existsSync(preview)) return res.status(400).send({ ok: false, message: 'Preview file is not ready' });
 
+  const currentVideoMeta = await readJsonIfExists(videoMeta);
+  if (!fs.existsSync(video) || currentVideoMeta.quality !== requestedQuality) {
+    const generation = await axios.post(`${LOGIC_URL}/generate-video`, {
+      session_id: sessionId,
+      project_id: projectId,
+      project_name: projectName,
+      storage_dir: root,
+      video_options: {
+        ...videoOptions,
+        quality: requestedQuality,
+      },
+    }, { timeout: 0 });
+    if (!generation.data?.ok || !fs.existsSync(video)) {
+      return res.status(400).send({ ok: false, message: generation.data?.error || 'Video file is not ready' });
+    }
+  }
+
   await fsp.copyFile(preview, path.join(downloads, 'final_output.png'));
+  const downloadedVideoMeta = await readJsonIfExists(videoMeta);
   if (fs.existsSync(video)) {
     await fsp.copyFile(video, path.join(downloads, 'elevator_animation.mp4'));
   }
@@ -156,6 +185,8 @@ const finalize = catchAsync(async (req, res) => {
     session_id: sessionId,
     project_id: projectId,
     video_included: fs.existsSync(video),
+    requested_video_quality: requestedQuality,
+    downloaded_video_quality: downloadedVideoMeta.quality || null,
   }, null, 2));
   await writeStatus(root, {
     status: 'ready_for_download',
