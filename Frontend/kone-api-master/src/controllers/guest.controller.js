@@ -40,6 +40,23 @@ async function writeStatus(root, status) {
   await fsp.rename(tmp, file);
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function copyFileWithRetry(source, target, attempts = 10) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await fsp.copyFile(source, target);
+      return;
+    } catch (error) {
+      const retryable = ['EBUSY', 'EPERM', 'ENOENT'].includes(error.code);
+      if (!retryable || attempt === attempts) throw error;
+      await sleep(150 * attempt);
+    }
+  }
+}
+
 function publicStorageUrl(sessionId, projectId, filePath) {
   return filePath ? `/storage/guest/${safeName(sessionId)}/${safeName(projectId)}/${filePath}` : null;
 }
@@ -207,9 +224,9 @@ const finalize = catchAsync(async (req, res) => {
     }
   }
 
-  await fsp.copyFile(preview, path.join(downloads, 'final_output.png'));
+  await copyFileWithRetry(preview, path.join(downloads, 'final_output.png'));
   if (fs.existsSync(video)) {
-    await fsp.copyFile(video, path.join(downloads, 'elevator_animation.mp4'));
+    await copyFileWithRetry(video, path.join(downloads, 'elevator_animation.mp4'));
   }
   await writeStatus(root, {
     status: 'ready_for_download',

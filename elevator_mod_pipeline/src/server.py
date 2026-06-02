@@ -55,7 +55,11 @@ def workspace_root() -> Path:
 
 
 def selected_component_asset_paths(component_assets: dict[str, str] | None) -> dict[str, str]:
-    default_dir = workspace_root() / "Frontend" / "kone-ui-master" / "public" / "components"
+    frontend_component_dirs = [
+        workspace_root() / "Frontend" / "kone-ui-master" / "public" / "components",
+        repo_root().parents[1] / "Frontend" / "kone-ui-master" / "public" / "components",
+    ]
+    default_dir = next((candidate for candidate in frontend_component_dirs if candidate.exists()), frontend_component_dirs[0])
     default_files = {
         "ceiling": default_dir / "ceiling.jpg",
         "lci": default_dir / "lci.png",
@@ -67,7 +71,12 @@ def selected_component_asset_paths(component_assets: dict[str, str] | None) -> d
         raw = (component_assets or {}).get(component)
         candidates: list[Path] = []
         if raw and raw.startswith("/components/"):
-            candidates.append(workspace_root() / "Frontend" / "kone-ui-master" / "public" / raw.lstrip("/"))
+            candidates.extend(
+                base.parent / raw.lstrip("/")
+                for base in frontend_component_dirs
+            )
+        elif raw:
+            candidates.append(Path(raw))
         candidates.append(default_path)
         for candidate in candidates:
             if candidate.exists():
