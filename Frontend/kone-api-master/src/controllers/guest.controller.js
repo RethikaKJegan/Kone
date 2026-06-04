@@ -9,6 +9,8 @@ const catchAsync = require('../utils/catchAsync');
 const API_ROOT = path.join(__dirname, '..', '..');
 const STORAGE_ROOT = path.join(API_ROOT, 'storage');
 const LOGIC_URL = process.env.LOGIC_URL || 'http://localhost:8001';
+const componentRunQueues = new Map();
+const latestComponentRunKeys = new Map();
 
 function safeName(value) {
   return String(value || '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
@@ -128,18 +130,49 @@ const runComponents = catchAsync(async (req, res) => {
     selected_components: selectedComponents,
     component_assets: componentAssets,
     environments,
+    preview_request_key: previewRequestKey,
   } = req.body;
   const root = projectDir(sessionId, projectId);
-  await writeStatus(root, { status: 'processing', preview_url: null, video_url: null, download_url: null, error: null });
-  axios.post(`${LOGIC_URL}/run-components`, {
-    session_id: sessionId,
-    project_id: projectId,
-    project_name: projectName,
-    storage_dir: root,
-    selected_components: selectedComponents,
-    component_assets: componentAssets,
-    environments,
-  }).catch((error) => writeStatus(root, { status: 'failed', preview_url: null, video_url: null, download_url: null, error: error.message }));
+  const queueKey = root;
+  const latestKey = previewRequestKey || null;
+  latestComponentRunKeys.set(queueKey, latestKey);
+  const requestStatus = { status: 'processing', preview_url: null, video_url: null, download_url: null, error: null, preview_request_key: previewRequestKey || null };
+  await writeStatus(root, requestStatus);
+  const previousRun = componentRunQueues.get(queueKey) || Promise.resolve();
+  const queuedRun = previousRun
+    .catch(() => {})
+    .then(async () => {
+      if (latestComponentRunKeys.get(queueKey) !== latestKey) return;
+      try {
+        await axios.post(`${LOGIC_URL}/run-components`, {
+          session_id: sessionId,
+          project_id: projectId,
+          project_name: projectName,
+          storage_dir: root,
+          selected_components: selectedComponents,
+          component_assets: componentAssets,
+          environments,
+          preview_request_key: previewRequestKey,
+        });
+        const current = await readStatus(root);
+        if (latestComponentRunKeys.get(queueKey) === latestKey) {
+          await writeStatus(root, { ...current, preview_request_key: latestKey });
+        } else {
+          await writeStatus(root, { status: 'processing', preview_url: null, video_url: null, download_url: null, error: null, preview_request_key: latestComponentRunKeys.get(queueKey) || null });
+        }
+      } catch (error) {
+        if (latestComponentRunKeys.get(queueKey) === latestKey) {
+          await writeStatus(root, { status: 'failed', preview_url: null, video_url: null, download_url: null, error: error.message, preview_request_key: latestKey });
+        }
+      }
+    })
+    .finally(() => {
+      if (componentRunQueues.get(queueKey) === queuedRun) {
+        componentRunQueues.delete(queueKey);
+        latestComponentRunKeys.delete(queueKey);
+      }
+    });
+  componentRunQueues.set(queueKey, queuedRun);
   res.send({ ok: true, status: 'processing' });
 });
 

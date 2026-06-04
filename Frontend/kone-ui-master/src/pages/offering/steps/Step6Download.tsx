@@ -67,7 +67,7 @@ async function downloadAnnotatedImage(imageUrl: string, pins: ComponentPin[], la
 export default function Step6Download() {
   const { projectId, offeringId } = useParams()
   const navigate = useNavigate()
-  const { currentOffering, triggerRender, completeOffering, goToStep } = useOfferingStore()
+  const { currentOffering, triggerRender, completeOffering, goToStep, setDownloadReady } = useOfferingStore()
   const { isGuest } = useAuthStore()
   const [rendered, setRendered] = useState(currentOffering?.renderComplete ?? false)
   const [annotationsOn, setAnnotationsOn] = useState(true)
@@ -77,6 +77,13 @@ export default function Step6Download() {
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null)
 
   useEffect(() => {
+    if (!currentOffering?.outputVideoUrl) {
+      toast('Generate the video preview before opening Downloads.', 'destructive')
+      goToStep(5)
+      navigate(`/projects/${projectId}/offerings/${offeringId}/step/5`, { replace: true })
+      return
+    }
+
     if (isGuest && projectId && currentOffering) {
       getGuestSessionId()
         .then(sessionId => apiClient.post('/guest/finalize', {
@@ -97,6 +104,7 @@ export default function Step6Download() {
             })
             if (data.status === 'ready_for_download') {
               setDownloadUrl(data.download_url)
+              setDownloadReady(data.download_url)
               setRendered(true)
               toast('Your outputs are ready to download')
               return

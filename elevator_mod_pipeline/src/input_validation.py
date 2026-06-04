@@ -12,18 +12,25 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "fail_on_invalid": True,
     "require_elevator": True,
     "weights": {
-        "perspective": 0.40,
-        "visibility": 0.20,
+        "perspective": 0.28,
+        "visibility": 0.15,
         "sharpness": 0.10,
-        "exposure": 0.10,
-        "context": 0.10,
-        "crop_scale": 0.10,
+        "exposure": 0.12,
+        "context": 0.08,
+        "crop_scale": 0.07,
+        "composition": 0.08,
+        "technical_defects": 0.07,
+        "geometric_defects": 0.05,
     },
     "hard_fails": {
         "perspective_fail": 0.62,
         "perspective_review": 0.68,
         "visibility_min": 0.40,
         "sharpness_extreme_min": 0.05,
+        "exposure_min": 0.30,
+        "composition_min": 0.30,
+        "technical_defects_min": 0.35,
+        "geometric_defects_min": 0.35,
         "min_short_side": 420,
     },
     "thresholds": {
@@ -81,6 +88,26 @@ def validate_input_image(rgb: np.ndarray, cfg: dict[str, Any]) -> dict[str, Any]
     validation_cfg = merged_validation_config(cfg)
     h, w = rgb.shape[:2]
     short_side = min(h, w)
+    tilt = image_tilt_degrees(rgb)
+    if tilt is not None and (abs(tilt.get("signed_degrees", 0.0)) > 4.0 or tilt.get("absolute_degrees", 0.0) > 6.0):
+        message = "Image must be straight. Please upload a non-tilted image."
+        return {
+            "result": "FAIL",
+            "valid": False,
+            "final_score": 0.0,
+            "metrics": {
+                "tilt_degrees": round(float(tilt.get("signed_degrees", 0.0)), 4),
+                "absolute_tilt_degrees": round(float(tilt.get("absolute_degrees", 0.0)), 4),
+            },
+            "reasons": {
+                "tilt": [message],
+                "hard_fail": [message],
+                "review": [],
+                "suggestions": [message],
+            },
+            "image_size": {"width": w, "height": h, "short_side": short_side},
+            "note": "Image tilt gate. Straight images continue to the existing quality/perspective validator.",
+        }
     metrics: dict[str, float] = {}
     reasons: dict[str, list[str]] = {}
 
@@ -90,6 +117,9 @@ def validate_input_image(rgb: np.ndarray, cfg: dict[str, Any]) -> dict[str, Any]
     metrics["exposure"], reasons["exposure"] = exposure_score(rgb)
     metrics["context"], reasons["context"] = context_score(rgb)
     metrics["crop_scale"], reasons["crop_scale"] = crop_scale_score(rgb)
+    metrics["composition"], reasons["composition"] = composition_score(rgb)
+    metrics["technical_defects"], reasons["technical_defects"] = technical_defects_score(rgb)
+    metrics["geometric_defects"], reasons["geometric_defects"] = geometric_defects_score(rgb)
 
     final_score = clamp(sum(metrics[k] * validation_cfg["weights"][k] for k in validation_cfg["weights"]))
     hard_fail: list[str] = []
@@ -103,7 +133,15 @@ def validate_input_image(rgb: np.ndarray, cfg: dict[str, Any]) -> dict[str, Any]
     if metrics["visibility"] < hard_fails["visibility_min"]:
         hard_fail.append("Visibility below hard-fail threshold.")
     if metrics["sharpness"] < hard_fails["sharpness_extreme_min"]:
-        hard_fail.append("Sharpness is extremely poor.")
+        hard_fail.append("Image is too blurry for reliable processing.")
+    if metrics["exposure"] < hard_fails["exposure_min"]:
+        hard_fail.append("Image exposure is unacceptable. Avoid blown highlights, glare, or very dim lighting.")
+    if metrics["composition"] < hard_fails["composition_min"]:
+        hard_fail.append("Image composition is unacceptable. Keep the elevator subject centered and fully visible.")
+    if metrics["technical_defects"] < hard_fails["technical_defects_min"]:
+        hard_fail.append("Technical image defects are too severe for reliable processing.")
+    if metrics["geometric_defects"] < hard_fails["geometric_defects_min"]:
+        hard_fail.append("Geometric defects are too severe. Retake with straighter vertical and horizontal edges.")
     if short_side < hard_fails["min_short_side"]:
         hard_fail.append(f"Resolution too low. Shortest side = {short_side}px.")
 
@@ -130,6 +168,54 @@ def validate_input_image(rgb: np.ndarray, cfg: dict[str, Any]) -> dict[str, Any]
         "image_size": {"width": w, "height": h, "short_side": short_side},
         "note": "Quality/perspective validator. Object correctness is handled by detector; elevator presence is checked after detection.",
     }
+
+
+def image_tilt_degrees(rgb: np.ndarray) -> dict[str, float] | None:
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    h, w = gray.shape
+    edges = cv2.Canny(gray, 60, 160)
+    lines = cv2.HoughLinesP(
+        edges,
+        1,
+        np.pi / 180,
+        threshold=max(45, int(min(h, w) * 0.08)),
+        minLineLength=max(35, int(min(h, w) * 0.08)),
+        maxLineGap=14,
+    )
+    if lines is None:
+        return None
+
+    deviations: list[float] = []
+    absolute_deviations: list[float] = []
+    lengths: list[float] = []
+    for line in lines[:, 0]:
+        x1, y1, x2, y2 = [int(v) for v in line]
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.hypot(dx, dy)
+        if length < min(h, w) * 0.08:
+            continue
+        angle = math.degrees(math.atan2(dy, dx))
+        if abs(angle) < 45:
+            continue
+        deviation = angle - 90 if angle >= 0 else angle + 90
+        deviations.append(deviation)
+        absolute_deviations.append(abs(deviation))
+        lengths.append(length)
+    if len(deviations) < 2:
+        return None
+
+    order = np.argsort(deviations)
+    sorted_devs = np.asarray(deviations, dtype=np.float32)[order]
+    sorted_weights = np.asarray(lengths, dtype=np.float32)[order]
+    midpoint = float(sorted_weights.sum() / 2)
+    signed = float(sorted_devs[np.searchsorted(np.cumsum(sorted_weights), midpoint)])
+
+    abs_order = np.argsort(absolute_deviations)
+    sorted_abs_devs = np.asarray(absolute_deviations, dtype=np.float32)[abs_order]
+    sorted_abs_weights = np.asarray(lengths, dtype=np.float32)[abs_order]
+    absolute = float(sorted_abs_devs[np.searchsorted(np.cumsum(sorted_abs_weights), float(sorted_abs_weights.sum() / 2))])
+    return {"signed_degrees": signed, "absolute_degrees": absolute}
 
 
 def validate_elevator_or_cop_upload(rgb: np.ndarray, quality: dict[str, Any]) -> dict[str, Any]:
@@ -403,6 +489,108 @@ def crop_scale_score(rgb: np.ndarray) -> tuple[float, list[str]]:
     ]
 
 
+def composition_score(rgb: np.ndarray) -> tuple[float, list[str]]:
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    h, w = gray.shape
+    edges = cv2.Canny(gray, 50, 150)
+    ys, xs = np.where(edges > 0)
+    if len(xs) < 80:
+        return 0.25, ["Composition check failed: too little visible structure."]
+    x1, x2 = int(xs.min()), int(xs.max())
+    y1, y2 = int(ys.min()), int(ys.max())
+    subject_cx = (x1 + x2) / 2
+    subject_cy = (y1 + y2) / 2
+    center_offset = math.sqrt(((subject_cx - w / 2) / max(w / 2, 1)) ** 2 + ((subject_cy - h / 2) / max(h / 2, 1)) ** 2)
+    margin = min(x1 / w, (w - x2) / w, y1 / h, (h - y2) / h)
+    coverage = ((x2 - x1 + 1) * (y2 - y1 + 1)) / max(w * h, 1)
+    center_score = 1.0 - clamp(center_offset / 0.75)
+    margin_score = normalize_range(margin, 0.005, 0.060)
+    coverage_score = 1.0 if 0.12 <= coverage <= 0.92 else (normalize_range(coverage, 0.04, 0.12) if coverage < 0.12 else 1.0 - clamp((coverage - 0.92) / 0.08))
+    score = clamp((0.45 * center_score) + (0.30 * margin_score) + (0.25 * coverage_score))
+    reasons = [
+        f"Subject center offset ~= {center_offset:.2f}.",
+        f"Subject border margin ~= {margin:.3f}.",
+        f"Subject coverage ~= {coverage:.2f}.",
+    ]
+    if score < 0.30:
+        reasons.append("Composition is poor; subject may be cropped, off-center, or not visible enough.")
+    else:
+        reasons.append("Composition is acceptable.")
+    return score, reasons
+
+
+def technical_defects_score(rgb: np.ndarray) -> tuple[float, list[str]]:
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    h, w = gray.shape
+    median = cv2.medianBlur(gray, 3)
+    noise = float(np.mean(np.abs(gray.astype(np.float32) - median.astype(np.float32))))
+    block = max(8, min(h, w) // 48)
+    if h > block * 2 and w > block * 2:
+        vertical_a = gray[:, block::block].astype(np.float32)
+        vertical_b = gray[:, block - 1::block].astype(np.float32)
+        vertical_cols = min(vertical_a.shape[1], vertical_b.shape[1])
+        horizontal_a = gray[block::block, :].astype(np.float32)
+        horizontal_b = gray[block - 1::block, :].astype(np.float32)
+        horizontal_rows = min(horizontal_a.shape[0], horizontal_b.shape[0])
+        vertical_blocks = np.abs(vertical_a[:, :vertical_cols] - vertical_b[:, :vertical_cols])
+        horizontal_blocks = np.abs(horizontal_a[:horizontal_rows, :] - horizontal_b[:horizontal_rows, :])
+        blocking = float((vertical_blocks.mean() + horizontal_blocks.mean()) / 2)
+    else:
+        blocking = 0.0
+    saturation_extreme = float(np.mean((hsv[:, :, 1] > 245) | (hsv[:, :, 1] < 2)))
+    noise_score = 1.0 - clamp(noise / 26.0)
+    blocking_score = 1.0 - clamp(blocking / 18.0)
+    color_score = 1.0 - clamp(saturation_extreme / 0.55)
+    score = clamp((0.45 * noise_score) + (0.35 * blocking_score) + (0.20 * color_score))
+    reasons = [
+        f"Noise estimate ~= {noise:.1f}.",
+        f"Compression/blocking estimate ~= {blocking:.1f}.",
+        f"Extreme saturation ratio ~= {saturation_extreme:.2f}.",
+    ]
+    if score < 0.35:
+        reasons.append("Technical defects are too high.")
+    else:
+        reasons.append("Technical defects are acceptable.")
+    return score, reasons
+
+
+def geometric_defects_score(rgb: np.ndarray) -> tuple[float, list[str]]:
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    h, w = gray.shape
+    lines = cv2.HoughLinesP(
+        cv2.Canny(gray, 60, 160),
+        1,
+        np.pi / 180,
+        threshold=max(45, int(min(h, w) * 0.08)),
+        minLineLength=max(35, int(min(h, w) * 0.08)),
+        maxLineGap=14,
+    )
+    if lines is None:
+        return 0.35, ["Geometric check found too few structural lines."]
+    vertical_devs: list[float] = []
+    horizontal_devs: list[float] = []
+    for line in lines[:, 0]:
+        x1, y1, x2, y2 = [int(v) for v in line]
+        angle = abs(math.degrees(math.atan2(y2 - y1, x2 - x1)))
+        angle = angle if angle <= 90 else 180 - angle
+        if angle > 55:
+            vertical_devs.append(abs(90 - angle))
+        elif angle < 35:
+            horizontal_devs.append(abs(angle))
+    if len(vertical_devs) < 2:
+        return 0.30, ["Geometric check failed: too few vertical edges."]
+    vdev = float(np.percentile(vertical_devs, 75))
+    hdev = float(np.percentile(horizontal_devs, 75)) if horizontal_devs else 8.0
+    score = clamp((0.65 * (1.0 - clamp(vdev / 14.0))) + (0.35 * (1.0 - clamp(hdev / 12.0))))
+    reasons = [f"Upper vertical deviation ~= {vdev:.1f} deg.", f"Upper horizontal deviation ~= {hdev:.1f} deg."]
+    if score < 0.35:
+        reasons.append("Geometric defects are too high.")
+    else:
+        reasons.append("Geometric defects are acceptable.")
+    return score, reasons
+
+
 def generate_suggestions(metrics: dict[str, float], result: str, cfg: dict[str, Any]) -> list[str]:
     if result == "PASS":
         return ["Image looks good and is suitable for detection/segmentation processing.", "Perspective, visibility, and quality are acceptable."]
@@ -431,6 +619,12 @@ def generate_suggestions(metrics: dict[str, float], result: str, cfg: dict[str, 
         suggestions.append("Image may be too cropped or scale is poor. Keep the target fully inside the frame.")
     elif metrics["crop_scale"] < 0.60:
         suggestions.append("Crop/scale is moderate. Leave small margins around the visible target.")
+    if metrics.get("composition", 1.0) < 0.40:
+        suggestions.append("Improve composition. Center the elevator subject and keep it fully visible.")
+    if metrics.get("technical_defects", 1.0) < 0.45:
+        suggestions.append("Retake or upload a cleaner image with fewer compression, noise, or color defects.")
+    if metrics.get("geometric_defects", 1.0) < 0.45:
+        suggestions.append("Retake with the camera level so vertical and horizontal edges stay straight.")
     return suggestions or ["Retake with a straighter angle, better focus, and cleaner lighting."]
 
 

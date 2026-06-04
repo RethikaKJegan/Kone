@@ -49,22 +49,28 @@ export default function Step2Components() {
   })
 
   const toggleEnv = (k: Environment) => {
-    const newEnvs = envs.includes(k) ? [] : [k]
-    setEnvs(newEnvs)
+    const newEnvs = [k]
     const newAvailable = getAvailableComponents(newEnvs)
-    setComps(prev => withoutDoorCeilingConflict(prev.filter(c => newAvailable.includes(c))))
+    const newComps = withoutDoorCeilingConflict(comps.filter(c => newAvailable.includes(c)))
+    setEnvs(newEnvs)
+    setComps(newComps)
+    void setComponents(newEnvs, newComps)
   }
 
   const toggleComp = (k: ComponentKey) => {
-    setComps(prev => {
-      if (prev.includes(k)) return prev.filter(c => c !== k)
+    const nextComps = (() => {
+      if (comps.includes(k)) {
+        return comps.filter(c => c !== k)
+      }
       const next = k === 'door'
-        ? prev.filter(c => c !== 'ceiling')
+        ? comps.filter(c => c !== 'ceiling')
         : k === 'ceiling'
-          ? prev.filter(c => c !== 'door')
-          : prev
+          ? comps.filter(c => c !== 'door')
+          : comps
       return [...next, k]
-    })
+    })()
+    setComps(nextComps)
+    void setComponents(envs, nextComps)
   }
 
   const canContinue = envs.length > 0 && comps.length > 0
@@ -111,13 +117,11 @@ export default function Step2Components() {
           <div className="flex flex-wrap gap-2">
             {ENVIRONMENTS.map(env => {
               const isSelected = envs.includes(env.key)
-              const isUnavailable = envs.length > 0 && !isSelected
               return (
                 <button
                   key={env.key}
-                  onClick={() => !isUnavailable && toggleEnv(env.key)}
+                  onClick={() => toggleEnv(env.key)}
                   aria-pressed={isSelected}
-                  disabled={isUnavailable}
                   className={cn(
                     'inline-flex h-9 items-center gap-2 rounded-lg border px-5 text-sm font-semibold transition-all duration-[150ms] select-none',
                     isSelected

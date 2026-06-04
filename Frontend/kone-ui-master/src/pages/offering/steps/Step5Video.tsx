@@ -35,17 +35,13 @@ export default function Step5Video() {
     if (value === 'door-functionality') return
     setMotion(value)
     setLoadFailed(false)
-    if (currentOffering?.outputVideoUrl) {
-      setCurrentOffering({ ...currentOffering, outputVideoUrl: null })
-    }
+    setVideoSettings({ videoMotionStyle: value, videoQuality: quality })
   }
 
   const selectQuality = (value: Quality) => {
     setQuality(value)
     setLoadFailed(false)
-    if (currentOffering?.outputVideoUrl) {
-      setCurrentOffering({ ...currentOffering, outputVideoUrl: null })
-    }
+    setVideoSettings({ videoMotionStyle: motion, videoQuality: value })
   }
 
   const handlePlay = () => {
@@ -82,7 +78,7 @@ export default function Step5Video() {
 
           if (data.status === 'video_ready' && data.video_url) {
             setLoadFailed(false)
-            setCurrentOffering({ ...currentOffering, videoMotionStyle: motion, videoQuality: quality, outputVideoUrl: `${data.video_url}?v=${Date.now()}` })
+            setCurrentOffering({ ...currentOffering, videoMotionStyle: motion, videoQuality: quality, outputVideoUrl: `${data.video_url}?v=${Date.now()}`, videoGenerated: true })
             return
           }
 
@@ -108,6 +104,10 @@ export default function Step5Video() {
       }
       return
     }
+    if (!videoReady) {
+      toast('Generate the video preview before opening Downloads.', 'destructive')
+      return
+    }
     goToStep(6)
     navigate(`/projects/${projectId}/offerings/${offeringId}/step/6`)
   }
@@ -127,6 +127,9 @@ export default function Step5Video() {
         <h2 className="text-heading text-[15px] font-semibold text-[#111827]">5 &nbsp; Video Settings</h2>
         <button onClick={handleBack} className="text-xs font-medium text-[#9CA3AF] transition-colors duration-[120ms] hover:text-[#6B7280]">Back</button>
       </div>
+      <p className="mb-5 text-sm font-medium text-[#374151]">
+        Select your required motion style and quality, then click Generate Preview to see the video.
+      </p>
 
       <div className="flex gap-8">
         {/* Preview */}

@@ -93,6 +93,22 @@ def precheck(payload: ProjectPayload):
     image.thumbnail((900, 900), Image.Resampling.LANCZOS)
     image_array = np.asarray(image)
     result = validate_input_image(image_array, {})
+    if not result.get("valid", False):
+        reason = _validation_message(result)
+        failure = {
+            "reason": reason,
+            "validation": result,
+        }
+        write_status(payload.storage_dir, public_status("precheck_failed", failure))
+        return {
+            "ok": False,
+            "next_action": "reupload",
+            "image_type": "UNUSABLE",
+            "message": reason,
+            "reason": reason,
+            "validation": result,
+            "relevance": None,
+        }
     relevance = validate_elevator_or_cop_upload(image_array, result)
     ok = bool(relevance.get("valid"))
     reason = None
@@ -112,6 +128,17 @@ def precheck(payload: ProjectPayload):
         "validation": result,
         "relevance": relevance,
     }
+
+
+def _validation_message(validation: dict[str, Any]) -> str:
+    reasons = validation.get("reasons", {}) or {}
+    hard_fail = reasons.get("hard_fail") or []
+    if hard_fail:
+        return str(hard_fail[0])
+    suggestions = reasons.get("suggestions") or []
+    if suggestions:
+        return str(suggestions[0])
+    return "Invalid image. Please upload a valid elevator image."
 
 
 @app.post("/run-components")

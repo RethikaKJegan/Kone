@@ -4,6 +4,7 @@ import { useAuthStore } from '../../store/authStore'
 import { useOfferingStore } from '../../store/offeringStore'
 import { StepProgress } from '../shared/StepProgress'
 import { cn } from '../../lib/utils'
+import { toast } from '../../hooks/useToast'
 import type { OfferingStep } from '../../types'
 
 export function Sidebar() {
@@ -28,12 +29,16 @@ export function Sidebar() {
     if (currentOffering.environments.length > 0 && currentOffering.selectedComponents.length > 0) completed.push(2)
     if (currentOffering.componentPins.length > 0) completed.push(3)
     if (currentOffering.componentPins.length > 0) completed.push(4)
-    if (currentOffering.componentPins.length > 0) completed.push(5)
-    if (currentOffering.renderComplete) completed.push(6)
+    if (currentOffering.videoGenerated || currentOffering.outputVideoUrl) completed.push(5)
+    if (currentOffering.downloadUrl) completed.push(6)
     return completed
   }
 
   const handleStepClick = (step: OfferingStep) => {
+    if (step === 6 && !currentOffering?.outputVideoUrl) {
+      toast('Generate the video preview before opening Downloads.', 'destructive')
+      return
+    }
     goToStep(step)
     navigate(`/projects/${projectId}/offerings/${offeringId}/step/${step}`)
   }

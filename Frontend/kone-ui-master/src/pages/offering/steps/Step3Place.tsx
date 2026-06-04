@@ -45,10 +45,26 @@ export default function Step3Place() {
           params: { session_id: sessionId, project_id: projectId },
         })
         if (data.status === 'preview_ready') {
-          setCurrentOffering({ ...currentOffering, outputImageUrl: `${data.preview_url}?v=${Date.now()}`, renderComplete: true, componentPins: data.component_pins ?? [] })
+          if (data.preview_request_key && data.preview_request_key !== currentOffering.previewRequestKey) {
+            await new Promise(resolve => setTimeout(resolve, 2000))
+            continue
+          }
+          setCurrentOffering({
+            ...currentOffering,
+            outputImageUrl: `${data.preview_url}?v=${Date.now()}`,
+            outputVideoUrl: null,
+            renderComplete: true,
+            videoGenerated: false,
+            downloadUrl: null,
+            componentPins: data.component_pins ?? [],
+          })
           return
         }
         if (data.status === 'failed') {
+          if (data.preview_request_key && data.preview_request_key !== currentOffering.previewRequestKey) {
+            await new Promise(resolve => setTimeout(resolve, 2000))
+            continue
+          }
           toast(data.error || 'Preview generation failed')
           return
         }
@@ -59,7 +75,7 @@ export default function Step3Place() {
     return () => {
       stopped = true
     }
-  }, [projectId, currentOffering?.id])
+  }, [projectId, currentOffering?.id, currentOffering?.previewRequestKey])
 
   const handleRestore = async () => {
     setPins([])
