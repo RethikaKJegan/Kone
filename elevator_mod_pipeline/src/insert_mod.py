@@ -37,16 +37,19 @@ def insert_mod_panel(background_path: str | Path, mod_path: str | Path, detectio
     height, width = bg.shape[:2]
     target_box, placement_reason = _target_box(width, height, detections, cfg, mod.shape[:2], removal_mask, bg)
     LOGGER.info("[PLACE] Final component placement: %s reason=%s", target_box, placement_reason)
-    mod = match_mod_appearance_to_cleaned_region(mod, bg, target_box)
+    insertion_box = large_opening_insertion_box(target_box, cfg, bg.shape[:2])
+    mod = match_mod_appearance_to_cleaned_region(mod, bg, insertion_box)
     warped = (
-        _warp_long_panel_to_exact_box(mod, target_box, bg.shape[:2])
+        _warp_long_panel_to_exact_box(mod, insertion_box, bg.shape[:2])
         if _is_long_panel_track_case(cfg, mod.shape[:2])
-        else _warp_mod_to_scene(mod, target_box, geometry, bg.shape[:2], cfg, bg)
+        else _warp_mod_to_scene(mod, insertion_box, geometry, bg.shape[:2], cfg, bg)
     )
 
     fg = warped[:, :, :3]
     alpha = refine_alpha(warped[:, :, 3].astype(np.float32) / 255.0)
-    alpha, mask_debug = validate_or_rebuild_alpha(alpha, target_box, cfg, "harmonization")
+    if is_large_component_insertion(alpha, cfg):
+        alpha = refine_large_component_alpha(alpha, cfg)
+    alpha, mask_debug = validate_or_rebuild_alpha(alpha, insertion_box, cfg, "harmonization")
     fg = harmonize_foreground(fg, bg, alpha)
     fg = match_scene_white_balance(fg)
     fg = add_wall_bounce_light(fg, alpha)
@@ -54,10 +57,13 @@ def insert_mod_panel(background_path: str | Path, mod_path: str | Path, detectio
     fg = edge_integration(fg, alpha)
     fg = transfer_wall_texture(bg, fg, alpha, float(cfg["insertion"]["texture_strength"]))
 
+    frame_source = load_cabin_frame_source(cfg, bg.shape[:2])
     bg_shadowed = apply_realistic_shadow(bg, alpha, float(cfg["insertion"]["shadow_strength"]))
     bg_shadowed = add_contact_shadow(bg_shadowed, alpha, float(cfg["insertion"]["shadow_strength"]))
     bg_shadowed = add_wall_grounding(bg_shadowed, alpha)
     final = alpha_composite(bg_shadowed, fg, alpha)
+    final = add_cabin_recess_integration(bg, final, alpha, insertion_box, cfg)
+    final = restore_cabin_opening_frame(frame_source, final, target_box, insertion_box, cfg)
     final = add_camera_finish(final)
     final = recover_detail(final)
 
@@ -1235,9 +1241,92 @@ def refine_alpha(alpha: np.ndarray) -> np.ndarray:
     return np.clip(cv2.GaussianBlur(alpha, (3, 3), 0.12), 0, 1)
 
 
+def large_opening_insertion_box(target_box: list[int], cfg: dict[str, Any], out_hw: tuple[int, int]) -> list[int]:
+    component_type = cfg.get("_requested_component_type") or cfg.get("_placement_debug", {}).get("selected_replacement_target_type")
+    if component_type == "elevator_door":
+        height, _ = out_hw
+        x1, y1, x2, y2 = [int(round(value)) for value in target_box]
+        box_h = max(1, y2 - y1)
+        bottom_trim = int(np.clip(box_h * 0.045, 12, 24))
+        flattened = [x1, y1, x2, max(y1 + 1, min(height, y2 - bottom_trim))]
+        cfg.setdefault("_placement_debug", {})["door_flattened_insertion_bbox"] = flattened
+        LOGGER.info("[PLACE] Flattened elevator_door bottom edge: %s -> %s", target_box, flattened)
+        return flattened
+    if component_type != "elevator_cabin":
+        return target_box
+
+    height, width = out_hw
+    x1, y1, x2, y2 = [int(round(value)) for value in target_box]
+    box_w = max(1, x2 - x1)
+    box_h = max(1, y2 - y1)
+    side_inset = int(np.clip(box_w * 0.018, 3, 6))
+    top_inset = int(np.clip(box_h * 0.008, 2, 5))
+    bottom_inset = int(np.clip(box_h * 0.012, 3, 7))
+
+    recessed = [
+        min(max(0, x1 + side_inset), width - 1),
+        min(max(0, y1 + top_inset), height - 1),
+        max(min(width, x2 - side_inset), 1),
+        max(min(height, y2 - bottom_inset), 1),
+    ]
+    if recessed[2] <= recessed[0] or recessed[3] <= recessed[1]:
+        return target_box
+
+    cfg.setdefault("_placement_debug", {})["cabin_recessed_insertion_bbox"] = recessed
+    LOGGER.info("[PLACE] Recessed elevator_cabin insertion behind frame: %s -> %s", target_box, recessed)
+    return recessed
+
+
+def load_cabin_frame_source(cfg: dict[str, Any], out_hw: tuple[int, int]) -> np.ndarray | None:
+    component_type = cfg.get("_requested_component_type") or cfg.get("_placement_debug", {}).get("selected_replacement_target_type")
+    if component_type != "elevator_cabin":
+        return None
+    image_path = cfg.get("input_image")
+    if not image_path:
+        return None
+    try:
+        image = load_image_rgb(image_path)
+    except Exception as exc:
+        LOGGER.warning("[PLACE] Could not load original cabin frame source: %s", exc)
+        return None
+    out_h, out_w = out_hw
+    if image.shape[:2] != (out_h, out_w):
+        image = cv2.resize(image, (out_w, out_h), interpolation=cv2.INTER_AREA)
+    return image
+
+
+def is_large_component_insertion(alpha: np.ndarray, cfg: dict[str, Any]) -> bool:
+    component_type = cfg.get("_requested_component_type")
+    if component_type in {"elevator_door", "elevator_cabin", "elevator_ceiling"}:
+        return True
+    area_ratio = float((alpha > 0.03).mean()) if alpha.size else 0.0
+    threshold = float(cfg["insertion"].get("large_component_area_ratio", 0.18))
+    return area_ratio >= threshold
+
+
+def refine_large_component_alpha(alpha: np.ndarray, cfg: dict[str, Any]) -> np.ndarray:
+    ins = cfg["insertion"]
+    feather_px = int(ins.get("large_edge_feather_px", 5))
+    protect_px = int(ins.get("large_edge_protect_px", 14))
+    solid = (alpha > 0.03).astype(np.uint8)
+    if solid.max() == 0:
+        return np.clip(alpha, 0, 1)
+    if feather_px <= 0:
+        return solid.astype(np.float32)
+
+    inside_dist = cv2.distanceTransform(solid, cv2.DIST_L2, 3)
+    outside_dist = cv2.distanceTransform(1 - solid, cv2.DIST_L2, 3)
+    signed_dist = inside_dist - outside_dist
+    edge_alpha = np.clip((signed_dist + feather_px) / max(2 * feather_px, 1), 0, 1)
+
+    core = inside_dist >= max(protect_px, feather_px + 1)
+    edge_alpha[core] = 1.0
+    return np.clip(edge_alpha.astype(np.float32), 0, 1)
+
+
 def validate_or_rebuild_alpha(alpha: np.ndarray, insertion_bbox: list[int], cfg: dict[str, Any], mask_name: str) -> tuple[np.ndarray, dict[str, Any]]:
     ratio, bbox, nearly_full = mask_stats(alpha)
-    max_ratio = float(cfg["insertion"].get("max_harmonization_mask_area_ratio", 0.35))
+    max_ratio = harmonization_mask_max_ratio(alpha, cfg)
     debug = {
         f"{mask_name}_mask_bbox": bbox,
         f"{mask_name}_mask_white_area_ratio": ratio,
@@ -1268,6 +1357,20 @@ def validate_or_rebuild_alpha(alpha: np.ndarray, insertion_bbox: list[int], cfg:
             f"Harmonization mask validation failed after rebuild: coverage={ratio2:.4f} bbox={bbox2}"
         )
     return rebuilt, debug
+
+
+def harmonization_mask_max_ratio(alpha: np.ndarray, cfg: dict[str, Any]) -> float:
+    base_ratio = float(cfg["insertion"].get("max_harmonization_mask_area_ratio", 0.35))
+    component_type = cfg.get("_requested_component_type") or cfg.get("_placement_debug", {}).get("selected_replacement_target_type")
+    if component_type == "elevator_door":
+        return max(base_ratio, 0.70)
+    if component_type == "elevator_cabin":
+        return max(base_ratio, 0.75)
+    if component_type == "elevator_ceiling":
+        return max(base_ratio, 0.45)
+    if is_large_component_insertion(alpha, cfg):
+        return max(base_ratio, float(cfg["insertion"].get("large_max_harmonization_mask_area_ratio", 0.75)))
+    return base_ratio
 
 
 def mask_stats(alpha: np.ndarray) -> tuple[float, list[int] | None, bool]:
@@ -1369,6 +1472,81 @@ def edge_integration(fg: np.ndarray, alpha: np.ndarray) -> np.ndarray:
     soft = cv2.GaussianBlur(fg, (3, 3), 0.7)
     edge_mask = np.clip(edge * 2.2, 0, 1)
     return np.clip(fg.astype(np.float32) * (1 - edge_mask[:, :, None]) + soft.astype(np.float32) * edge_mask[:, :, None], 0, 255).astype(np.uint8)
+
+
+def add_cabin_recess_integration(bg: np.ndarray, composite: np.ndarray, alpha: np.ndarray, target_box: list[int], cfg: dict[str, Any]) -> np.ndarray:
+    component_type = cfg.get("_requested_component_type") or cfg.get("_placement_debug", {}).get("selected_replacement_target_type")
+    if component_type != "elevator_cabin":
+        return composite
+
+    height, width = composite.shape[:2]
+    x1, y1, x2, y2 = [int(round(value)) for value in target_box]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(width, x2), min(height, y2)
+    if x2 <= x1 or y2 <= y1:
+        return composite
+
+    box_w = max(1, x2 - x1)
+    box_h = max(1, y2 - y1)
+    side_band = int(np.clip(box_w * 0.070, 12, 26))
+    top_band = int(np.clip(box_h * 0.050, 10, 24))
+    bottom_band = int(np.clip(box_h * 0.040, 8, 18))
+
+    yy, xx = np.mgrid[0:height, 0:width]
+    inside_box = (xx >= x1) & (xx < x2) & (yy >= y1) & (yy < y2) & (alpha > 0.03)
+    if not np.any(inside_box):
+        return composite
+
+    left = np.clip(1.0 - ((xx - x1) / max(side_band, 1)), 0.0, 1.0)
+    right = np.clip(1.0 - ((x2 - 1 - xx) / max(side_band, 1)), 0.0, 1.0)
+    top = np.clip(1.0 - ((yy - y1) / max(top_band, 1)), 0.0, 1.0)
+    bottom = np.clip(1.0 - ((y2 - 1 - yy) / max(bottom_band, 1)), 0.0, 1.0)
+
+    side_shadow = np.maximum(left, right)
+    recess_shadow = np.maximum(side_shadow * 0.22, top * 0.18)
+    recess_shadow = np.maximum(recess_shadow, bottom * 0.10)
+    recess_shadow = np.where(inside_box, recess_shadow, 0.0)
+    recess_shadow = cv2.GaussianBlur(recess_shadow.astype(np.float32), (0, 0), 2.2)
+
+    out = composite.astype(np.float32)
+    out[inside_box] *= 0.985
+    out *= 1.0 - recess_shadow[:, :, None]
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def restore_cabin_opening_frame(frame_source: np.ndarray | None, composite: np.ndarray, target_box: list[int], insertion_box: list[int], cfg: dict[str, Any]) -> np.ndarray:
+    component_type = cfg.get("_requested_component_type") or cfg.get("_placement_debug", {}).get("selected_replacement_target_type")
+    if component_type != "elevator_cabin" or frame_source is None:
+        return composite
+
+    height, width = composite.shape[:2]
+    tx1, ty1, tx2, ty2 = [int(round(value)) for value in target_box]
+    ix1, iy1, ix2, iy2 = [int(round(value)) for value in insertion_box]
+    tx1, ty1 = max(0, tx1), max(0, ty1)
+    tx2, ty2 = min(width, tx2), min(height, ty2)
+    ix1, iy1 = max(0, ix1), max(0, iy1)
+    ix2, iy2 = min(width, ix2), min(height, iy2)
+    if tx2 <= tx1 or ty2 <= ty1 or ix2 <= ix1 or iy2 <= iy1:
+        return composite
+
+    mask = np.zeros((height, width), dtype=np.float32)
+    mask[ty1:ty2, tx1:tx2] = 1.0
+    mask[iy1:iy2, ix1:ix2] = 0.0
+
+    inner_edge = np.zeros_like(mask)
+    feather = 5
+    inner_edge[max(ty1, iy1 - feather) : min(ty2, iy1 + feather), ix1:ix2] = 0.35
+    inner_edge[max(ty1, iy2 - feather) : min(ty2, iy2 + feather), ix1:ix2] = 0.22
+    inner_edge[iy1:iy2, max(tx1, ix1 - feather) : min(tx2, ix1 + feather)] = 0.38
+    inner_edge[iy1:iy2, max(tx1, ix2 - feather) : min(tx2, ix2 + feather)] = 0.38
+    mask = np.maximum(mask, inner_edge)
+    mask = cv2.GaussianBlur(mask, (0, 0), 1.2)
+    mask = np.clip(mask, 0, 0.92)
+
+    out = composite.astype(np.float32)
+    source = frame_source.astype(np.float32)
+    out = out * (1.0 - mask[:, :, None]) + source * mask[:, :, None]
+    return np.clip(out, 0, 255).astype(np.uint8)
 
 
 def transfer_wall_texture(bg: np.ndarray, fg: np.ndarray, alpha: np.ndarray, strength: float) -> np.ndarray:

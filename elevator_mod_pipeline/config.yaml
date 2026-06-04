@@ -127,6 +127,9 @@ insertion:
   scale_multiplier: 1.0
   top_shrink: 0.015
   side_skew: 0.008
+  large_edge_feather_px: 5
+  large_edge_protect_px: 14
+  large_component_area_ratio: 0.18
   shadow_strength: 0.12
   texture_strength: 0.04
   max_shadow_radius_px: 18
