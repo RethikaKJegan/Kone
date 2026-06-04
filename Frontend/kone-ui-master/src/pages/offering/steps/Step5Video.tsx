@@ -51,7 +51,7 @@ export default function Step5Video() {
 
   const motionLabel = VIDEO_MOTION_STYLES.find(m => m.value === motion)?.label ?? ''
   const isDoorFunctionality = motion === 'door-functionality'
-  const videoStyles = VIDEO_MOTION_STYLES
+  const videoStyles = VIDEO_MOTION_STYLES.filter(s => s.value !== 'door-functionality')
 
   const handleContinue = async () => {
     setVideoSettings({ videoMotionStyle: motion, videoQuality: quality })
@@ -186,13 +186,10 @@ export default function Step5Video() {
                 <button
                   key={s.value}
                   onClick={() => selectMotion(s.value as MotionStyle)}
-                  disabled={s.value === 'door-functionality'}
                   className={cn(
                     btnBase,
                     'px-3',
-                    s.value === 'door-functionality'
-                      ? 'cursor-not-allowed border-[#E4E4E4] bg-[#F5F5F5] text-[#A3A3A3]'
-                      : motion === s.value ? btnActive : btnInactive
+                    motion === s.value ? btnActive : btnInactive
                   )}
                   style={{ height: 34 }}
                 >
