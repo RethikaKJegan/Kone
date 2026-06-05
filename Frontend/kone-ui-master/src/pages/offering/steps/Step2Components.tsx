@@ -54,7 +54,7 @@ export default function Step2Components() {
     const newComps = withoutDoorCeilingConflict(comps.filter(c => newAvailable.includes(c)))
     setEnvs(newEnvs)
     setComps(newComps)
-    void setComponents(newEnvs, newComps)
+    //void setComponents(newEnvs, newComps)
   }
 
   const toggleComp = (k: ComponentKey) => {
@@ -70,7 +70,7 @@ export default function Step2Components() {
       return [...next, k]
     })()
     setComps(nextComps)
-    void setComponents(envs, nextComps)
+    //void setComponents(envs, nextComps)
   }
 
   const canContinue = envs.length > 0 && comps.length > 0
