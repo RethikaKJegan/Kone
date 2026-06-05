@@ -124,22 +124,24 @@ insertion:
     - speaker
   manual_box_xyxy: null     # Example: [95, 415, 140, 560]
   fallback_box_ratio_xyxy: [0.145, 0.39, 0.255, 0.61]
-  adjacent_wall_min_margin_ratio: 0.055
-  size_mode: fit_box         # fit_box, preserve_asset, or fixed_height
+  adjacent_wall_side: right
+  adjacent_wall_min_margin_ratio: 0.075
+  size_mode: fit_box
   fixed_height_px: null
   allow_upscale: false
   native_reference_width_px: 600
   native_reference_height_px: 800
-  target_height_multiplier: 1.55
+  target_height_multiplier: 1.0
   scale_multiplier: 1.0
-  top_shrink: 0.015
-  side_skew: 0.008
+  top_shrink: 0.0
+  side_skew: 0.0
   large_edge_feather_px: 5
   large_edge_protect_px: 14
   large_component_area_ratio: 0.18
   shadow_strength: 0.12
   texture_strength: 0.04
   max_shadow_radius_px: 18
+  homography_max_local_shear: 0.03
 
 perspective_mod_placement:
   # Runs after normal MOD insertion. In auto mode, wall-plane corners and the
