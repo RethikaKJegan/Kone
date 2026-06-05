@@ -4,8 +4,8 @@ setlocal EnableExtensions EnableDelayedExpansion
 rem ============================================================
 rem EDIT THESE TWO VALUES
 rem ============================================================
-set "ROOT_DIR=C:\Users\admin\Desktop\Kone-main\Kone-main"
-set "HF_TOKEN=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"
+set "ROOT_DIR=C:\Users\Welcome\Downloads\Kone\Kone"
+set "HF_TOKEN=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"
 
 rem ============================================================
 rem PORTS
@@ -20,6 +20,7 @@ rem ============================================================
 set "VENV_DIR=%ROOT_DIR%\.venv"
 set "PY=%VENV_DIR%\Scripts\python.exe"
 set "PIP=%VENV_DIR%\Scripts\pip.exe"
+set "TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu"
 
 set "LOG_DIR=%ROOT_DIR%\setup_logs"
 set "LOG_FILE=%LOG_DIR%\setup_kone_all.log"
@@ -326,7 +327,7 @@ if errorlevel 1 call :fail "Failed installing transformers/tokenizers/huggingfac
 call :log "Installing API npm packages"
 if exist "%API_DIR%\package.json" (
     cd /d "%API_DIR%" || call :fail "Cannot cd into API dir"
-    npm install --cache "%NPM_CONFIG_CACHE%" >>"%LOG_FILE%" 2>&1
+    npm install --ignore-scripts --cache "%NPM_CONFIG_CACHE%" >>"%LOG_FILE%" 2>&1
     if errorlevel 1 call :fail "API npm install failed"
 ) else (
     call :fail "Missing API package.json"
@@ -335,7 +336,7 @@ if exist "%API_DIR%\package.json" (
 call :log "Installing UI npm packages"
 if exist "%UI_DIR%\package.json" (
     cd /d "%UI_DIR%" || call :fail "Cannot cd into UI dir"
-    npm install --cache "%NPM_CONFIG_CACHE%" >>"%LOG_FILE%" 2>&1
+    npm install --ignore-scripts --cache "%NPM_CONFIG_CACHE%" >>"%LOG_FILE%" 2>&1
     if errorlevel 1 call :fail "UI npm install failed"
 ) else (
     call :fail "Missing UI package.json"
