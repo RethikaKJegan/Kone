@@ -88,9 +88,10 @@ def preselect_mod_panel_placement(
     removal_mask: np.ndarray | None = None,
 ) -> list[int] | None:
     requested_type = cfg.get("_requested_component_type")
-    if requested_type not in {"elevator_ceiling", "elevator_cabin", "elevator_door"} and not _is_elevator_mod_panel_request(cfg, mod_path):
+    preselect_types = {"elevator_ceiling", "elevator_cabin", "elevator_door", "landing_call_indicator"}
+    if requested_type not in preselect_types and not _is_elevator_mod_panel_request(cfg, mod_path):
         return None
-    if requested_type not in {"elevator_ceiling", "elevator_cabin", "elevator_door"}:
+    if requested_type not in preselect_types:
         cfg["_requested_component_type"] = "elevator_mod_panel"
     mod = close_internal_alpha_holes(load_image_rgba(mod_path))
     height, width = image_rgb.shape[:2]
@@ -229,19 +230,31 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
             )
             LOGGER.info("[TARGET] No valid panel detected; synthesizing adjacent-wall placement")
             return box, "adjacent_wall_next_to_selected_elevator_roi"
-
         det = select_valid_component_detection(detections["detections"], ins["target_keywords"], height, width, mod_hw, elevator_roi, rejected_components)
         cfg["_placement_debug"] = {"rejected_component_detections": rejected_components}
         if det:
             detection_box = [int(round(v)) for v in det["box_xyxy"]]
-            erased_box = _select_erased_long_panel_box(removal_mask, detection_box, cfg, mod_hw)
-            target_box = erased_box or detection_box
+
+            if cfg.get("_requested_component_type") == "landing_call_indicator":
+                target_box, lci_combo_debug = expand_lci_call_button_with_floor_indicator(
+                    detection_box,
+                    detections["detections"],
+                    width,
+                    height,
+                )
+            else:
+                erased_box = _select_erased_long_panel_box(removal_mask, detection_box, cfg, mod_hw)
+                target_box = erased_box or detection_box
+                lci_combo_debug = {"status": "not_lci"}
+
+    
             cfg["_placement_debug"].update(
                 {
                     "requested_component_type": cfg.get("_requested_component_type"),
                     "selected_replacement_target_type": det.get("normalized_component_type"),
                     "selected_replacement_target_bbox": detection_box,
                     "inpaint_bbox": target_box,
+                    "lci_combo_expansion": lci_combo_debug,
                     "scale_to_target_bbox": True,
                     "placement_mode": "existing_lci" if cfg.get("_requested_component_type") == "landing_call_indicator" else "existing_component",
                 }
@@ -419,6 +432,61 @@ def valid_target_debug(detections: list[dict[str, Any]]) -> list[dict[str, Any]]
 def padded_box(box: list[int], width: int, height: int, pad: int) -> list[int]:
     x1, y1, x2, y2 = box
     return [max(0, x1 - pad), max(0, y1 - pad), min(width, x2 + pad), min(height, y2 + pad)]
+def expand_lci_call_button_with_floor_indicator(
+    target_box: list[int],
+    detections: list[dict[str, Any]],
+    width: int,
+    height: int,
+) -> tuple[list[int], dict[str, Any]]:
+    x1, y1, x2, y2 = [int(v) for v in target_box]
+    target_cx = (x1 + x2) * 0.5
+    target_w = max(1, x2 - x1)
+    target_h = max(1, y2 - y1)
+    combo = [x1, y1, x2, y2]
+    included: list[dict[str, Any]] = []
+
+    for det in detections:
+        norm = str(det.get("normalized_component_type") or "").lower()
+        phrase = str(det.get("phrase") or "").lower()
+        is_floor_indicator = norm == "floor_indicator_display" or (
+            "floor" in phrase and "indicator" in phrase
+        ) or "display" in phrase
+        if not is_floor_indicator:
+            continue
+
+        bx1, by1, bx2, by2 = [int(round(v)) for v in det.get("box_xyxy", [0, 0, 0, 0])]
+        bw = max(1, bx2 - bx1)
+        bh = max(1, by2 - by1)
+        bcx = (bx1 + bx2) * 0.5
+        aligned_x = abs(bcx - target_cx) <= max(target_w * 1.8, bw * 1.8, width * 0.055)
+        close_y = by2 >= y1 - target_h * 3.0 and by1 <= y2 + target_h * 1.0
+        reasonable_size = bh <= target_h * 2.4 and bw <= target_w * 2.6
+        if aligned_x and close_y and reasonable_size:
+            combo = [
+                min(combo[0], bx1),
+                min(combo[1], by1),
+                max(combo[2], bx2),
+                max(combo[3], by2),
+            ]
+            included.append(
+                {
+                    "bbox": [bx1, by1, bx2, by2],
+                    "normalized_component_type": norm,
+                    "phrase": det.get("phrase"),
+                }
+            )
+
+    if not included:
+        return target_box, {"status": "no_aligned_floor_indicator"}
+
+    pad = max(8, int(min(combo[2] - combo[0], combo[3] - combo[1]) * 0.14))
+    combo = padded_box(combo, width, height, pad)
+    return combo, {
+        "status": "expanded_lci_with_floor_indicator",
+        "included": included,
+        "combo_bbox": combo,
+    }
+
 
 
 def extend_inpaint_bbox_for_aligned_panel_artifacts(
@@ -1054,7 +1122,15 @@ def build_wall_aligned_destination_quad(
     cx = (x1 + x2) * 0.5
     cy = (y1 + y2) * 0.5
     placement_debug = cfg.get("_placement_debug", {})
-    if placement_debug.get("placement_mode") in {"existing_panel", "existing_ceiling", "existing_interior", "existing_door"}:
+    if placement_debug.get("placement_mode") in {
+        "existing_panel",
+        "existing_ceiling",
+        "existing_interior",
+        "existing_door",
+        "existing_lci",
+        "synthesized_lci_adjacent_wall",
+        "synthesized_adjacent_wall",
+    }:
         quad = np.array(
             [
                 [x1, y1],
