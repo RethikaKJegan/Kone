@@ -94,7 +94,7 @@ removal:
     - call button
     - speaker
   mask_padding_px: 10
-  box_mask_padding_px: 2
+  box_mask_padding_px: 3
   mask_dilate_iterations: 2
   cleanup_engine: auto       # auto, lama, wall_patch, or opencv
   wall_sample_margin_px: 55
