@@ -50,13 +50,19 @@ def insert_mod_panel(background_path: str | Path, mod_path: str | Path, detectio
     if is_large_component_insertion(alpha, cfg):
         alpha = refine_large_component_alpha(alpha, cfg)
     alpha, mask_debug = validate_or_rebuild_alpha(alpha, insertion_box, cfg, "harmonization")
+    component_type = cfg.get("_requested_component_type") or cfg.get("_placement_debug", {}).get("selected_replacement_target_type")
+    is_lci = component_type in {"landing_call_indicator", "synthesized_lci_adjacent_wall"}
+
     fg = harmonize_foreground(fg, bg, alpha)
     fg = match_scene_white_balance(fg)
     fg = add_wall_bounce_light(fg, alpha)
     fg = perceptual_compress(fg)
-    fg = edge_integration(fg, alpha)
-    fg = transfer_wall_texture(bg, fg, alpha, float(cfg["insertion"]["texture_strength"]))
 
+    if not is_lci:
+        fg = edge_integration(fg, alpha)
+        fg = transfer_wall_texture(bg, fg, alpha, float(cfg["insertion"]["texture_strength"]))
+    else:
+        fg = transfer_wall_texture(bg, fg, alpha, 0.0)
     frame_source = load_cabin_frame_source(cfg, bg.shape[:2])
     bg_shadowed = apply_realistic_shadow(bg, alpha, float(cfg["insertion"]["shadow_strength"]))
     bg_shadowed = add_contact_shadow(bg_shadowed, alpha, float(cfg["insertion"]["shadow_strength"]))
@@ -237,10 +243,25 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
                     "selected_replacement_target_bbox": detection_box,
                     "inpaint_bbox": target_box,
                     "scale_to_target_bbox": True,
-                    "placement_mode": "existing_component",
+                    "placement_mode": "existing_lci" if cfg.get("_requested_component_type") == "landing_call_indicator" else "existing_component",
                 }
             )
             return target_box, f"detected_{det.get('normalized_component_type') or det.get('phrase')}"
+        if cfg.get("_requested_component_type") == "landing_call_indicator":
+            if elevator_roi is None:
+                raise RuntimeError("No valid LCI placement target: no existing LCI and no elevator door detected")
+            box = adjacent_wall_panel_box(width, height, detections, cfg, mod_hw, image, elevator_roi)
+            cfg["_placement_debug"].update(
+                {
+                    "requested_component_type": "landing_call_indicator",
+                    "selected_replacement_target_type": "synthesized_lci_adjacent_wall",
+                    "selected_replacement_target_bbox": None,
+                    "inpaint_bbox": box,
+                    "scale_to_target_bbox": True,
+                    "placement_mode": "synthesized_lci_adjacent_wall",
+                }
+            )
+            return box, "lci_adjacent_wall_next_to_elevator_door"
     rx1, ry1, rx2, ry2 = ins["fallback_box_ratio_xyxy"]
     return [int(width * rx1), int(height * ry1), int(width * rx2), int(height * ry2)], "configured_fallback_ratio"
 
@@ -639,13 +660,20 @@ def adjacent_wall_panel_box(
     x1, y1, x2, y2 = roi
     wall_left = x1
     wall_right = width - x2
-    side = "left" if wall_left >= wall_right else "right"
+
+    preferred_side = cfg.get("insertion", {}).get("adjacent_wall_side", "right")
+    if preferred_side in {"left", "right"}:
+        side = preferred_side
+    else:
+        side = "left" if wall_left >= wall_right else "right"
+
     mh, mw = mod_hw or (180, 70)
-    target_h = int(np.clip((y2 - y1) * 0.22, height * 0.12, height * 0.24))
+    target_h = int(np.clip((y2 - y1) * 0.19, height * 0.12, height * 0.22))
     target_w = max(18, int(round(target_h * mw / max(mh, 1))))
-    cy = int(np.clip(y1 + (y2 - y1) * 0.48, height * 0.34, height * 0.68))
-    min_margin = max(18, int(width * float(cfg.get("insertion", {}).get("adjacent_wall_min_margin_ratio", 0.055))))
-    gap = max(min_margin, int(width * 0.035))
+    cy = int(np.clip(y1 + (y2 - y1) * 0.46, height * 0.34, height * 0.66))
+
+    min_margin = max(18, int(width * float(cfg.get("insertion", {}).get("adjacent_wall_min_margin_ratio", 0.075))))
+    gap = max(min_margin, int(width * 0.055))
     strip_pad = max(8, min_margin // 2)
     if side == "left":
         usable_w = max(0, x1 - gap)
@@ -653,6 +681,15 @@ def adjacent_wall_panel_box(
         px2 = min(x1 - gap, px1 + target_w)
     else:
         usable_w = max(0, width - (x2 + gap))
+        min_free_w = max(target_w + gap, int(width * 0.10))
+        if side == "left":
+            usable_w = max(0, x1 - gap)
+            if usable_w < min_free_w:
+                side = "right"
+        if side == "right":
+            usable_w = max(0, width - (x2 + gap))
+            if usable_w < min_free_w:
+                side = "left"
         px1 = min(width - target_w, x2 + gap + max(0, (usable_w - target_w) // 2)) if usable_w < target_w + strip_pad * 2 else min(width - target_w - strip_pad, x2 + gap)
         px2 = min(width, px1 + target_w)
     py1 = int(np.clip(cy - target_h // 2, max(0, y1 + int((y2 - y1) * 0.12)), min(height - target_h, y2 - target_h)))
@@ -1238,7 +1275,7 @@ def warp_rgba_to_quad(rgba: np.ndarray, quad: np.ndarray, out_hw: tuple[int, int
 
 
 def refine_alpha(alpha: np.ndarray) -> np.ndarray:
-    return np.clip(cv2.GaussianBlur(alpha, (3, 3), 0.12), 0, 1)
+    return np.clip(cv2.GaussianBlur(alpha, (3, 3), 0.06), 0, 1)
 
 
 def large_opening_insertion_box(target_box: list[int], cfg: dict[str, Any], out_hw: tuple[int, int]) -> list[int]:
@@ -1296,13 +1333,17 @@ def load_cabin_frame_source(cfg: dict[str, Any], out_hw: tuple[int, int]) -> np.
 
 
 def is_large_component_insertion(alpha: np.ndarray, cfg: dict[str, Any]) -> bool:
-    component_type = cfg.get("_requested_component_type")
+    component_type = cfg.get("_requested_component_type") or cfg.get("_placement_debug", {}).get("selected_replacement_target_type")
+
+    if component_type in {"landing_call_indicator", "synthesized_lci_adjacent_wall"}:
+        return False
+
     if component_type in {"elevator_door", "elevator_cabin", "elevator_ceiling"}:
         return True
+
     area_ratio = float((alpha > 0.03).mean()) if alpha.size else 0.0
     threshold = float(cfg["insertion"].get("large_component_area_ratio", 0.18))
     return area_ratio >= threshold
-
 
 def refine_large_component_alpha(alpha: np.ndarray, cfg: dict[str, Any]) -> np.ndarray:
     ins = cfg["insertion"]
