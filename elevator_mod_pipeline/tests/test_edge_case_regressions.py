@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 from pathlib import Path
 
 import cv2
@@ -8,6 +9,7 @@ import numpy as np
 import pytest
 
 import src.detect as detect
+import src.pipeline as pipeline_module
 import run_batch
 from src.input_validation import validate_elevator_presence
 from src.insert_mod import (
@@ -19,7 +21,13 @@ from src.insert_mod import (
     preselect_mod_panel_placement,
     select_valid_component_detection,
 )
-from src.perspective_mod_placement import parse_points, run_perspective_mod_placement
+from src.perspective_mod_placement import (
+    compute_local_component_homography,
+    compute_local_component_quad,
+    estimate_quad_angle_degrees,
+    parse_points,
+    run_perspective_mod_placement,
+)
 from src.pipeline import component_config, elevator_present_for_video, replacement_configs
 from src.video import normalize_video_mode_request, pan_metadata, render_motion_style_frame
 
@@ -82,6 +90,40 @@ def test_perspective_mod_placement_writes_sd_handoff_outputs(tmp_path: Path) -> 
     mask = cv2.imread(str(outputs["edge_refine_mask"]), cv2.IMREAD_GRAYSCALE)
     assert mask is not None
     assert 0 < float(np.mean(mask > 0)) < 0.12
+
+
+def test_local_component_quad_uses_target_bbox_not_full_image() -> None:
+    quad = compute_local_component_quad((800, 600, 3), {"selected_replacement_target_bbox": [420, 180, 470, 360]})
+
+    assert quad.tolist() == [[420.0, 180.0], [470.0, 180.0], [470.0, 360.0], [420.0, 360.0]]
+    assert cv2.contourArea(quad) < 600 * 800 * 0.05
+
+
+def test_multiple_components_get_independent_local_homographies() -> None:
+    lci_quad = compute_local_component_quad((900, 700, 3), {"final_insertion_bbox": [520, 250, 570, 430]})
+    cop_quad = compute_local_component_quad((900, 700, 3), {"final_insertion_bbox": [120, 100, 210, 760]})
+
+    lci_h = compute_local_component_homography((50, 180), lci_quad)
+    cop_h = compute_local_component_homography((90, 660), cop_quad)
+
+    assert not np.allclose(lci_h, cop_h)
+    assert estimate_quad_angle_degrees(lci_quad) == pytest.approx(0.0)
+    assert estimate_quad_angle_degrees(cop_quad) == pytest.approx(0.0)
+
+
+def test_missing_detection_fallback_still_creates_local_quad_not_full_image() -> None:
+    quad = compute_local_component_quad((1000, 800, 3), {})
+
+    assert cv2.contourArea(quad) < 1000 * 800 * 0.05
+    assert quad[:, 0].min() > 0
+    assert quad[:, 1].min() > 0
+
+
+def test_pipeline_does_not_apply_global_perspective_after_local_component_placement() -> None:
+    source = inspect.getsource(pipeline_module.main)
+
+    assert "run_perspective_mod_placement_from_config" not in source
+    assert "run_auto_perspective_mod_placement" not in source
 
 
 def test_multi_component_config_preserves_legacy_and_overrides_targets() -> None:
