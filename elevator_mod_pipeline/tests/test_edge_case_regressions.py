@@ -590,6 +590,77 @@ def test_sample8_side_floor_display_replaces_false_overhead_indicator() -> None:
     assert indicators[0]["geometry_validation"]["reason"] == "visual_red_digits_on_side_floor_indicator"
 
 
+def test_side_call_panel_extends_to_lower_silver_button_plate() -> None:
+    image = np.full((720, 540, 3), [190, 176, 156], dtype=np.uint8)
+    image[120:660, 110:330] = [86, 92, 98]
+    image[112:670, 100:340] = [55, 58, 62]
+    image[210:640, 120:320] = [120, 125, 128]
+    image[260:420, 415:475] = [214, 216, 213]
+    image[420:555, 415:475] = [118, 119, 116]
+    image[554:558, 415:475] = [45, 45, 43]
+    detections = [
+        {"phrase": "elevator door", "normalized_component_type": "elevator_door", "score": 0.61, "box_xyxy": [100, 120, 340, 670]},
+        {"phrase": "elevator call button panel", "normalized_component_type": "elevator call button panel", "score": 0.35, "box_xyxy": [405, 290, 485, 430]},
+    ]
+
+    detect._extend_side_call_panel_to_lower_plate(image, detections)
+
+    panel = detections[1]
+    assert panel["box_xyxy"][3] > 550
+    assert panel["geometry_validation"]["reason"] == "side_call_panel_lower_silver_button_plate"
+    assert panel["source"] == "call_panel_with_lower_button_plate"
+
+
+def test_call_panel_visual_merge_ignores_adjacent_blue_safety_sign() -> None:
+    image = np.full((900, 1100, 3), [170, 170, 150], dtype=np.uint8)
+    image[610:850, 850:925] = [180, 185, 175]
+    image[690:760, 872:910] = [35, 35, 35]
+    image[710:730, 884:895] = [210, 30, 25]
+    image[620:835, 955:1030] = [20, 65, 170]
+    detections = [
+        {
+            "phrase": "elevator call button panel",
+            "normalized_component_type": "elevator call button panel",
+            "score": 0.32,
+            "box_xyxy": [850, 740, 920, 860],
+        }
+    ]
+
+    detect._merge_visual_indicator_into_call_panel(image, detections)
+
+    panel = detections[0]
+    assert panel["box_xyxy"][2] < 950
+    assert panel["geometry_validation"]["indicator_box_xyxy"][2] < 930
+
+
+def test_exterior_wall_strip_is_not_kept_as_car_operating_panel() -> None:
+    detections = [
+        {"phrase": "elevator door", "normalized_component_type": "elevator_door", "score": 0.33, "box_xyxy": [312.0, 358.0, 755.0, 1458.0]},
+        {"phrase": "car operating panel", "normalized_component_type": detect.OPERATING_PANEL_CLASS, "score": 0.31, "box_xyxy": [752.0, 0.0, 1017.0, 1418.0]},
+        {"phrase": "elevator call button panel", "normalized_component_type": "elevator call button panel", "score": 0.32, "box_xyxy": [846.0, 679.0, 935.0, 866.0]},
+    ]
+
+    detect._suppress_exterior_operating_panel_false_positives(detections, 1200, 1600)
+
+    assert [det["normalized_component_type"] for det in detections] == ["elevator_door", "elevator call button panel"]
+
+
+def test_expanded_cop_includes_side_button_protrusions() -> None:
+    image = np.full((1600, 900, 3), 180, dtype=np.uint8)
+    image[:, 321:478] = 170
+    image[785:835, 300:350] = 50
+    image[785:835, 372:422] = 50
+    image[785:835, 455:505] = 50
+    panel_box = [321.0, 0.0, 478.0, 1398.0]
+
+    expanded = detect._include_operating_panel_side_buttons(image, panel_box)
+
+    assert expanded[0] < 300
+    assert expanded[2] > 505
+    assert expanded[1] == panel_box[1]
+    assert expanded[3] == panel_box[3]
+
+
 def test_open_full_door_detection_derives_interior_without_header_expansion() -> None:
     image = cv2.cvtColor(cv2.imread(str(ROOT / "tests" / "images" / "Sample8.jpg")), cv2.COLOR_BGR2RGB)
     detections = [
@@ -675,6 +746,46 @@ def test_cop_preselection_preserves_floor_indicator_by_default(tmp_path: Path) -
     assert bbox[1] > 70
     assert bbox[3] >= 190
     assert cfg["_placement_debug"]["aligned_artifact_cleanup"]["status"] == "preserved_floor_indicator_display"
+
+
+def test_expanded_tall_cop_is_used_instead_of_adjacent_wall(tmp_path: Path) -> None:
+    image = np.full((1600, 900, 3), 180, dtype=np.uint8)
+    mod_path = tmp_path / "cop.png"
+    cv2.imwrite(str(mod_path), np.full((600, 100, 4), 255, dtype=np.uint8))
+    detections = {
+        "detections": [
+            {
+                "phrase": "car operating panel",
+                "normalized_component_type": detect.OPERATING_PANEL_CLASS,
+                "score": 0.39,
+                "box_xyxy": [321.0, 0.0, 478.0, 1398.0],
+                "source": "expanded_car_operating_panel_plate",
+            },
+            {
+                "phrase": "wheelchair button",
+                "normalized_component_type": "wheelchair button",
+                "score": 0.33,
+                "box_xyxy": [441.0, 1103.0, 493.0, 1155.0],
+            },
+        ]
+    }
+    cfg = {
+        "_requested_component_type": "elevator_mod_panel",
+        "removal": {"box_mask_padding_px": 0},
+        "insertion": {
+            "placement": "detection",
+            "target_keywords": ["car operating panel"],
+            "existing_panel_padding_px": 0,
+            "max_existing_panel_target_area_ratio": 0.55,
+        },
+    }
+
+    bbox = preselect_mod_panel_placement(image, mod_path, detections, cfg)
+
+    assert bbox[0] <= 321 and bbox[1] == 0
+    assert bbox[2] >= 478 and bbox[3] >= 1398
+    assert cfg["_placement_debug"]["placement_mode"] == "existing_panel"
+    assert cfg["_placement_debug"]["selected_replacement_target_type"] == detect.OPERATING_PANEL_CLASS
 
 
 def test_floor_indicator_cleanup_extension_requires_explicit_opt_in() -> None:
