@@ -484,10 +484,11 @@ def expand_lci_call_button_with_floor_indicator(
         bw = max(1, bx2 - bx1)
         bh = max(1, by2 - by1)
         bcx = (bx1 + bx2) * 0.5
-        aligned_x = abs(bcx - target_cx) <= max(target_w * 1.8, bw * 1.8, width * 0.055)
-        close_y = by2 >= y1 - target_h * 3.0 and by1 <= y2 + target_h * 1.0
-        reasonable_size = bh <= target_h * 2.4 and bw <= target_w * 2.6
-        if aligned_x and close_y and reasonable_size:
+        horizontal_overlap = max(0, min(x2, bx2) - max(x1, bx1)) / max(1, min(target_w, bw))
+        aligned_x = abs(bcx - target_cx) <= max(target_w * 0.85, width * 0.035)
+        close_y = by2 >= y1 - target_h * 1.20 and by1 <= y2 + target_h * 0.20
+        reasonable_size = bh <= target_h * 1.35 and bw <= max(target_w * 1.45, width * 0.08)
+        if (aligned_x or horizontal_overlap >= 0.35) and close_y and reasonable_size:
             combo = [
                 min(combo[0], bx1),
                 min(combo[1], by1),
@@ -521,6 +522,15 @@ def expand_lci_call_button_with_floor_indicator(
 
     if not included:
         return target_box, {"status": "no_aligned_floor_indicator"}
+
+    combo_w, combo_h = max(1, combo[2] - combo[0]), max(1, combo[3] - combo[1])
+    if combo_w > max(target_w * 1.75, width * 0.12) or combo_h > max(target_h * 1.65, height * 0.22):
+        return target_box, {
+            "status": "rejected_oversized_lci_combo",
+            "included": included,
+            "combo_bbox": combo,
+            "target_bbox": target_box,
+        }
 
     pad = max(8, int(min(combo[2] - combo[0], combo[3] - combo[1]) * 0.14))
     combo = padded_box(combo, width, height, pad)
@@ -1111,7 +1121,11 @@ def _warp_mod_to_scene(
     mh, mw = mod.shape[:2]
     mode = cfg["insertion"].get("size_mode", "fit_box")
     placement_debug = cfg.get("_placement_debug", {})
-    if placement_debug.get("selected_replacement_target_type") in {"elevator_cabin", "elevator_door"} and placement_debug.get("scale_to_target_bbox"):
+    exact_bbox_targets = {"elevator_cabin", "elevator_door"}
+    if (
+        placement_debug.get("scale_to_target_bbox")
+        and placement_debug.get("selected_replacement_target_type") in exact_bbox_targets
+    ):
         scale = max(box_w / max(mw, 1), box_h / max(mh, 1)) * float(cfg["insertion"].get("target_bbox_fill_ratio", 1.0))
         scale, scale_clamp_debug = clamp_insertion_scale(scale, [mw, mh], [x1, y1, x2, y2], out_hw, cfg)
         resized_w, resized_h = max(box_w, int(mw * scale)), max(box_h, int(mh * scale))
