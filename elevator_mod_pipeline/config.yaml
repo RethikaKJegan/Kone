@@ -53,7 +53,7 @@ detection:
   min_box_area_ratio: 0.00005
   max_box_area_ratio: 0.90
   labels:
-    - tall stainless steel elevator operating panel with round buttons
+    - car operating panel
     - elevator call button panel
     - wheelchair button
     - floor_indicator_display
@@ -89,7 +89,7 @@ removal:
   # These detections become the LaMa mask. Tune this list per job.
   target_keywords:
     - elevator panel
-    - tall stainless steel elevator operating panel with round buttons
+    - car operating panel
     - elevator call button panel
     - call button
     - speaker
@@ -118,7 +118,7 @@ insertion:
   placement: detection
   target_keywords:
     - elevator panel
-    - tall stainless steel elevator operating panel with round buttons
+    - car operating panel
     - elevator call button panel
     - call button
     - speaker

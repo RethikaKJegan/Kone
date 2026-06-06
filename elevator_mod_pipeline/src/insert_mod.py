@@ -12,7 +12,7 @@ from .utils import load_image_rgba, load_image_rgb, save_rgb, select_detection, 
 
 LOGGER = logging.getLogger(__name__)
 
-OPERATING_PANEL_CLASS = "tall stainless steel elevator operating panel with round buttons"
+OPERATING_PANEL_CLASS = "elevator operating panel"
 LANDING_CALL_INDICATOR_CLASS = "landing_call_indicator"
 VALID_MOD_PANEL_TARGETS = {OPERATING_PANEL_CLASS, "elevator call button panel"}
 INVALID_MOD_PANEL_TARGETS = {
@@ -200,6 +200,13 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
                     cfg,
                     max_ratio_override=0.55 if det.get("normalized_component_type") == OPERATING_PANEL_CLASS else None,
                 )
+                target_box, combo_debug = expand_lci_call_button_with_floor_indicator(
+                    target_box,
+                    detections["detections"],
+                    width,
+                    height,
+                    image,
+                )
                 cfg["_placement_debug"].update(
                     {
                         "requested_component_type": "elevator_mod_panel",
@@ -212,6 +219,7 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
                         "target_padding_px": int(ins.get("existing_panel_padding_px", 4)),
                         "target_box_clamp": target_clamp_debug,
                         "inpaint_bbox": target_box,
+                        "lci_combo_expansion": combo_debug,
                         "scale_to_target_bbox": True,
                         "placement_mode": "existing_panel",
                     }
@@ -248,6 +256,7 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
                     detections["detections"],
                     width,
                     height,
+                    image,
                 )
             else:
                 erased_box = _select_erased_long_panel_box(removal_mask, detection_box, cfg, mod_hw)
@@ -392,10 +401,13 @@ def select_mod_panel_target(
         valid.append(det)
     if not valid:
         return None
+    call_button_panels = [det for det in valid if str(det.get("normalized_component_type")) == "elevator call button panel"]
+    if call_button_panels:
+        return max(call_button_panels, key=lambda det: float(det.get("score", 0.0)))
     panels = [det for det in valid if str(det.get("normalized_component_type")) == OPERATING_PANEL_CLASS]
     if panels:
-        return max(panels, key=lambda det: _box_area(det.get("box_xyxy", [0, 0, 0, 0])) * (0.70 + float(det.get("score", 0.0))))
-    priority = {OPERATING_PANEL_CLASS: 0, "elevator call button panel": 1}
+        return max(panels, key=lambda det: float(det.get("score", 0.0)))
+    priority = {"elevator call button panel": 0, OPERATING_PANEL_CLASS: 1}
     return min(valid, key=lambda det: (priority.get(str(det.get("normalized_component_type")), 9), -float(det.get("score", 0.0))))
 
 
@@ -409,14 +421,20 @@ def invalid_mod_panel_target_reason(det: dict[str, Any], width: int, height: int
     x1, y1, x2, y2 = [float(v) for v in det.get("box_xyxy", [0, 0, 0, 0])]
     bw, bh = max(1.0, x2 - x1), max(1.0, y2 - y1)
     area_ratio = (bw * bh) / max(width * height, 1)
-    max_area_ratio = 0.55 if norm == OPERATING_PANEL_CLASS else 0.10
+    max_area_ratio = 0.14 if norm == OPERATING_PANEL_CLASS else 0.10
     if area_ratio > max_area_ratio:
         return "panel candidate too large"
-    max_aspect = 12.0 if norm == OPERATING_PANEL_CLASS else 8.5
+    max_aspect = 8.5 if norm == OPERATING_PANEL_CLASS else 8.5
     if bh / bw > max_aspect or bh / bw < 0.35:
         return "invalid panel aspect"
-    if norm != OPERATING_PANEL_CLASS and elevator_roi and box_overlap_fraction([int(x1), int(y1), int(x2), int(y2)], elevator_roi) > 0.35:
-        return "inside elevator opening"
+    if elevator_roi:
+        overlap_opening = box_overlap_fraction([int(x1), int(y1), int(x2), int(y2)], elevator_roi)
+        if norm == OPERATING_PANEL_CLASS and overlap_opening > 0.18:
+            return "operating panel overlaps elevator opening"
+        if norm != OPERATING_PANEL_CLASS and overlap_opening > 0.35:
+            return "inside elevator opening"
+    if norm == OPERATING_PANEL_CLASS and bw > width * 0.24:
+        return "operating panel candidate too wide"
     return None
 
 
@@ -444,6 +462,7 @@ def expand_lci_call_button_with_floor_indicator(
     detections: list[dict[str, Any]],
     width: int,
     height: int,
+    image_rgb: np.ndarray | None = None,
 ) -> tuple[list[int], dict[str, Any]]:
     x1, y1, x2, y2 = [int(v) for v in target_box]
     target_cx = (x1 + x2) * 0.5
@@ -483,6 +502,23 @@ def expand_lci_call_button_with_floor_indicator(
                 }
             )
 
+    visual_box = _visual_floor_indicator_above_box(image_rgb, target_box, width, height)
+    if visual_box is not None:
+        combo = [
+            min(combo[0], visual_box[0]),
+            min(combo[1], visual_box[1]),
+            max(combo[2], visual_box[2]),
+            max(combo[3], visual_box[3]),
+        ]
+        included.append(
+            {
+                "bbox": visual_box,
+                "normalized_component_type": "floor_indicator_display",
+                "phrase": "visual red/blue side floor indicator above call button",
+                "source": "pixel_fallback",
+            }
+        )
+
     if not included:
         return target_box, {"status": "no_aligned_floor_indicator"}
 
@@ -493,6 +529,50 @@ def expand_lci_call_button_with_floor_indicator(
         "included": included,
         "combo_bbox": combo,
     }
+
+
+def _visual_floor_indicator_above_box(
+    image_rgb: np.ndarray | None,
+    target_box: list[int],
+    width: int,
+    height: int,
+) -> list[int] | None:
+    if image_rgb is None:
+        return None
+    x1, y1, x2, y2 = [int(v) for v in target_box]
+    target_w, target_h = max(1, x2 - x1), max(1, y2 - y1)
+    sx1 = max(0, int(round(x1 - target_w * 0.85)))
+    sx2 = min(width, int(round(x2 + target_w * 0.85)))
+    sy1 = max(0, int(round(y1 - target_h * 1.08)))
+    sy2 = min(height, int(round(y1 + target_h * 0.08)))
+    if sx2 <= sx1 or sy2 <= sy1:
+        return None
+
+    crop = np.asarray(image_rgb)[sy1:sy2, sx1:sx2]
+    hsv = cv2.cvtColor(crop, cv2.COLOR_RGB2HSV)
+    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    red = cv2.inRange(hsv, np.array([0, 95, 75]), np.array([12, 255, 255]))
+    red |= cv2.inRange(hsv, np.array([165, 95, 75]), np.array([179, 255, 255]))
+    blue = cv2.inRange(hsv, np.array([92, 70, 55]), np.array([135, 255, 255]))
+    color_mask = ((red > 0) | (blue > 0)).astype(np.uint8)
+    if int(np.count_nonzero(color_mask)) < max(4, int(color_mask.size * 0.0012)):
+        return None
+
+    color_rows, color_cols = np.where(color_mask > 0)
+    if color_rows.size == 0 or color_cols.size == 0:
+        return None
+    cx1, cx2 = sx1 + int(color_cols.min()), sx1 + int(color_cols.max()) + 1
+    cy1, cy2 = sy1 + int(color_rows.min()), sy1 + int(color_rows.max()) + 1
+    color_cx = (cx1 + cx2) * 0.5
+    target_cx = (x1 + x2) * 0.5
+    if abs(color_cx - target_cx) > max(target_w * 1.25, width * 0.045):
+        return None
+    return [
+        max(0, int(round(cx1 - max(4, target_w * 0.45)))),
+        max(0, int(round(cy1 - max(6, target_h * 0.30)))),
+        min(width, int(round(cx2 + max(4, target_w * 0.45)))),
+        min(height, int(round(cy2 + max(10, target_h * 0.65)))),
+    ]
 
 
 
@@ -911,7 +991,7 @@ def _valid_component_detection(det: dict[str, Any], keywords: list[str], width: 
         norm = str(det.get("normalized_component_type") or "").lower()
         if norm in {OPERATING_PANEL_CLASS, "floor_indicator_display", "weight_limit_sign"}:
             return False, "not_landing_call_indicator"
-        if any(term in phrase for term in ("floor", "display", "capacity", "weight", "car operating panel")):
+        if any(term in phrase for term in ("floor", "display", "capacity", "weight")):
             return False, "not_landing_call_indicator"
         aspect = bh / bw
         near_side_wall = cx < width * 0.45 or cx > width * 0.55
