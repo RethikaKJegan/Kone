@@ -980,6 +980,37 @@ def has_credible_elevator_detection(detections: dict[str, Any], width: int, heig
     return False
 
 
+def _draw_local_component_grid(image_rgb: np.ndarray, quad: np.ndarray, grid_cols: int = 4, grid_rows: int = 8) -> np.ndarray:
+    image_bgr = cv2.cvtColor(image_rgb.copy(), cv2.COLOR_RGB2BGR)
+    if quad.shape != (4, 2) or cv2.contourArea(quad.astype(np.float32)) <= 1.0:
+        return image_bgr
+    pts = np.round(quad).astype(np.int32)
+    overlay = image_bgr.copy()
+    cv2.fillPoly(overlay, [pts], (0, 220, 255))
+    image_bgr = cv2.addWeighted(overlay, 0.18, image_bgr, 0.82, 0)
+    cv2.polylines(image_bgr, [pts], True, (0, 180, 255), 2, cv2.LINE_AA)
+    src = np.array([[0, 0], [grid_cols, 0], [grid_cols, grid_rows], [0, grid_rows]], dtype=np.float32)
+    matrix = cv2.getPerspectiveTransform(src, quad.astype(np.float32))
+    for col in range(grid_cols + 1):
+        p1 = _project_local_grid_point(matrix, float(col), 0.0)
+        p2 = _project_local_grid_point(matrix, float(col), float(grid_rows))
+        cv2.line(image_bgr, p1, p2, (0, 255, 255), 1, cv2.LINE_AA)
+    for row in range(grid_rows + 1):
+        p1 = _project_local_grid_point(matrix, 0.0, float(row))
+        p2 = _project_local_grid_point(matrix, float(grid_cols), float(row))
+        cv2.line(image_bgr, p1, p2, (0, 255, 255), 1, cv2.LINE_AA)
+    return image_bgr
+
+
+def _project_local_grid_point(matrix: np.ndarray, x: float, y: float) -> tuple[int, int]:
+    point = matrix.astype(np.float64) @ np.array([x, y, 1.0], dtype=np.float64)
+    denom = float(point[2])
+    if abs(denom) < 1e-9:
+        denom = 1e-9
+    point = point[:2] / denom
+    return int(round(point[0])), int(round(point[1]))
+
+
 def write_component_placement_debug(
     cfg: dict[str, Any],
     bbox: list[int],
@@ -993,13 +1024,21 @@ def write_component_placement_debug(
         return
     path = Path(run_dir) / "component_placement_debug.json"
     placement_debug = cfg.get("_placement_debug", {})
+    output_mask_bbox = (mask_debug or {}).get("harmonization_mask_bbox")
     payload = {
+        "component_id": placement_debug.get("component_id") or cfg.get("_replacement_id"),
         "requested_component_type": placement_debug.get("requested_component_type"),
         "valid_replacement_targets": placement_debug.get("valid_replacement_targets", []),
         "rejected_replacement_targets": placement_debug.get("rejected_component_detections", []),
         "selected_replacement_target_type": placement_debug.get("selected_replacement_target_type"),
         "selected_replacement_target_source": placement_debug.get("selected_replacement_target_source"),
         "selected_replacement_target_bbox": placement_debug.get("selected_replacement_target_bbox"),
+        "selected_target_bbox": placement_debug.get("selected_replacement_target_bbox") or placement_debug.get("inpaint_bbox") or bbox,
+        "selected_target_quad": placement_debug.get("selected_target_quad") or placement_debug.get("homography_destination_quad"),
+        "local_homography_3x3": placement_debug.get("local_homography_3x3"),
+        "local_angle_degrees": placement_debug.get("local_angle_degrees"),
+        "source_asset_size": placement_debug.get("source_asset_size"),
+        "output_mask_bbox": output_mask_bbox,
         "target_panel_bbox": placement_debug.get("target_panel_bbox"),
         "placement_mode": placement_debug.get("placement_mode"),
         "target_padding_px": placement_debug.get("target_padding_px"),
@@ -1012,7 +1051,7 @@ def write_component_placement_debug(
         "homography_alignment": placement_debug.get("homography_alignment"),
         "final_component_placement": {"bbox": placement_debug.get("final_insertion_bbox") or bbox, "reason": reason},
         "rejected_component_detections": placement_debug.get("rejected_component_detections", []),
-        "harmonization_mask_bbox": (mask_debug or {}).get("harmonization_mask_bbox"),
+        "harmonization_mask_bbox": output_mask_bbox,
         "harmonization_mask_white_area_ratio": (mask_debug or {}).get("harmonization_mask_white_area_ratio"),
         "harmonization_mask_validation_status": (mask_debug or {}).get("harmonization_mask_validation_status"),
         "mask_rebuilt_reason": (mask_debug or {}).get("mask_rebuilt_reason"),
@@ -1034,6 +1073,10 @@ def write_component_placement_debug(
         overlay = cv2.cvtColor(image_rgb.copy(), cv2.COLOR_RGB2BGR)
         x1, y1, x2, y2 = [int(v) for v in bbox]
         cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 220, 255), 3)
+        quad = placement_debug.get("selected_target_quad") or placement_debug.get("homography_destination_quad")
+        if quad:
+            grid_overlay = _draw_local_component_grid(image_rgb, np.array(quad, dtype=np.float32))
+            cv2.imwrite(str(Path(run_dir) / f"local_perspective_grid_{cfg.get('_replacement_id', 'component')}.png"), grid_overlay)
         cv2.imwrite(str(Path(run_dir) / "final_component_placement.png"), overlay)
         target_overlay = cv2.cvtColor(image_rgb.copy(), cv2.COLOR_RGB2BGR)
         for item in placement_debug.get("valid_replacement_targets", []):
@@ -1243,6 +1286,7 @@ def _warp_mod_to_scene(
         placement_debug["final_insertion_bbox"] = [int(x1), int(y1), int(x2), int(y2)]
         placement_debug["homography_destination_quad"] = quad.round(3).tolist()
         placement_debug["homography_alignment"] = homography_debug
+        _record_local_component_perspective_debug(placement_debug, [box_w, box_h], quad)
         cfg["_placement_debug"] = placement_debug
         return warp_rgba_to_quad(mod, quad, out_hw)
     if placement_debug.get("scale_to_target_bbox"):
@@ -1296,8 +1340,25 @@ def _warp_mod_to_scene(
     ]
     placement_debug["homography_destination_quad"] = quad.round(3).tolist()
     placement_debug["homography_alignment"] = homography_debug
+    _record_local_component_perspective_debug(placement_debug, [new_w, new_h], quad)
     cfg["_placement_debug"] = placement_debug
     return warp_rgba_to_quad(mod, quad, out_hw)
+
+
+def _record_local_component_perspective_debug(placement_debug: dict[str, Any], source_size: list[int], quad: np.ndarray) -> None:
+    source_w, source_h = max(1, int(source_size[0])), max(1, int(source_size[1]))
+    src = np.array([[0, 0], [source_w - 1, 0], [source_w - 1, source_h - 1], [0, source_h - 1]], dtype=np.float32)
+    matrix = cv2.getPerspectiveTransform(src, quad.astype(np.float32))
+    top = quad[1] - quad[0]
+    bottom = quad[2] - quad[3]
+    edge = (top + bottom) * 0.5
+    angle = float(np.degrees(np.arctan2(float(edge[1]), float(edge[0]))))
+    placement_debug["component_id"] = placement_debug.get("component_id")
+    placement_debug["source_asset_size"] = [source_w, source_h]
+    placement_debug["selected_target_quad"] = quad.round(3).tolist()
+    placement_debug["local_homography_3x3"] = matrix.round(8).tolist()
+    placement_debug["local_angle_degrees"] = angle
+    placement_debug["local_perspective_mode"] = "component_target_quad"
 
 
 def build_wall_aligned_destination_quad(
