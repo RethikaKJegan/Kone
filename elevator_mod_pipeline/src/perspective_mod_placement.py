@@ -114,6 +114,75 @@ def draw_perspective_grid(image: np.ndarray, H: np.ndarray, grid_cols: int, grid
     return grid
 
 
+def compute_local_component_quad(
+    image_shape: tuple[int, int] | tuple[int, int, int],
+    placement_debug: dict[str, Any] | None = None,
+    target_box: list[int] | list[float] | None = None,
+) -> np.ndarray:
+    height, width = image_shape[:2]
+    placement_debug = placement_debug or {}
+    quad = _placement_quad_or_none(placement_debug)
+    if quad is not None:
+        return _clip_quad(quad, width, height)
+    box = (
+        target_box
+        or placement_debug.get("final_insertion_bbox")
+        or placement_debug.get("target_panel_bbox")
+        or placement_debug.get("selected_replacement_target_bbox")
+        or placement_debug.get("inpaint_bbox")
+    )
+    if not box:
+        box_w = max(2.0, width * 0.08)
+        box_h = max(2.0, height * 0.18)
+        cx, cy = width * 0.5, height * 0.5
+        box = [cx - box_w * 0.5, cy - box_h * 0.5, cx + box_w * 0.5, cy + box_h * 0.5]
+    x1, y1, x2, y2 = [float(v) for v in box]
+    quad = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32)
+    return _clip_quad(quad, width, height)
+
+
+def compute_local_component_homography(source_size: tuple[int, int], target_quad: np.ndarray) -> np.ndarray:
+    src_w, src_h = [max(1, int(v)) for v in source_size]
+    src = np.array([[0, 0], [src_w - 1, 0], [src_w - 1, src_h - 1], [0, src_h - 1]], dtype=np.float32)
+    H = cv2.getPerspectiveTransform(src, target_quad.astype(np.float32))
+    if not np.isfinite(H).all():
+        raise ValueError("Local component homography is invalid")
+    return H
+
+
+def estimate_quad_angle_degrees(target_quad: np.ndarray) -> float:
+    quad = target_quad.astype(np.float32)
+    top = quad[1] - quad[0]
+    bottom = quad[2] - quad[3]
+    edge = (top + bottom) * 0.5
+    return float(np.degrees(np.arctan2(float(edge[1]), float(edge[0]))))
+
+
+def warp_component_to_local_quad(
+    component_rgba: np.ndarray,
+    target_quad: np.ndarray,
+    output_shape: tuple[int, int] | tuple[int, int, int],
+) -> np.ndarray:
+    return warp_panel_to_quad(component_rgba, target_quad, output_shape)
+
+
+def draw_local_perspective_grid(
+    image: np.ndarray,
+    target_quad: np.ndarray,
+    grid_cols: int = 4,
+    grid_rows: int = 8,
+) -> np.ndarray:
+    marked = image.copy()
+    quad = target_quad.astype(np.float32)
+    H = compute_grid_homography(quad, max(1, int(grid_cols)), max(1, int(grid_rows)))
+    pts = np.round(quad).astype(np.int32)
+    overlay = marked.copy()
+    cv2.fillPoly(overlay, [pts], (0, 220, 255))
+    marked = cv2.addWeighted(overlay, 0.18, marked, 0.82, 0)
+    cv2.polylines(marked, [pts], True, (0, 180, 255), 2, cv2.LINE_AA)
+    return draw_perspective_grid(marked, H, max(1, int(grid_cols)), max(1, int(grid_rows)))
+
+
 def compute_mod_destination(H: np.ndarray, mod_box: np.ndarray) -> np.ndarray:
     if len(mod_box) != 2:
         raise ValueError("MOD box must contain exactly two points")
