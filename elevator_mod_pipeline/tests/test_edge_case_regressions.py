@@ -574,6 +574,36 @@ def test_unmatched_dark_wall_fixture_does_not_invent_call_panel() -> None:
     assert [det["normalized_component_type"] for det in detections] == ["elevator_door"]
 
 
+def test_long_side_silver_strip_is_recovered_as_call_panel() -> None:
+    image = np.full((1600, 1200, 3), [28, 28, 28], dtype=np.uint8)
+    image[405:1306, 348:877] = [78, 82, 84]
+    image[385:1260, 935:1036] = [154, 156, 150]
+    image[430:1280, 1040:1080] = [24, 24, 24]
+    image[445:515, 972:1008] = [36, 38, 36]
+    image[600:650, 972:1008] = [230, 232, 225]
+    image[930:965, 972:1008] = [42, 44, 42]
+    detections = [
+        {
+            "phrase": "elevator door",
+            "normalized_component_type": "elevator_door",
+            "score": 0.59,
+            "box_xyxy": [347.9, 405.0, 877.5, 1306.0],
+        },
+        {
+            "phrase": "floor indicator display",
+            "normalized_component_type": "floor_indicator_display",
+            "score": 0.43,
+            "box_xyxy": [476.2, 335.4, 734.1, 404.5],
+        },
+    ]
+
+    detect._add_structural_call_panel_detection(image, detections)
+
+    panel = next(item for item in detections if item.get("source") == "image_structure_long_side_call_panel")
+    assert panel["normalized_component_type"] == "elevator call button panel"
+    assert panel["box_xyxy"] == pytest.approx([935, 385, 1036, 1260], abs=18)
+
+
 def test_sample8_side_floor_display_replaces_false_overhead_indicator() -> None:
     image = cv2.cvtColor(cv2.imread(str(ROOT / "tests" / "images" / "Sample8.jpg")), cv2.COLOR_BGR2RGB)
     detections = [
