@@ -38,6 +38,7 @@ def insert_mod_panel(background_path: str | Path, mod_path: str | Path, detectio
     target_box, placement_reason = _target_box(width, height, detections, cfg, mod.shape[:2], removal_mask, bg)
     LOGGER.info("[PLACE] Final component placement: %s reason=%s", target_box, placement_reason)
     insertion_box = large_opening_insertion_box(target_box, cfg, bg.shape[:2])
+    bg = cleanup_lci_call_panel_residue(bg, target_box, insertion_box, cfg)
     mod = match_mod_appearance_to_cleaned_region(mod, bg, insertion_box)
     warped = (
         _warp_long_panel_to_exact_box(mod, insertion_box, bg.shape[:2])
@@ -146,6 +147,10 @@ def localized_mask_from_preselected_detection(
     selected_boxes = [cfg.get("_placement_debug", {}).get("selected_replacement_target_bbox")]
     combo = cfg.get("_placement_debug", {}).get("lci_combo_expansion", {})
     selected_boxes.extend(item.get("bbox") for item in combo.get("included", []) if isinstance(item, dict))
+    force_rectangular_panel_cleanup = (
+        cfg.get("_requested_component_type") == LANDING_CALL_INDICATOR_CLASS
+        and cfg.get("_placement_debug", {}).get("selected_replacement_target_type") == "elevator call button panel"
+    )
 
     mask = np.zeros((height, width), dtype=np.uint8)
     for box in selected_boxes:
@@ -159,6 +164,8 @@ def localized_mask_from_preselected_detection(
 
     if mask.max() == 0:
         return localized_mask_from_bbox(image_shape, fallback_bbox, pad=pad)
+    if force_rectangular_panel_cleanup:
+        mask = np.maximum(mask, localized_mask_from_bbox(image_shape, fallback_bbox, pad=pad))
     if pad > 0:
         kernel = np.ones((3, 3), np.uint8)
         mask = cv2.dilate(mask.astype(np.uint8), kernel, iterations=pad)
@@ -1881,6 +1888,71 @@ def add_wall_grounding(bg: np.ndarray, alpha: np.ndarray) -> np.ndarray:
     halo = cv2.GaussianBlur(solid, (51, 51), 18)
     halo = np.clip(halo - solid, 0, 1)
     return np.clip(bg.astype(np.float32) * (1 - halo[:, :, None] * 0.035), 0, 255).astype(np.uint8)
+
+
+def cleanup_lci_call_panel_residue(bg: np.ndarray, target_box: list[int], insertion_box: list[int], cfg: dict[str, Any]) -> np.ndarray:
+    if (
+        cfg.get("_requested_component_type") != LANDING_CALL_INDICATOR_CLASS
+        or cfg.get("_placement_debug", {}).get("selected_replacement_target_type") != "elevator call button panel"
+    ):
+        return bg
+    height, width = bg.shape[:2]
+    x1, y1, x2, y2 = [int(round(v)) for v in target_box]
+    ix1, iy1, ix2, iy2 = [int(round(v)) for v in insertion_box]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(width, x2), min(height, y2)
+    ix1, iy1 = max(0, ix1), max(0, iy1)
+    ix2, iy2 = min(width, ix2), min(height, iy2)
+    if x2 <= x1 or y2 <= y1:
+        return bg
+
+    cleanup = np.zeros((height, width), dtype=np.uint8)
+    cleanup[y1:y2, x1:x2] = 255
+    protect = max(1, int(min(max(1, ix2 - ix1), max(1, iy2 - iy1)) * 0.015))
+    cleanup[max(0, iy1 - protect) : min(height, iy2 + protect), max(0, ix1 - protect) : min(width, ix2 + protect)] = 0
+    if cleanup.max() == 0:
+        return bg
+
+    out = bg.astype(np.float32).copy()
+    target_w = max(1, x2 - x1)
+    sample_margin = max(18, int(target_w * 0.75))
+    sample_gap = max(3, int(target_w * 0.08))
+    sx1 = max(0, x1 - sample_margin)
+    sx2 = min(width, x2 + sample_margin)
+    rng = np.random.default_rng(42)
+
+    global_ring = bg[y1:y2, sx1:sx2]
+    ring_mask = np.ones(global_ring.shape[:2], dtype=bool)
+    ring_mask[:, x1 - sx1 : x2 - sx1] = False
+    global_samples = global_ring[ring_mask]
+    fallback = np.median(global_samples, axis=0) if global_samples.size else np.median(bg.reshape(-1, 3), axis=0)
+    fallback_std = np.std(global_samples, axis=0) if global_samples.size else np.array([2.0, 2.0, 2.0])
+
+    for yy in range(y1, y2):
+        cols = np.where(cleanup[yy, x1:x2] > 0)[0]
+        if cols.size == 0:
+            continue
+        row1, row2 = max(y1, yy - 2), min(y2, yy + 3)
+        samples: list[np.ndarray] = []
+        if x1 - sample_gap > sx1:
+            samples.append(bg[row1:row2, sx1 : x1 - sample_gap].reshape(-1, 3))
+        if sx2 > x2 + sample_gap:
+            samples.append(bg[row1:row2, x2 + sample_gap : sx2].reshape(-1, 3))
+        row_samples = np.concatenate([sample for sample in samples if sample.size], axis=0) if any(sample.size for sample in samples) else np.empty((0, 3))
+        center = np.median(row_samples, axis=0) if row_samples.size else fallback
+        spread = np.clip(np.std(row_samples, axis=0) if row_samples.size else fallback_std, 1.0, 8.0)
+        fill = center + rng.normal(0, spread * 0.18, (cols.size, 3))
+        out[yy, x1 + cols] = np.clip(fill, 0, 255)
+
+    alpha = cv2.GaussianBlur((cleanup > 0).astype(np.float32), (0, 0), 2.0)
+    alpha = np.clip(alpha, 0.0, 1.0)
+    blended = bg.astype(np.float32) * (1.0 - alpha[:, :, None]) + out * alpha[:, :, None]
+    cfg.setdefault("_placement_debug", {})["lci_panel_residue_cleanup"] = {
+        "status": "applied",
+        "target_bbox": [x1, y1, x2, y2],
+        "protected_insertion_bbox": [ix1, iy1, ix2, iy2],
+    }
+    return np.clip(blended, 0, 255).astype(np.uint8)
 
 
 def alpha_composite(bg: np.ndarray, fg: np.ndarray, alpha: np.ndarray) -> np.ndarray:
