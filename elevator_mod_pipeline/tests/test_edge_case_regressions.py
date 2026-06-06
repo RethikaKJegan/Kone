@@ -11,9 +11,11 @@ import src.detect as detect
 import run_batch
 from src.input_validation import validate_elevator_presence
 from src.insert_mod import (
+    cleanup_lci_call_panel_residue,
     expand_control_panel_bbox,
     extend_inpaint_bbox_for_aligned_panel_artifacts,
     invalid_mod_panel_target_reason,
+    localized_mask_from_preselected_detection,
     preselect_mod_panel_placement,
     select_valid_component_detection,
 )
@@ -776,6 +778,54 @@ def test_cop_preselection_preserves_floor_indicator_by_default(tmp_path: Path) -
     assert bbox[1] > 70
     assert bbox[3] >= 190
     assert cfg["_placement_debug"]["aligned_artifact_cleanup"]["status"] == "preserved_floor_indicator_display"
+
+
+def test_lci_replacement_erases_full_call_panel_bbox_when_sam_mask_is_partial() -> None:
+    partial_mask = np.zeros((240, 160), dtype=bool)
+    partial_mask[95:145, 75:95] = True
+    detections = {
+        "detections": [
+            {
+                "phrase": "elevator call button panel",
+                "normalized_component_type": "elevator call button panel",
+                "score": 0.35,
+                "box_xyxy": [68, 70, 112, 190],
+                "mask": detect.mask_to_rle(partial_mask),
+            }
+        ]
+    }
+    cfg = {
+        "_requested_component_type": "landing_call_indicator",
+        "_placement_debug": {
+            "selected_replacement_target_type": "elevator call button panel",
+            "selected_replacement_target_bbox": [68, 70, 112, 190],
+        },
+    }
+
+    mask = localized_mask_from_preselected_detection((240, 160, 3), detections, cfg, [68, 70, 112, 190], pad=0)
+
+    assert mask[72, 70] == 255
+    assert mask[188, 110] == 255
+    assert mask[69, 70] == 0
+    assert mask[190, 110] == 0
+
+
+def test_lci_cleanup_removes_old_call_panel_residue_outside_inserted_panel() -> None:
+    bg = np.full((240, 180, 3), [198, 186, 168], dtype=np.uint8)
+    bg[155:240, :] = [124, 91, 72]
+    bg[70:190, 90:134] = [142, 168, 195]
+    bg[95:168, 96:128] = [55, 70, 85]
+    cfg = {
+        "_requested_component_type": "landing_call_indicator",
+        "_placement_debug": {"selected_replacement_target_type": "elevator call button panel"},
+    }
+
+    cleaned = cleanup_lci_call_panel_residue(bg, [90, 70, 134, 190], [96, 88, 128, 168], cfg)
+
+    assert cleaned[182, 112, 2] < 120
+    assert cleaned[75, 112, 2] < 190
+    assert np.abs(cleaned[120, 110].astype(int) - bg[120, 110].astype(int)).mean() < 8
+    assert cfg["_placement_debug"]["lci_panel_residue_cleanup"]["status"] == "applied"
 
 
 def test_expanded_tall_cop_is_used_instead_of_adjacent_wall(tmp_path: Path) -> None:
