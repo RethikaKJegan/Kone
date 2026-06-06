@@ -1314,6 +1314,26 @@ def _add_structural_call_panel_detection(image_rgb: np.ndarray, detections: list
 				_remap_detection(det, "elevator call button panel", "elevator call button panel", "dark_wall_call_panel_left_of_door")
 				_update_detection_box(det, box)
 				return
+	long_panel = _long_side_call_panel_box(image_rgb, [dx1, dy1, dx2, dy2], width, height)
+	if long_panel is not None and not any(det.get("normalized_component_type") == "elevator call button panel" for det in detections):
+		detections.append(
+			{
+				"id": len(detections),
+				"phrase": "elevator call button panel",
+				"raw_detection_label": "image_structure_long_side_call_panel",
+				"source_prompt": "elevator call button panel",
+				"normalized_component_type": "elevator call button panel",
+				"score": 0.43,
+				"box_xyxy": long_panel,
+				"box_xywh": [long_panel[0], long_panel[1], long_panel[2] - long_panel[0], long_panel[3] - long_panel[1]],
+				"box_area": float(_box_area(long_panel)),
+				"source": "image_structure_long_side_call_panel",
+				"geometry_validation": {"status": "derived", "reason": "long_vertical_side_call_panel_beside_door"},
+			}
+		)
+		for idx, det in enumerate(detections):
+			det["id"] = idx
+		return
 	for det in detections:
 		if det.get("normalized_component_type") != "wheelchair button":
 			continue
@@ -1343,6 +1363,70 @@ def _add_structural_call_panel_detection(image_rgb: np.ndarray, detections: list
 		_remap_detection(det, "elevator call button panel", "elevator call button panel", "button_nested_in_dark_call_panel_fixture")
 		_update_detection_box(det, panel_box)
 		return
+
+
+def _long_side_call_panel_box(
+	image_rgb: np.ndarray,
+	door_box: list[float],
+	width: int,
+	height: int,
+) -> list[float] | None:
+	try:
+		import cv2
+	except ImportError:
+		return None
+	dx1, dy1, dx2, dy2 = [float(v) for v in door_box]
+	regions = [
+		[max(0, int(round(dx1 - width * 0.32))), max(0, int(round(dy1 - height * 0.08))), max(1, int(round(dx1 - width * 0.025))), min(height, int(round(dy2 + height * 0.06)))],
+		[min(width - 1, int(round(dx2 + width * 0.025))), max(0, int(round(dy1 - height * 0.08))), min(width, int(round(dx2 + width * 0.32))), min(height, int(round(dy2 + height * 0.06)))],
+	]
+	best: tuple[float, list[float]] | None = None
+	for sx1, sy1, sx2, sy2 in regions:
+		if sx2 <= sx1 or sy2 <= sy1:
+			continue
+		roi = np.asarray(image_rgb)[sy1:sy2, sx1:sx2]
+		hsv = cv2.cvtColor(roi, cv2.COLOR_RGB2HSV)
+		metal = ((hsv[:, :, 1] < 80) & (hsv[:, :, 2] > 65) & (hsv[:, :, 2] < 245)).astype(np.uint8)
+		col_score = cv2.GaussianBlur(metal.mean(axis=0).reshape(1, -1).astype(np.float32), (31, 1), 0).ravel()
+		for c1, c2 in _projection_runs(col_score, threshold=0.22, min_len=max(8, int(width * 0.018))):
+			bw = c2 - c1
+			if not (width * 0.030 <= bw <= width * 0.110):
+				continue
+			row_mask = metal[:, c1:c2]
+			row_score = cv2.GaussianBlur(row_mask.mean(axis=1).reshape(-1, 1).astype(np.float32), (1, 31), 0).ravel()
+			row_runs = _projection_runs(row_score, threshold=0.12, min_len=max(60, int(height * 0.20)))
+			if not row_runs:
+				continue
+			r1, r2 = max(row_runs, key=lambda run: run[1] - run[0])
+			box = [float(sx1 + c1), float(sy1 + r1), float(sx1 + c2), float(sy1 + r2)]
+			panel_w, panel_h = max(1.0, box[2] - box[0]), max(1.0, box[3] - box[1])
+			aspect = panel_h / panel_w
+			if not (5.0 <= aspect <= 16.0):
+				continue
+			if not (height * 0.32 <= panel_h <= height * 0.72):
+				continue
+			cx = (box[0] + box[2]) * 0.5
+			gap = dx1 - box[2] if cx < dx1 else box[0] - dx2
+			if gap < 0 or gap > width * 0.20:
+				continue
+			score = float(row_score[r1:r2].mean() * col_score[c1:c2].mean() * panel_h * panel_w) - gap * 15.0
+			if best is None or score > best[0]:
+				best = (score, box)
+	return best[1] if best is not None else None
+
+
+def _projection_runs(values: np.ndarray, threshold: float, min_len: int) -> list[tuple[int, int]]:
+	runs: list[tuple[int, int]] = []
+	start: int | None = None
+	for idx, value in enumerate(values):
+		if value > threshold and start is None:
+			start = idx
+		if start is not None and (value <= threshold or idx == len(values) - 1):
+			end = idx if value <= threshold else idx + 1
+			if end - start >= min_len:
+				runs.append((start, end))
+			start = None
+	return runs
 
 
 def _call_panel_expansion_too_large(panel_box: list[float], seed_box: list[float], width: int, height: int) -> bool:
