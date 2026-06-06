@@ -15,7 +15,7 @@ import numpy as np
 
 from .input_validation import merged_validation_config, validate_elevator_presence, validate_input_image
 from .inpaint import build_removal_mask, inpaint_background
-from .insert_mod import insert_mod_panel, localized_mask_from_bbox, preselect_mod_panel_placement
+from .insert_mod import insert_mod_panel, localized_mask_from_preselected_detection, preselect_mod_panel_placement
 from .perspective_mod_placement import (
     copy_pipeline_handoff,
     run_auto_perspective_mod_placement,
@@ -223,7 +223,7 @@ def run(config_path: str | Path) -> None:
             preselected_bbox = preselect_mod_panel_placement(original, mod_path, detections, component_cfg)
             if preselected_bbox is not None:
                 pad = int(component_cfg.get("removal", {}).get("box_mask_padding_px", 2))
-                component_mask = localized_mask_from_bbox(original.shape, preselected_bbox, pad=pad)
+                component_mask = localized_mask_from_preselected_detection(original.shape, detections, component_cfg, preselected_bbox, pad=pad)
             else:
                 component_mask = build_removal_mask(original, detections, component_cfg)
             removal_mask = component_mask if removal_mask is None else cv2.max(removal_mask, component_mask)

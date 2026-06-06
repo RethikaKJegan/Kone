@@ -8,7 +8,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .utils import load_image_rgba, load_image_rgb, save_rgb, select_detection, select_middle_floor_indicator_display
+from .utils import detection_mask, load_image_rgba, load_image_rgb, save_rgb, select_detection, select_middle_floor_indicator_display
 
 LOGGER = logging.getLogger(__name__)
 
@@ -135,6 +135,36 @@ def localized_mask_from_bbox(image_shape: tuple[int, int] | tuple[int, int, int]
     return mask
 
 
+def localized_mask_from_preselected_detection(
+    image_shape: tuple[int, int] | tuple[int, int, int],
+    detections: dict[str, Any],
+    cfg: dict[str, Any],
+    fallback_bbox: list[int],
+    pad: int = 0,
+) -> np.ndarray:
+    height, width = image_shape[:2]
+    selected_boxes = [cfg.get("_placement_debug", {}).get("selected_replacement_target_bbox")]
+    combo = cfg.get("_placement_debug", {}).get("lci_combo_expansion", {})
+    selected_boxes.extend(item.get("bbox") for item in combo.get("included", []) if isinstance(item, dict))
+
+    mask = np.zeros((height, width), dtype=np.uint8)
+    for box in selected_boxes:
+        det = _find_detection_by_box(detections.get("detections", []), box)
+        if det is None:
+            continue
+        det_mask = detection_mask(det, height, width)
+        if det_mask.max() == 0:
+            continue
+        mask = np.maximum(mask, det_mask)
+
+    if mask.max() == 0:
+        return localized_mask_from_bbox(image_shape, fallback_bbox, pad=pad)
+    if pad > 0:
+        kernel = np.ones((3, 3), np.uint8)
+        mask = cv2.dilate(mask.astype(np.uint8), kernel, iterations=pad)
+    return mask
+
+
 def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[str, Any], mod_hw: tuple[int, int] | None = None, removal_mask: np.ndarray | None = None, image: np.ndarray | None = None) -> tuple[list[int], str]:
     ins = cfg["insertion"]
     if ins.get("manual_box_xyxy"):
@@ -249,18 +279,19 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
         cfg["_placement_debug"] = {"rejected_component_detections": rejected_components}
         if det:
             detection_box = [int(round(v)) for v in det["box_xyxy"]]
+            sam_box = detection_mask_bbox(det, height, width, pad=0) or detection_box
 
             if cfg.get("_requested_component_type") == "landing_call_indicator":
                 target_box, lci_combo_debug = expand_lci_call_button_with_floor_indicator(
-                    detection_box,
+                    sam_box,
                     detections["detections"],
                     width,
                     height,
                     image,
                 )
             else:
-                erased_box = _select_erased_long_panel_box(removal_mask, detection_box, cfg, mod_hw)
-                target_box = erased_box or detection_box
+                erased_box = _select_erased_long_panel_box(removal_mask, sam_box, cfg, mod_hw)
+                target_box = erased_box or sam_box
                 lci_combo_debug = {"status": "not_lci"}
 
     
@@ -269,6 +300,7 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
                     "requested_component_type": cfg.get("_requested_component_type"),
                     "selected_replacement_target_type": det.get("normalized_component_type"),
                     "selected_replacement_target_bbox": detection_box,
+                    "selected_replacement_sam_bbox": sam_box,
                     "inpaint_bbox": target_box,
                     "lci_combo_expansion": lci_combo_debug,
                     "scale_to_target_bbox": True,
@@ -344,7 +376,8 @@ def select_door_opening_target_box(detections: list[dict[str, Any]], width: int,
     door = _largest_detection_of_type(detections, {"elevator_door"}, width, height, 0.70)
     if not door:
         return None, "no_detected_elevator_door_opening"
-    box = padded_box([int(round(v)) for v in door["box_xyxy"]], width, height, 0)
+    box = detection_mask_bbox(door, height, width, pad=0) or [int(round(v)) for v in door["box_xyxy"]]
+    box = padded_box(box, width, height, 0)
     if box[2] - box[0] <= 8 or box[3] - box[1] <= 8:
         return None, "invalid_elevator_door_opening"
     return box, "detected_elevator_door_opening"
@@ -457,6 +490,48 @@ def valid_target_debug(detections: list[dict[str, Any]]) -> list[dict[str, Any]]
 def padded_box(box: list[int], width: int, height: int, pad: int) -> list[int]:
     x1, y1, x2, y2 = box
     return [max(0, x1 - pad), max(0, y1 - pad), min(width, x2 + pad), min(height, y2 + pad)]
+
+
+def detection_mask_bbox(det: dict[str, Any], height: int, width: int, pad: int = 0) -> list[int] | None:
+    if not any(det.get(key) is not None for key in ("mask", "segmentation", "rle")):
+        return None
+    mask = detection_mask(det, height, width)
+    ys, xs = np.where(mask > 127)
+    if xs.size == 0 or ys.size == 0:
+        return None
+    mask_box = padded_box(
+        [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1],
+        width,
+        height,
+        pad,
+    )
+    det_box_values = [int(round(v)) for v in det.get("box_xyxy", [0, 0, 0, 0])]
+    det_w, det_h = max(1, det_box_values[2] - det_box_values[0]), max(1, det_box_values[3] - det_box_values[1])
+    mask_w, mask_h = max(1, mask_box[2] - mask_box[0]), max(1, mask_box[3] - mask_box[1])
+    det_cx, det_cy = (det_box_values[0] + det_box_values[2]) * 0.5, (det_box_values[1] + det_box_values[3]) * 0.5
+    mask_cx, mask_cy = (mask_box[0] + mask_box[2]) * 0.5, (mask_box[1] + mask_box[3]) * 0.5
+    if mask_w * mask_h > det_w * det_h * 1.80:
+        return None
+    if abs(mask_cx - det_cx) > max(det_w * 0.75, width * 0.035) or abs(mask_cy - det_cy) > max(det_h * 0.75, height * 0.035):
+        return None
+    return mask_box
+
+
+def _find_detection_by_box(detections: list[dict[str, Any]], box: list[int] | None) -> dict[str, Any] | None:
+    if not box:
+        return None
+    target = [int(round(v)) for v in box]
+    best: tuple[float, dict[str, Any]] | None = None
+    for det in detections:
+        det_box_values = [int(round(v)) for v in det.get("box_xyxy", [0, 0, 0, 0])]
+        distance = sum(abs(a - b) for a, b in zip(target, det_box_values))
+        if best is None or distance < best[0]:
+            best = (float(distance), det)
+    if best is None or best[0] > 16:
+        return None
+    return best[1]
+
+
 def expand_lci_call_button_with_floor_indicator(
     target_box: list[int],
     detections: list[dict[str, Any]],
@@ -505,20 +580,30 @@ def expand_lci_call_button_with_floor_indicator(
 
     visual_box = _visual_floor_indicator_above_box(image_rgb, target_box, width, height)
     if visual_box is not None:
-        combo = [
-            min(combo[0], visual_box[0]),
-            min(combo[1], visual_box[1]),
-            max(combo[2], visual_box[2]),
-            max(combo[3], visual_box[3]),
-        ]
-        included.append(
-            {
-                "bbox": visual_box,
-                "normalized_component_type": "floor_indicator_display",
-                "phrase": "visual red/blue side floor indicator above call button",
-                "source": "pixel_fallback",
-            }
+        vx1, vy1, vx2, vy2 = visual_box
+        visual_w, visual_h = max(1, vx2 - vx1), max(1, vy2 - vy1)
+        visual_overlap = max(0, min(x2, vx2) - max(x1, vx1)) / max(1, min(target_w, visual_w))
+        visual_is_sane = (
+            visual_w <= max(target_w * 1.20, width * 0.07)
+            and visual_h <= max(target_h * 0.90, height * 0.08)
+            and visual_overlap >= 0.30
+            and vy2 <= y2 + target_h * 0.12
         )
+        if visual_is_sane:
+            combo = [
+                min(combo[0], visual_box[0]),
+                min(combo[1], visual_box[1]),
+                max(combo[2], visual_box[2]),
+                max(combo[3], visual_box[3]),
+            ]
+            included.append(
+                {
+                    "bbox": visual_box,
+                    "normalized_component_type": "floor_indicator_display",
+                    "phrase": "visual red/blue side floor indicator above call button",
+                    "source": "pixel_fallback",
+                }
+            )
 
     if not included:
         return target_box, {"status": "no_aligned_floor_indicator"}
@@ -1458,14 +1543,8 @@ def refine_alpha(alpha: np.ndarray) -> np.ndarray:
 def large_opening_insertion_box(target_box: list[int], cfg: dict[str, Any], out_hw: tuple[int, int]) -> list[int]:
     component_type = cfg.get("_requested_component_type") or cfg.get("_placement_debug", {}).get("selected_replacement_target_type")
     if component_type == "elevator_door":
-        height, _ = out_hw
-        x1, y1, x2, y2 = [int(round(value)) for value in target_box]
-        box_h = max(1, y2 - y1)
-        bottom_trim = int(np.clip(box_h * 0.045, 12, 24))
-        flattened = [x1, y1, x2, max(y1 + 1, min(height, y2 - bottom_trim))]
-        cfg.setdefault("_placement_debug", {})["door_flattened_insertion_bbox"] = flattened
-        LOGGER.info("[PLACE] Flattened elevator_door bottom edge: %s -> %s", target_box, flattened)
-        return flattened
+        cfg.setdefault("_placement_debug", {})["door_exact_insertion_bbox"] = [int(round(value)) for value in target_box]
+        return [int(round(value)) for value in target_box]
     if component_type != "elevator_cabin":
         return target_box
 
