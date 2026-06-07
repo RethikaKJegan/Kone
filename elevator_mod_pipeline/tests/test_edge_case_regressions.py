@@ -13,6 +13,7 @@ import src.pipeline as pipeline_module
 import run_batch
 from src.input_validation import validate_elevator_presence
 from src.insert_mod import (
+    build_wall_aligned_destination_quad,
     cleanup_lci_call_panel_residue,
     expand_control_panel_bbox,
     extend_inpaint_bbox_for_aligned_panel_artifacts,
@@ -129,34 +130,32 @@ def test_pipeline_does_not_apply_global_perspective_after_local_component_placem
     assert "run_auto_perspective_mod_placement" not in source
 
 
-def test_lci_local_surface_uses_tilted_wall_lines_not_upright_bbox() -> None:
+def test_lci_placement_stays_rectified_even_when_wall_lines_are_tilted() -> None:
     image = np.full((420, 360, 3), 190, dtype=np.uint8)
     cv2.line(image, (210, 55), (235, 370), (55, 55, 55), 3)
     cv2.line(image, (282, 48), (306, 365), (60, 60, 60), 3)
     target = [226, 150, 272, 260]
+    cfg = {"_requested_component_type": "landing_call_indicator", "_placement_debug": {"placement_mode": "existing_lci"}}
 
-    surface, debug = estimate_local_surface_quad(image, "landing_call_indicator", target)
-    dest = build_asset_quad_on_surface(target, surface, "landing_call_indicator")
+    dest, debug = build_wall_aligned_destination_quad(image, target, target, {}, cfg, image.shape[:2])
 
-    assert debug["used_surface_source"] in {"panel_edges", "line_detection"}
-    assert debug["fallback_used"] is False
-    assert abs(estimate_local_surface_angle_degrees(dest)) > 1.0
-    assert abs(dest[0][1] - dest[1][1]) > 1.0
+    assert debug["reason"] == "lci_cop_use_clean_axis_aligned_bbox"
+    assert estimate_local_surface_angle_degrees(dest) == pytest.approx(0.0)
+    assert dest.tolist() == [[226.0, 150.0], [272.0, 150.0], [272.0, 260.0], [226.0, 260.0]]
 
 
-def test_cop_local_surface_follows_angled_panel_edges() -> None:
+def test_cop_placement_stays_rectified_even_when_panel_edges_are_angled() -> None:
     image = np.full((560, 360, 3), 165, dtype=np.uint8)
     panel = np.array([[140, 45], [225, 58], [245, 520], [160, 505]], dtype=np.int32)
     cv2.polylines(image, [panel], True, (45, 45, 45), 3)
     target = [162, 170, 214, 430]
+    cfg = {"_requested_component_type": detect.OPERATING_PANEL_CLASS, "_placement_debug": {"placement_mode": "existing_panel"}}
 
-    surface, debug = estimate_local_surface_quad(image, detect.OPERATING_PANEL_CLASS, target)
-    dest = build_asset_quad_on_surface(target, surface, detect.OPERATING_PANEL_CLASS)
+    dest, debug = build_wall_aligned_destination_quad(image, target, target, {}, cfg, image.shape[:2])
 
-    assert debug["used_surface_source"] in {"panel_edges", "line_detection"}
-    assert debug["fallback_used"] is False
-    assert abs(estimate_local_surface_angle_degrees(dest)) > 0.8
-    assert not np.allclose(dest, compute_local_component_quad(image.shape, {"final_insertion_bbox": target}))
+    assert debug["reason"] == "lci_cop_use_clean_axis_aligned_bbox"
+    assert estimate_local_surface_angle_degrees(dest) == pytest.approx(0.0)
+    assert dest.tolist() == [[162.0, 170.0], [214.0, 170.0], [214.0, 430.0], [162.0, 430.0]]
 
 
 def test_door_local_surface_preserves_trapezoid_frame_perspective() -> None:
@@ -179,22 +178,22 @@ def test_door_local_surface_preserves_trapezoid_frame_perspective() -> None:
     assert dest[2][0] > dest[1][0]
 
 
-def test_multi_component_local_surface_angles_are_independent() -> None:
+def test_door_and_interior_keep_independent_local_surface_homographies() -> None:
     image = np.full((520, 520, 3), 180, dtype=np.uint8)
     cv2.line(image, (95, 70), (120, 450), (35, 35, 35), 3)
     cv2.line(image, (170, 65), (195, 445), (35, 35, 35), 3)
     cv2.line(image, (330, 75), (306, 450), (35, 35, 35), 3)
     cv2.line(image, (410, 70), (384, 445), (35, 35, 35), 3)
 
-    lci_surface, _ = estimate_local_surface_quad(image, "landing_call_indicator", [115, 180, 160, 280])
-    cop_surface, _ = estimate_local_surface_quad(image, detect.OPERATING_PANEL_CLASS, [330, 160, 390, 410])
-    lci_dest = build_asset_quad_on_surface([115, 180, 160, 280], lci_surface, "landing_call_indicator")
-    cop_dest = build_asset_quad_on_surface([330, 160, 390, 410], cop_surface, detect.OPERATING_PANEL_CLASS)
-    lci_h = compute_local_component_homography((45, 100), lci_dest)
-    cop_h = compute_local_component_homography((60, 250), cop_dest)
+    door_surface, _ = estimate_local_surface_quad(image, "elevator_door", [95, 80, 195, 440])
+    interior_surface, _ = estimate_local_surface_quad(image, "elevator_cabin", [306, 90, 410, 430])
+    door_dest = build_asset_quad_on_surface([95, 80, 195, 440], door_surface, "elevator_door")
+    interior_dest = build_asset_quad_on_surface([306, 90, 410, 430], interior_surface, "elevator_cabin")
+    door_h = compute_local_component_homography((100, 360), door_dest)
+    interior_h = compute_local_component_homography((104, 340), interior_dest)
 
-    assert not np.allclose(lci_h, cop_h)
-    assert np.sign(estimate_local_surface_angle_degrees(lci_dest)) != np.sign(estimate_local_surface_angle_degrees(cop_dest))
+    assert not np.allclose(door_h, interior_h)
+    assert np.sign(estimate_local_surface_angle_degrees(door_dest)) != np.sign(estimate_local_surface_angle_degrees(interior_dest))
 
 
 def test_no_surface_cue_fallback_uses_local_bbox_not_full_image_grid() -> None:
