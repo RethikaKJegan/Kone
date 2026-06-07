@@ -1408,7 +1408,47 @@ def build_wall_aligned_destination_quad(
     cy = (y1 + y2) * 0.5
     placement_debug = cfg.get("_placement_debug", {})
     component_type = cfg.get("_requested_component_type") or placement_debug.get("selected_replacement_target_type") or ""
+    component_key = str(component_type).lower().replace("-", "_").replace(" ", "_")
+    local_surface_components = {
+        "elevator_door",
+        "door",
+        "elevator_cabin",
+        "elevator_interior",
+        "interior",
+        "elevator_ceiling",
+        "ceiling",
+    }
+    rectified_components = {
+        LANDING_CALL_INDICATOR_CLASS,
+        "synthesized_lci_adjacent_wall",
+        "elevator_call_button_panel",
+        "car_operating_panel",
+        "elevator_operating_panel",
+        OPERATING_PANEL_CLASS.replace(" ", "_"),
+    }
+    if component_key in rectified_components:
+        quad = np.array(
+            [
+                [x1, y1],
+                [x2, y1],
+                [x2, y2],
+                [x1, y2],
+            ],
+            dtype=np.float32,
+        )
+        return quad, {
+            "mode": f"{placement_debug.get('placement_mode') or 'component'}_rectified_homography",
+            "reason": "lci_cop_use_clean_axis_aligned_bbox",
+            "vertical_shear": 0.0,
+            "horizontal_shear": 0.0,
+            "top_shrink": 0.0,
+            "side_skew": 0.0,
+        }
+    if component_key not in local_surface_components:
+        component_key = ""
     try:
+        if not component_key:
+            raise ValueError("local surface perspective disabled for this component")
         from .perspective_mod_placement import (
             build_asset_quad_on_surface,
             estimate_local_surface_angle_degrees,
