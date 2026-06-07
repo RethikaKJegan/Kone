@@ -22,8 +22,11 @@ from src.insert_mod import (
     select_valid_component_detection,
 )
 from src.perspective_mod_placement import (
+    build_asset_quad_on_surface,
     compute_local_component_homography,
     compute_local_component_quad,
+    estimate_local_surface_quad,
+    estimate_local_surface_angle_degrees,
     estimate_quad_angle_degrees,
     parse_points,
     run_perspective_mod_placement,
@@ -124,6 +127,88 @@ def test_pipeline_does_not_apply_global_perspective_after_local_component_placem
 
     assert "run_perspective_mod_placement_from_config" not in source
     assert "run_auto_perspective_mod_placement" not in source
+
+
+def test_lci_local_surface_uses_tilted_wall_lines_not_upright_bbox() -> None:
+    image = np.full((420, 360, 3), 190, dtype=np.uint8)
+    cv2.line(image, (210, 55), (235, 370), (55, 55, 55), 3)
+    cv2.line(image, (282, 48), (306, 365), (60, 60, 60), 3)
+    target = [226, 150, 272, 260]
+
+    surface, debug = estimate_local_surface_quad(image, "landing_call_indicator", target)
+    dest = build_asset_quad_on_surface(target, surface, "landing_call_indicator")
+
+    assert debug["used_surface_source"] in {"panel_edges", "line_detection"}
+    assert debug["fallback_used"] is False
+    assert abs(estimate_local_surface_angle_degrees(dest)) > 1.0
+    assert abs(dest[0][1] - dest[1][1]) > 1.0
+
+
+def test_cop_local_surface_follows_angled_panel_edges() -> None:
+    image = np.full((560, 360, 3), 165, dtype=np.uint8)
+    panel = np.array([[140, 45], [225, 58], [245, 520], [160, 505]], dtype=np.int32)
+    cv2.polylines(image, [panel], True, (45, 45, 45), 3)
+    target = [162, 170, 214, 430]
+
+    surface, debug = estimate_local_surface_quad(image, detect.OPERATING_PANEL_CLASS, target)
+    dest = build_asset_quad_on_surface(target, surface, detect.OPERATING_PANEL_CLASS)
+
+    assert debug["used_surface_source"] in {"panel_edges", "line_detection"}
+    assert debug["fallback_used"] is False
+    assert abs(estimate_local_surface_angle_degrees(dest)) > 0.8
+    assert not np.allclose(dest, compute_local_component_quad(image.shape, {"final_insertion_bbox": target}))
+
+
+def test_door_local_surface_preserves_trapezoid_frame_perspective() -> None:
+    image = np.full((720, 520, 3), 180, dtype=np.uint8)
+    cv2.line(image, (160, 90), (120, 650), (30, 30, 30), 4)
+    cv2.line(image, (360, 90), (410, 650), (30, 30, 30), 4)
+    cv2.line(image, (160, 90), (360, 90), (30, 30, 30), 4)
+    cv2.line(image, (120, 650), (410, 650), (30, 30, 30), 4)
+    target = [150, 110, 370, 630]
+
+    surface, debug = estimate_local_surface_quad(image, "elevator_door", target)
+    dest = build_asset_quad_on_surface(target, surface, "elevator_door")
+
+    top_width = float(np.linalg.norm(dest[1] - dest[0]))
+    bottom_width = float(np.linalg.norm(dest[2] - dest[3]))
+    assert debug["used_surface_source"] == "door_frame"
+    assert debug["fallback_used"] is False
+    assert abs(top_width - bottom_width) > 20.0
+    assert dest[3][0] < dest[0][0]
+    assert dest[2][0] > dest[1][0]
+
+
+def test_multi_component_local_surface_angles_are_independent() -> None:
+    image = np.full((520, 520, 3), 180, dtype=np.uint8)
+    cv2.line(image, (95, 70), (120, 450), (35, 35, 35), 3)
+    cv2.line(image, (170, 65), (195, 445), (35, 35, 35), 3)
+    cv2.line(image, (330, 75), (306, 450), (35, 35, 35), 3)
+    cv2.line(image, (410, 70), (384, 445), (35, 35, 35), 3)
+
+    lci_surface, _ = estimate_local_surface_quad(image, "landing_call_indicator", [115, 180, 160, 280])
+    cop_surface, _ = estimate_local_surface_quad(image, detect.OPERATING_PANEL_CLASS, [330, 160, 390, 410])
+    lci_dest = build_asset_quad_on_surface([115, 180, 160, 280], lci_surface, "landing_call_indicator")
+    cop_dest = build_asset_quad_on_surface([330, 160, 390, 410], cop_surface, detect.OPERATING_PANEL_CLASS)
+    lci_h = compute_local_component_homography((45, 100), lci_dest)
+    cop_h = compute_local_component_homography((60, 250), cop_dest)
+
+    assert not np.allclose(lci_h, cop_h)
+    assert np.sign(estimate_local_surface_angle_degrees(lci_dest)) != np.sign(estimate_local_surface_angle_degrees(cop_dest))
+
+
+def test_no_surface_cue_fallback_uses_local_bbox_not_full_image_grid() -> None:
+    image = np.full((600, 800, 3), 180, dtype=np.uint8)
+    target = [500, 180, 548, 330]
+
+    surface, debug = estimate_local_surface_quad(image, "landing_call_indicator", target)
+    dest = build_asset_quad_on_surface(target, surface, "landing_call_indicator")
+
+    assert debug["fallback_used"] is True
+    assert debug["used_surface_source"] == "fallback_local_bbox"
+    assert cv2.contourArea(dest.astype(np.float32)) < image.shape[0] * image.shape[1] * 0.05
+    assert dest[:, 0].min() >= target[0] - 10
+    assert dest[:, 0].max() <= target[2] + 10
 
 
 def test_multi_component_config_preserves_legacy_and_overrides_targets() -> None:
@@ -840,16 +925,16 @@ def test_lci_replacement_erases_full_call_panel_bbox_when_sam_mask_is_partial() 
         "_requested_component_type": "landing_call_indicator",
         "_placement_debug": {
             "selected_replacement_target_type": "elevator call button panel",
-            "selected_replacement_target_bbox": [68, 70, 112, 190],
+            "selected_replacement_target_bbox": [64, 66, 118, 198],
         },
     }
 
     mask = localized_mask_from_preselected_detection((240, 160, 3), detections, cfg, [68, 70, 112, 190], pad=0)
 
-    assert mask[72, 70] == 255
-    assert mask[188, 110] == 255
-    assert mask[69, 70] == 0
-    assert mask[190, 110] == 0
+    assert mask[67, 65] == 255
+    assert mask[196, 116] == 255
+    assert mask[65, 65] == 0
+    assert mask[198, 116] == 0
 
 
 def test_lci_cleanup_removes_old_call_panel_residue_outside_inserted_panel() -> None:
@@ -859,15 +944,39 @@ def test_lci_cleanup_removes_old_call_panel_residue_outside_inserted_panel() -> 
     bg[95:168, 96:128] = [55, 70, 85]
     cfg = {
         "_requested_component_type": "landing_call_indicator",
-        "_placement_debug": {"selected_replacement_target_type": "elevator call button panel"},
+        "_placement_debug": {
+            "selected_replacement_target_type": "elevator call button panel",
+            "selected_replacement_target_bbox": [90, 70, 134, 190],
+        },
     }
 
-    cleaned = cleanup_lci_call_panel_residue(bg, [90, 70, 134, 190], [96, 88, 128, 168], cfg)
+    cleaned = cleanup_lci_call_panel_residue(bg, [96, 88, 128, 168], [96, 88, 128, 168], cfg)
 
     assert cleaned[182, 112, 2] < 120
     assert cleaned[75, 112, 2] < 190
     assert np.abs(cleaned[120, 110].astype(int) - bg[120, 110].astype(int)).mean() < 8
     assert cfg["_placement_debug"]["lci_panel_residue_cleanup"]["status"] == "applied"
+
+
+def test_closed_door_detection_is_not_repaired_into_open_entrance(monkeypatch: pytest.MonkeyPatch) -> None:
+    image = np.full((1280, 1920, 3), [220, 218, 210], dtype=np.uint8)
+    image[365:981, 770:1142] = [145, 145, 140]
+    image[365:981, 954:958] = [35, 35, 35]
+    image[380:395, 790:1125] = [245, 245, 235]
+    detections = [
+        {
+            "phrase": "elevator door",
+            "normalized_component_type": "elevator_door",
+            "score": 0.39,
+            "box_xyxy": [770.0, 365.0, 1142.0, 981.0],
+        }
+    ]
+    monkeypatch.setattr(detect, "_infer_elevator_door_box", lambda _image, _detections: [190, 277, 1232, 1071])
+
+    detect._repair_nested_elevator_door_detection(image, detections)
+
+    assert detections[0]["box_xyxy"] == [770.0, 365.0, 1142.0, 981.0]
+    assert detections[0]["geometry_validation"]["reason"] == "closed_door_not_expanded_to_open_entrance"
 
 
 def test_expanded_tall_cop_is_used_instead_of_adjacent_wall(tmp_path: Path) -> None:
