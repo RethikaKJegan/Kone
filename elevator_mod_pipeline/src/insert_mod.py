@@ -151,6 +151,7 @@ def localized_mask_from_preselected_detection(
         cfg.get("_requested_component_type") == LANDING_CALL_INDICATOR_CLASS
         and cfg.get("_placement_debug", {}).get("selected_replacement_target_type") == "elevator call button panel"
     )
+    rectangular_cleanup_box = cfg.get("_placement_debug", {}).get("selected_replacement_target_bbox") or fallback_bbox
 
     mask = np.zeros((height, width), dtype=np.uint8)
     for box in selected_boxes:
@@ -163,9 +164,9 @@ def localized_mask_from_preselected_detection(
         mask = np.maximum(mask, det_mask)
 
     if mask.max() == 0:
-        return localized_mask_from_bbox(image_shape, fallback_bbox, pad=pad)
+        return localized_mask_from_bbox(image_shape, rectangular_cleanup_box if force_rectangular_panel_cleanup else fallback_bbox, pad=pad)
     if force_rectangular_panel_cleanup:
-        mask = np.maximum(mask, localized_mask_from_bbox(image_shape, fallback_bbox, pad=pad))
+        mask = np.maximum(mask, localized_mask_from_bbox(image_shape, rectangular_cleanup_box, pad=pad))
     if pad > 0:
         kernel = np.ones((3, 3), np.uint8)
         mask = cv2.dilate(mask.astype(np.uint8), kernel, iterations=pad)
@@ -980,17 +981,23 @@ def has_credible_elevator_detection(detections: dict[str, Any], width: int, heig
     return False
 
 
-def _draw_local_component_grid(image_rgb: np.ndarray, quad: np.ndarray, grid_cols: int = 4, grid_rows: int = 8) -> np.ndarray:
+def _draw_local_component_grid(image_rgb: np.ndarray, quad: np.ndarray, surface_quad: np.ndarray | None = None, grid_cols: int = 4, grid_rows: int = 8) -> np.ndarray:
     image_bgr = cv2.cvtColor(image_rgb.copy(), cv2.COLOR_RGB2BGR)
     if quad.shape != (4, 2) or cv2.contourArea(quad.astype(np.float32)) <= 1.0:
         return image_bgr
+    if surface_quad is not None and surface_quad.shape == (4, 2) and cv2.contourArea(surface_quad.astype(np.float32)) > 1.0:
+        surface_pts = np.round(surface_quad).astype(np.int32)
+        surface_overlay = image_bgr.copy()
+        cv2.fillPoly(surface_overlay, [surface_pts], (0, 180, 255))
+        image_bgr = cv2.addWeighted(surface_overlay, 0.14, image_bgr, 0.86, 0)
+        cv2.polylines(image_bgr, [surface_pts], True, (0, 220, 255), 2, cv2.LINE_AA)
     pts = np.round(quad).astype(np.int32)
     overlay = image_bgr.copy()
-    cv2.fillPoly(overlay, [pts], (0, 220, 255))
+    cv2.fillPoly(overlay, [pts], (255, 80, 0))
     image_bgr = cv2.addWeighted(overlay, 0.18, image_bgr, 0.82, 0)
-    cv2.polylines(image_bgr, [pts], True, (0, 180, 255), 2, cv2.LINE_AA)
+    cv2.polylines(image_bgr, [pts], True, (255, 80, 0), 2, cv2.LINE_AA)
     src = np.array([[0, 0], [grid_cols, 0], [grid_cols, grid_rows], [0, grid_rows]], dtype=np.float32)
-    matrix = cv2.getPerspectiveTransform(src, quad.astype(np.float32))
+    matrix = cv2.getPerspectiveTransform(src, (surface_quad if surface_quad is not None else quad).astype(np.float32))
     for col in range(grid_cols + 1):
         p1 = _project_local_grid_point(matrix, float(col), 0.0)
         p2 = _project_local_grid_point(matrix, float(col), float(grid_rows))
@@ -1035,8 +1042,16 @@ def write_component_placement_debug(
         "selected_replacement_target_bbox": placement_debug.get("selected_replacement_target_bbox"),
         "selected_target_bbox": placement_debug.get("selected_replacement_target_bbox") or placement_debug.get("inpaint_bbox") or bbox,
         "selected_target_quad": placement_debug.get("selected_target_quad") or placement_debug.get("homography_destination_quad"),
+        "component_type": placement_debug.get("requested_component_type") or placement_debug.get("selected_replacement_target_type"),
+        "target_bbox": placement_debug.get("inpaint_bbox") or bbox,
+        "supporting_surface_quad": placement_debug.get("supporting_surface_quad"),
+        "destination_asset_quad": placement_debug.get("destination_asset_quad") or placement_debug.get("selected_target_quad") or placement_debug.get("homography_destination_quad"),
+        "surface_angle_degrees": placement_debug.get("surface_angle_degrees"),
         "local_homography_3x3": placement_debug.get("local_homography_3x3"),
         "local_angle_degrees": placement_debug.get("local_angle_degrees"),
+        "homography_3x3": placement_debug.get("local_homography_3x3"),
+        "used_surface_source": placement_debug.get("used_surface_source"),
+        "fallback_used": placement_debug.get("fallback_used"),
         "source_asset_size": placement_debug.get("source_asset_size"),
         "output_mask_bbox": output_mask_bbox,
         "target_panel_bbox": placement_debug.get("target_panel_bbox"),
@@ -1073,9 +1088,14 @@ def write_component_placement_debug(
         overlay = cv2.cvtColor(image_rgb.copy(), cv2.COLOR_RGB2BGR)
         x1, y1, x2, y2 = [int(v) for v in bbox]
         cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 220, 255), 3)
-        quad = placement_debug.get("selected_target_quad") or placement_debug.get("homography_destination_quad")
-        if quad:
-            grid_overlay = _draw_local_component_grid(image_rgb, np.array(quad, dtype=np.float32))
+        surface_quad = placement_debug.get("supporting_surface_quad")
+        destination_quad = placement_debug.get("destination_asset_quad") or placement_debug.get("selected_target_quad") or placement_debug.get("homography_destination_quad")
+        if destination_quad:
+            grid_overlay = _draw_local_component_grid(
+                image_rgb,
+                np.array(destination_quad, dtype=np.float32),
+                np.array(surface_quad, dtype=np.float32) if surface_quad else None,
+            )
             cv2.imwrite(str(Path(run_dir) / f"local_perspective_grid_{cfg.get('_replacement_id', 'component')}.png"), grid_overlay)
         cv2.imwrite(str(Path(run_dir) / "final_component_placement.png"), overlay)
         target_overlay = cv2.cvtColor(image_rgb.copy(), cv2.COLOR_RGB2BGR)
@@ -1356,8 +1376,19 @@ def _record_local_component_perspective_debug(placement_debug: dict[str, Any], s
     placement_debug["component_id"] = placement_debug.get("component_id")
     placement_debug["source_asset_size"] = [source_w, source_h]
     placement_debug["selected_target_quad"] = quad.round(3).tolist()
+    alignment = placement_debug.get("homography_alignment", {})
+    if alignment.get("supporting_surface_quad"):
+        placement_debug["supporting_surface_quad"] = alignment.get("supporting_surface_quad")
+    if alignment.get("destination_asset_quad"):
+        placement_debug["destination_asset_quad"] = alignment.get("destination_asset_quad")
     placement_debug["local_homography_3x3"] = matrix.round(8).tolist()
     placement_debug["local_angle_degrees"] = angle
+    if alignment.get("surface_angle_degrees") is not None:
+        placement_debug["surface_angle_degrees"] = alignment.get("surface_angle_degrees")
+    if alignment.get("used_surface_source") is not None:
+        placement_debug["used_surface_source"] = alignment.get("used_surface_source")
+    if alignment.get("fallback_used") is not None:
+        placement_debug["fallback_used"] = alignment.get("fallback_used")
     placement_debug["local_perspective_mode"] = "component_target_quad"
 
 
@@ -1376,32 +1407,38 @@ def build_wall_aligned_destination_quad(
     cx = (x1 + x2) * 0.5
     cy = (y1 + y2) * 0.5
     placement_debug = cfg.get("_placement_debug", {})
-    if placement_debug.get("placement_mode") in {
-        "existing_panel",
-        "existing_ceiling",
-        "existing_interior",
-        "existing_door",
-        "existing_lci",
-        "synthesized_lci_adjacent_wall",
-        "synthesized_adjacent_wall",
-    }:
-        quad = np.array(
-            [
-                [x1, y1],
-                [x2, y1],
-                [x2, y2],
-                [x1, y2],
-            ],
-            dtype=np.float32,
+    component_type = cfg.get("_requested_component_type") or placement_debug.get("selected_replacement_target_type") or ""
+    try:
+        from .perspective_mod_placement import (
+            build_asset_quad_on_surface,
+            estimate_local_surface_angle_degrees,
+            estimate_local_surface_quad,
         )
-        return quad, {
-            "mode": f"{placement_debug.get('placement_mode')}_rectified_homography",
-            "reason": "use_detected_or_synthesized_component_bbox_without_wall_shear",
-            "vertical_shear": 0.0,
-            "horizontal_shear": 0.0,
+
+        surface_quad, surface_debug = estimate_local_surface_quad(
+            image_rgb,
+            str(component_type),
+            target_box,
+        )
+        quad = build_asset_quad_on_surface([x1, y1, x2, y2], surface_quad, str(component_type))
+        quad[:, 0] = np.clip(quad[:, 0], 0, image_w - 1)
+        quad[:, 1] = np.clip(quad[:, 1], 0, image_h - 1)
+        return quad.astype(np.float32), {
+            "mode": f"{placement_debug.get('placement_mode') or 'component'}_surface_homography",
+            "reason": "local_supporting_surface_perspective",
+            "supporting_surface_quad": surface_quad.round(3).tolist(),
+            "destination_asset_quad": quad.round(3).tolist(),
+            "surface_angle_degrees": estimate_local_surface_angle_degrees(surface_quad),
+            "used_surface_source": surface_debug.get("used_surface_source"),
+            "fallback_used": bool(surface_debug.get("fallback_used", False)),
+            "surface_debug": surface_debug,
+            "vertical_shear": float((surface_quad[3][0] - surface_quad[0][0] + surface_quad[2][0] - surface_quad[1][0]) * 0.5 / max(height, 1.0)),
+            "horizontal_shear": float((surface_quad[1][1] - surface_quad[0][1] + surface_quad[2][1] - surface_quad[3][1]) * 0.5 / max(width, 1.0)),
             "top_shrink": 0.0,
             "side_skew": 0.0,
         }
+    except Exception as exc:
+        LOGGER.info("[PLACE] Local surface perspective fallback for %s: %s", component_type, exc)
 
     orientation = estimate_local_wall_orientation(image_rgb, target_box)
     normal = geometry.get("wall_plane", {}).get("normal") or [0, 0, 1]
@@ -1958,7 +1995,8 @@ def cleanup_lci_call_panel_residue(bg: np.ndarray, target_box: list[int], insert
     ):
         return bg
     height, width = bg.shape[:2]
-    x1, y1, x2, y2 = [int(round(v)) for v in target_box]
+    cleanup_box = cfg.get("_placement_debug", {}).get("selected_replacement_target_bbox") or target_box
+    x1, y1, x2, y2 = [int(round(v)) for v in cleanup_box]
     ix1, iy1, ix2, iy2 = [int(round(v)) for v in insertion_box]
     x1, y1 = max(0, x1), max(0, y1)
     x2, y2 = min(width, x2), min(height, y2)
