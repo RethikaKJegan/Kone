@@ -114,6 +114,194 @@ def draw_perspective_grid(image: np.ndarray, H: np.ndarray, grid_cols: int, grid
     return grid
 
 
+def compute_local_component_quad(
+    image_shape: tuple[int, int] | tuple[int, int, int],
+    placement_debug: dict[str, Any] | None = None,
+    target_box: list[int] | list[float] | None = None,
+) -> np.ndarray:
+    height, width = image_shape[:2]
+    placement_debug = placement_debug or {}
+    quad = _placement_quad_or_none(placement_debug)
+    if quad is not None:
+        return _clip_quad(quad, width, height)
+    box = (
+        target_box
+        or placement_debug.get("final_insertion_bbox")
+        or placement_debug.get("target_panel_bbox")
+        or placement_debug.get("selected_replacement_target_bbox")
+        or placement_debug.get("inpaint_bbox")
+    )
+    if not box:
+        box_w = max(2.0, width * 0.08)
+        box_h = max(2.0, height * 0.18)
+        cx, cy = width * 0.5, height * 0.5
+        box = [cx - box_w * 0.5, cy - box_h * 0.5, cx + box_w * 0.5, cy + box_h * 0.5]
+    x1, y1, x2, y2 = [float(v) for v in box]
+    quad = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32)
+    return _clip_quad(quad, width, height)
+
+
+def estimate_local_surface_quad(
+    image: np.ndarray | None,
+    component_type: str,
+    target_bbox: list[int] | list[float],
+    target_mask: np.ndarray | None = None,
+    scene_masks: dict[str, np.ndarray] | None = None,
+    lines: np.ndarray | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    if image is None:
+        quad = compute_local_component_quad((int(target_bbox[3]), int(target_bbox[2]), 3), {}, target_bbox)
+        return quad, {"used_surface_source": "fallback_local_bbox", "fallback_used": True, "reason": "no_image"}
+    height, width = image.shape[:2]
+    box = _clip_box(target_bbox, width, height)
+    base_quad = compute_local_component_quad(image.shape, {}, box)
+    local_lines = lines if lines is not None else _detect_local_lines(image, box, component_type)
+    if target_mask is not None:
+        mask_quad = _quad_from_mask(target_mask, width, height)
+        if mask_quad is not None:
+            return mask_quad, {"used_surface_source": "mask_contour", "fallback_used": False}
+    if str(component_type).lower() in {"elevator_door", "door", "elevator_cabin", "interior", "elevator_ceiling", "ceiling"}:
+        door_quad = _door_frame_quad_from_lines(local_lines, box, width, height)
+        if door_quad is not None:
+            return door_quad, {"used_surface_source": "door_frame", "fallback_used": False}
+    panel_quad = _panel_quad_from_lines(local_lines, box, width, height)
+    if panel_quad is not None:
+        source = "panel_edges" if str(component_type).lower() in {"elevator call button panel", "car_operating_panel", "car operating panel", "landing_call_indicator"} else "line_detection"
+        return panel_quad, {"used_surface_source": source, "fallback_used": False}
+    angle = _dominant_local_angle(local_lines, prefer_vertical=True)
+    if angle is not None:
+        quad = _tilted_quad_from_bbox(box, angle, width, height)
+        return quad, {"used_surface_source": "line_detection", "fallback_used": False, "dominant_angle_degrees": float(angle)}
+    return base_quad, {"used_surface_source": "fallback_local_bbox", "fallback_used": True}
+
+
+def estimate_local_surface_angle_degrees(local_quad: np.ndarray) -> float:
+    return estimate_quad_angle_degrees(local_quad)
+
+
+def build_asset_quad_on_surface(
+    target_bbox: list[int] | list[float],
+    surface_quad: np.ndarray,
+    component_type: str,
+    padding_ratio: float = 0.0,
+) -> np.ndarray:
+    x1, y1, x2, y2 = [float(v) for v in target_bbox]
+    bw, bh = max(2.0, x2 - x1), max(2.0, y2 - y1)
+    if padding_ratio:
+        px, py = bw * padding_ratio, bh * padding_ratio
+        x1 -= px
+        x2 += px
+        y1 -= py
+        y2 += py
+    surface = np.asarray(surface_quad, dtype=np.float32)
+    sx1, sy1 = np.min(surface[:, 0]), np.min(surface[:, 1])
+    sx2, sy2 = np.max(surface[:, 0]), np.max(surface[:, 1])
+    sw, sh = max(2.0, float(sx2 - sx1)), max(2.0, float(sy2 - sy1))
+
+    def norm_x(value: float) -> float:
+        return float(np.clip((value - sx1) / sw, -0.10, 1.10))
+
+    def norm_y(value: float) -> float:
+        return float(np.clip((value - sy1) / sh, -0.10, 1.10))
+
+    u1, u2 = norm_x(x1), norm_x(x2)
+    v1, v2 = norm_y(y1), norm_y(y2)
+
+    destination = np.array(
+        [
+            _bilinear_quad_point(surface, u1, v1),
+            _bilinear_quad_point(surface, u2, v1),
+            _bilinear_quad_point(surface, u2, v2),
+            _bilinear_quad_point(surface, u1, v2),
+        ],
+        dtype=np.float32,
+    )
+    if cv2.contourArea(destination) < 4.0:
+        return compute_local_component_quad((max(2, int(y2 + 2)), max(2, int(x2 + 2)), 3), {}, [x1, y1, x2, y2])
+    return destination
+
+
+def warp_asset_to_surface(
+    asset: np.ndarray,
+    asset_mask: np.ndarray | None,
+    destination_quad: np.ndarray,
+    output_shape: tuple[int, int] | tuple[int, int, int],
+) -> np.ndarray:
+    rgba = asset
+    if rgba.ndim == 3 and rgba.shape[2] == 3:
+        alpha = asset_mask if asset_mask is not None else np.full(rgba.shape[:2], 255, dtype=np.uint8)
+        rgba = np.dstack([rgba, alpha])
+    return warp_panel_to_quad(rgba, destination_quad, output_shape)
+
+
+def draw_surface_perspective_debug(
+    image: np.ndarray,
+    surface_quad: np.ndarray,
+    destination_quad: np.ndarray,
+    component_type: str,
+) -> np.ndarray:
+    marked = image.copy()
+    if marked.ndim == 3 and marked.shape[2] == 3:
+        pass
+    surface_pts = np.round(surface_quad).astype(np.int32)
+    dest_pts = np.round(destination_quad).astype(np.int32)
+    overlay = marked.copy()
+    cv2.fillPoly(overlay, [surface_pts], (0, 180, 255))
+    marked = cv2.addWeighted(overlay, 0.16, marked, 0.84, 0)
+    cv2.polylines(marked, [surface_pts], True, (0, 220, 255), 2, cv2.LINE_AA)
+    cv2.polylines(marked, [dest_pts], True, (255, 80, 0), 3, cv2.LINE_AA)
+    try:
+        H = compute_grid_homography(surface_quad.astype(np.float32), 4, 8)
+        marked = draw_perspective_grid(marked, H, 4, 8)
+    except Exception:
+        pass
+    x, y = dest_pts[0]
+    cv2.putText(marked, str(component_type), (int(x), int(y) - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 80, 0), 2, cv2.LINE_AA)
+    return marked
+
+
+def compute_local_component_homography(source_size: tuple[int, int], target_quad: np.ndarray) -> np.ndarray:
+    src_w, src_h = [max(1, int(v)) for v in source_size]
+    src = np.array([[0, 0], [src_w - 1, 0], [src_w - 1, src_h - 1], [0, src_h - 1]], dtype=np.float32)
+    H = cv2.getPerspectiveTransform(src, target_quad.astype(np.float32))
+    if not np.isfinite(H).all():
+        raise ValueError("Local component homography is invalid")
+    return H
+
+
+def estimate_quad_angle_degrees(target_quad: np.ndarray) -> float:
+    quad = target_quad.astype(np.float32)
+    top = quad[1] - quad[0]
+    bottom = quad[2] - quad[3]
+    edge = (top + bottom) * 0.5
+    return float(np.degrees(np.arctan2(float(edge[1]), float(edge[0]))))
+
+
+def warp_component_to_local_quad(
+    component_rgba: np.ndarray,
+    target_quad: np.ndarray,
+    output_shape: tuple[int, int] | tuple[int, int, int],
+) -> np.ndarray:
+    return warp_panel_to_quad(component_rgba, target_quad, output_shape)
+
+
+def draw_local_perspective_grid(
+    image: np.ndarray,
+    target_quad: np.ndarray,
+    grid_cols: int = 4,
+    grid_rows: int = 8,
+) -> np.ndarray:
+    marked = image.copy()
+    quad = target_quad.astype(np.float32)
+    H = compute_grid_homography(quad, max(1, int(grid_cols)), max(1, int(grid_rows)))
+    pts = np.round(quad).astype(np.int32)
+    overlay = marked.copy()
+    cv2.fillPoly(overlay, [pts], (0, 220, 255))
+    marked = cv2.addWeighted(overlay, 0.18, marked, 0.82, 0)
+    cv2.polylines(marked, [pts], True, (0, 180, 255), 2, cv2.LINE_AA)
+    return draw_perspective_grid(marked, H, max(1, int(grid_cols)), max(1, int(grid_rows)))
+
+
 def compute_mod_destination(H: np.ndarray, mod_box: np.ndarray) -> np.ndarray:
     if len(mod_box) != 2:
         raise ValueError("MOD box must contain exactly two points")
@@ -581,6 +769,187 @@ def _clip_quad(points: np.ndarray, width: int, height: int) -> np.ndarray:
     clipped[:, 0] = np.clip(clipped[:, 0], 0, width - 1)
     clipped[:, 1] = np.clip(clipped[:, 1], 0, height - 1)
     return clipped
+
+
+def _bilinear_quad_point(quad: np.ndarray, u: float, v: float) -> np.ndarray:
+    top = quad[0] * (1.0 - u) + quad[1] * u
+    bottom = quad[3] * (1.0 - u) + quad[2] * u
+    return (top * (1.0 - v) + bottom * v).astype(np.float32)
+
+
+def _clip_box(box: list[int] | list[float], width: int, height: int) -> list[float]:
+    x1, y1, x2, y2 = [float(v) for v in box]
+    return [
+        float(np.clip(x1, 0, width - 2)),
+        float(np.clip(y1, 0, height - 2)),
+        float(np.clip(x2, x1 + 2, width)),
+        float(np.clip(y2, y1 + 2, height)),
+    ]
+
+
+def _detect_local_lines(image: np.ndarray, box: list[float], component_type: str) -> np.ndarray:
+    height, width = image.shape[:2]
+    x1, y1, x2, y2 = [int(round(v)) for v in box]
+    bw, bh = max(2, x2 - x1), max(2, y2 - y1)
+    is_large = str(component_type).lower() in {"elevator_door", "door", "elevator_cabin", "interior", "elevator_ceiling", "ceiling"}
+    pad_x = max(28, int(bw * (0.38 if is_large else 1.20)))
+    pad_y = max(28, int(bh * (0.20 if is_large else 0.85)))
+    sx1, sy1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
+    sx2, sy2 = min(width, x2 + pad_x), min(height, y2 + pad_y)
+    crop = image[sy1:sy2, sx1:sx2]
+    if crop.size == 0:
+        return np.empty((0, 4), dtype=np.float32)
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.shape[2] == 3 else crop
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(gray, 45, 130)
+    min_len = max(18, int(min(bw, bh) * 0.20))
+    raw = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=max(22, min_len // 2), minLineLength=min_len, maxLineGap=max(8, min_len // 3))
+    if raw is None:
+        return np.empty((0, 4), dtype=np.float32)
+    lines = raw.reshape(-1, 4).astype(np.float32)
+    lines[:, [0, 2]] += sx1
+    lines[:, [1, 3]] += sy1
+    return lines
+
+
+def _line_angle(line: np.ndarray) -> float:
+    x1, y1, x2, y2 = [float(v) for v in line]
+    return float(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
+
+
+def _line_length(line: np.ndarray) -> float:
+    x1, y1, x2, y2 = [float(v) for v in line]
+    return float(np.hypot(x2 - x1, y2 - y1))
+
+
+def _x_at_y(line: np.ndarray, y: float) -> float | None:
+    x1, y1, x2, y2 = [float(v) for v in line]
+    if abs(y2 - y1) < 1e-3:
+        return None
+    t = (y - y1) / (y2 - y1)
+    return x1 + (x2 - x1) * t
+
+
+def _y_at_x(line: np.ndarray, x: float) -> float | None:
+    x1, y1, x2, y2 = [float(v) for v in line]
+    if abs(x2 - x1) < 1e-3:
+        return None
+    t = (x - x1) / (x2 - x1)
+    return y1 + (y2 - y1) * t
+
+
+def _door_frame_quad_from_lines(lines: np.ndarray, box: list[float], width: int, height: int) -> np.ndarray | None:
+    if lines.size == 0:
+        return None
+    x1, y1, x2, y2 = box
+    cx = (x1 + x2) * 0.5
+    verticals = [line for line in lines if 58 <= abs(_line_angle(line)) <= 122 and _line_length(line) >= (y2 - y1) * 0.18]
+    lefts = [line for line in verticals if ((line[0] + line[2]) * 0.5) < cx]
+    rights = [line for line in verticals if ((line[0] + line[2]) * 0.5) >= cx]
+    if not lefts or not rights:
+        return None
+    left = max(lefts, key=_line_length)
+    right = max(rights, key=_line_length)
+    lx_top, lx_bottom = _x_at_y(left, y1), _x_at_y(left, y2)
+    rx_top, rx_bottom = _x_at_y(right, y1), _x_at_y(right, y2)
+    if None in {lx_top, lx_bottom, rx_top, rx_bottom}:
+        return None
+    quad = np.array([[lx_top, y1], [rx_top, y1], [rx_bottom, y2], [lx_bottom, y2]], dtype=np.float32)
+    if cv2.contourArea(quad) <= 2:
+        return None
+    return _clip_quad(quad, width, height)
+
+
+def _panel_quad_from_lines(lines: np.ndarray, box: list[float], width: int, height: int) -> np.ndarray | None:
+    if lines.size == 0:
+        return None
+    x1, y1, x2, y2 = box
+    vertical_angle = _dominant_local_angle(lines, prefer_vertical=True)
+    horizontal_angle = _dominant_local_angle(lines, prefer_vertical=False)
+    if vertical_angle is None and horizontal_angle is None:
+        return None
+    angle = vertical_angle if vertical_angle is not None else (horizontal_angle + 90.0)
+    return _tilted_quad_from_bbox(box, angle, width, height)
+
+
+def _dominant_local_angle(lines: np.ndarray, prefer_vertical: bool) -> float | None:
+    if lines.size == 0:
+        return None
+    candidates: list[tuple[float, float]] = []
+    for line in lines:
+        angle = _line_angle(line)
+        length = _line_length(line)
+        if prefer_vertical:
+            deviation = min(abs(angle - 90), abs(angle + 90))
+            if deviation > 32:
+                continue
+            normalized = angle - 90 if angle >= 0 else angle + 90
+        else:
+            deviation = min(abs(angle), abs(abs(angle) - 180))
+            if deviation > 28:
+                continue
+            normalized = angle if abs(angle) <= 90 else angle - np.sign(angle) * 180
+        candidates.append((float(normalized), length))
+    if not candidates:
+        return None
+    angles = np.array([item[0] for item in candidates], dtype=np.float32)
+    weights = np.array([item[1] for item in candidates], dtype=np.float32)
+    order = np.argsort(angles)
+    angles, weights = angles[order], weights[order]
+    midpoint = float(weights.sum() * 0.5)
+    return float(angles[min(len(angles) - 1, int(np.searchsorted(np.cumsum(weights), midpoint)))])
+
+
+def _tilted_quad_from_bbox(box: list[float], vertical_angle_degrees: float, width: int, height: int) -> np.ndarray:
+    x1, y1, x2, y2 = [float(v) for v in box]
+    bw, bh = max(2.0, x2 - x1), max(2.0, y2 - y1)
+    cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+    theta = np.radians(vertical_angle_degrees)
+    v = np.array([np.sin(theta), np.cos(theta)], dtype=np.float32)
+    hvec = np.array([np.cos(theta), -np.sin(theta)], dtype=np.float32)
+    quad = np.array(
+        [
+            [cx, cy] - hvec * bw * 0.5 - v * bh * 0.5,
+            [cx, cy] + hvec * bw * 0.5 - v * bh * 0.5,
+            [cx, cy] + hvec * bw * 0.5 + v * bh * 0.5,
+            [cx, cy] - hvec * bw * 0.5 + v * bh * 0.5,
+        ],
+        dtype=np.float32,
+    )
+    return _clip_quad(quad, width, height)
+
+
+def _quad_vertical_shear(quad: np.ndarray) -> float:
+    tl, tr, br, bl = quad.astype(np.float32)
+    left_h = max(float(np.linalg.norm(bl - tl)), 1.0)
+    right_h = max(float(np.linalg.norm(br - tr)), 1.0)
+    return float(((bl[0] - tl[0]) / left_h + (br[0] - tr[0]) / right_h) * 0.5)
+
+
+def _quad_horizontal_shear(quad: np.ndarray) -> float:
+    tl, tr, br, bl = quad.astype(np.float32)
+    top_w = max(float(np.linalg.norm(tr - tl)), 1.0)
+    bottom_w = max(float(np.linalg.norm(br - bl)), 1.0)
+    return float(((tr[1] - tl[1]) / top_w + (br[1] - bl[1]) / bottom_w) * 0.5)
+
+
+def _quad_from_mask(mask: np.ndarray, width: int, height: int) -> np.ndarray | None:
+    binary = (mask > 0).astype(np.uint8)
+    if binary.sum() < 16:
+        return None
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    contour = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(contour) <= 4:
+        return None
+    rect = cv2.minAreaRect(contour)
+    points = cv2.boxPoints(rect).astype(np.float32)
+    center = points.mean(axis=0)
+    ordered = sorted(points, key=lambda p: np.arctan2(p[1] - center[1], p[0] - center[0]))
+    ordered = np.array(ordered, dtype=np.float32)
+    top_first = np.roll(ordered, -int(np.argmin(ordered.sum(axis=1))), axis=0)
+    return _clip_quad(top_first, width, height)
 
 
 def _placement_quad_or_none(placement_debug: dict[str, Any]) -> np.ndarray | None:
