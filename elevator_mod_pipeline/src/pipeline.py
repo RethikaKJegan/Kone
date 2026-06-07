@@ -16,11 +16,6 @@ import numpy as np
 from .input_validation import merged_validation_config, validate_elevator_presence, validate_input_image
 from .inpaint import build_removal_mask, inpaint_background
 from .insert_mod import insert_mod_panel, localized_mask_from_preselected_detection, preselect_mod_panel_placement
-from .perspective_mod_placement import (
-    copy_pipeline_handoff,
-    run_auto_perspective_mod_placement,
-    run_from_config as run_perspective_mod_placement_from_config,
-)
 from .preprocess import run_preprocessing
 from .refine import maybe_refine
 from .resource_monitor import ResourceMonitor
@@ -262,49 +257,11 @@ def run(config_path: str | Path) -> None:
             placement_debug = _load_optional_json(run_dir / "component_placement_debug.json")
             placement_debug["id"] = replacement_id
             placement_debug["asset"] = replacement["asset"]
-            perspective_cfg = cfg.get("perspective_mod_placement", {})
-            if (
-                perspective_cfg.get("enabled", False)
-                and perspective_cfg.get("auto", True)
-                and placement_debug.get("placement_mode") not in {"existing_panel", "existing_component", "existing_ceiling", "existing_interior", "existing_door"}
-                and placement_debug.get("homography_alignment", {}).get("mode") != "existing_panel_rectified_homography"
-                and placement_debug.get("homography_alignment", {}).get("mode") != "existing_ceiling_rectified_homography"
-            ):
-                status("perspective_mod_placement", f"[PLACE] Auto perspective-grid placement: {replacement_id}")
-                perspective_outputs = run_auto_perspective_mod_placement(
-                    current_background,
-                    Path(replacement["asset"]),
-                    perspective_cfg.get("out_dir") or (run_dir / f"perspective_mod_placement_{replacement_id}"),
-                    geometry,
-                    placement_debug,
-                    int(perspective_cfg.get("grid_cols", 8)),
-                    int(perspective_cfg.get("grid_rows", 12)),
-                    bool(perspective_cfg.get("match_lighting", False)),
-                )
-                copy_pipeline_handoff(perspective_outputs, component_out, component_mask_path)
-                mask = cv2.imread(str(component_mask_path), cv2.IMREAD_GRAYSCALE)
-                if mask is not None:
-                    combined_panel_mask = mask if combined_panel_mask is None else cv2.max(combined_panel_mask, mask)
             component_placements.append(placement_debug)
             current_background = component_out
         if combined_panel_mask is not None:
             cv2.imwrite(str(panel_mask_path), combined_panel_mask)
         save_json(run_dir / "component_placements.json", component_placements)
-        skip_global_perspective = any(
-            placement.get("placement_mode") in {"existing_panel", "existing_component", "existing_ceiling", "existing_interior", "existing_door"}
-            for placement in component_placements
-        )
-        perspective_outputs = None
-        if not skip_global_perspective:
-            perspective_outputs = run_perspective_mod_placement_from_config(
-                cfg,
-                cfg.get("perspective_mod_placement", {}).get("base_image") or cleaned_path,
-                cfg.get("perspective_mod_placement", {}).get("panel") or replacements[-1]["asset"],
-                cfg.get("perspective_mod_placement", {}).get("out_dir") or (run_dir / "perspective_mod_placement"),
-            )
-            if perspective_outputs:
-                status("perspective_mod_placement", "[PLACE] Applying perspective-grid MOD panel placement")
-                copy_pipeline_handoff(perspective_outputs, composite_path, panel_mask_path)
         maybe_refine(composite_path, panel_mask_path, cfg, final_path)
         monitor.mark("insertion_done")
         if cfg.get("video", {}).get("enabled", False):
