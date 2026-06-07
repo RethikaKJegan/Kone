@@ -1778,11 +1778,28 @@ def _repair_nested_elevator_door_detection(image_rgb: np.ndarray, detections: li
 	inferred_f = [float(v) for v in inferred]
 	current_area = _box_area(current)
 	inferred_area = _box_area(inferred_f)
+	h, w = image_rgb.shape[:2]
+	current_w = current[2] - current[0]
+	current_h = current[3] - current[1]
+	if current_w >= w * 0.18 and current_h >= h * 0.40 and not _has_open_elevator_interior_evidence(image_rgb, current):
+		LOGGER.info(
+			"[DETECT] Skipped open-door repair for closed elevator door: current=%s structural=%s",
+			[round(v) for v in current],
+			[round(v) for v in inferred_f],
+		)
+		door.setdefault("geometry_validation", {})
+		door["geometry_validation"].update(
+			{
+				"status": "accepted",
+				"reason": "closed_door_not_expanded_to_open_entrance",
+				"structural_box_xyxy": inferred_f,
+			}
+		)
+		return
 	if inferred_area <= current_area * 1.75:
 		return
 	if not _box_center_inside(current, inferred_f) and _box_overlap_fraction(current, inferred_f) < 0.40:
 		return
-	h, w = image_rgb.shape[:2]
 	inferred_w = inferred_f[2] - inferred_f[0]
 	inferred_h = inferred_f[3] - inferred_f[1]
 	inferred_ratio = inferred_area / max(w * h, 1)
