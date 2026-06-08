@@ -171,6 +171,8 @@ video:
   action: auto              # auto, open, or close
   cycle: true               # true = animate to the opposite state and back
   open_reference_image: null   # optional: image showing the elevator interior/cabin when doors are open
+  door_open_interior_image: tests/images/default_door_open_interior.png
+  default_door_image: tests/images/default_door.png
   closed_reference_image: null # optional: image showing the closed elevator doors/exterior
   fps: 30
   bitrate: 10000k
