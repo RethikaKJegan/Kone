@@ -13,7 +13,7 @@ type MotionStyle = Offering['videoMotionStyle']
 type Quality = Offering['videoQuality']
 
 function availableMotionStyle(value: MotionStyle | undefined): MotionStyle {
-  return value === 'door-functionality' || !value ? 'zoom-in' : value
+  return value ?? 'zoom-in'
 }
 
 export default function Step5Video() {
@@ -32,7 +32,6 @@ export default function Step5Video() {
     && !loadFailed
 
   const selectMotion = (value: MotionStyle) => {
-    if (value === 'door-functionality') return
     setMotion(value)
     setLoadFailed(false)
     setVideoSettings({ videoMotionStyle: value, videoQuality: quality })
@@ -51,7 +50,7 @@ export default function Step5Video() {
 
   const motionLabel = VIDEO_MOTION_STYLES.find(m => m.value === motion)?.label ?? ''
   const isDoorFunctionality = motion === 'door-functionality'
-  const videoStyles = VIDEO_MOTION_STYLES.filter(s => s.value !== 'door-functionality')
+  const videoStyles = VIDEO_MOTION_STYLES
 
   const handleContinue = async () => {
     setVideoSettings({ videoMotionStyle: motion, videoQuality: quality })
