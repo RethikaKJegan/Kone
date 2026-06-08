@@ -16,7 +16,6 @@ from PIL import Image
 from pydantic import BaseModel
 
 from input_validation import validate_elevator_or_cop_upload, validate_input_image
-from video import render_elevator_video
 
 app = FastAPI()
 
@@ -27,6 +26,7 @@ class ProjectPayload(BaseModel):
     project_name: str | None = None
     storage_dir: str
     selected_components: list[str] | None = None
+    component_assets: dict[str, str] | None = None
     environments: list[str] | None = None
     video_options: dict[str, Any] | None = None
 
@@ -50,6 +50,32 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def workspace_root() -> Path:
+    return repo_root().parent
+
+
+def selected_component_asset_paths(component_assets: dict[str, str] | None) -> dict[str, str]:
+    default_dir = workspace_root() / "Frontend" / "kone-ui-master" / "public" / "components"
+    default_files = {
+        "ceiling": default_dir / "ceiling.jpg",
+        "lci": default_dir / "lci.png",
+        "door": default_dir / "door.jpg",
+        "cop": default_dir / "cop.png",
+    }
+    resolved: dict[str, str] = {}
+    for component, default_path in default_files.items():
+        raw = (component_assets or {}).get(component)
+        candidates: list[Path] = []
+        if raw and raw.startswith("/components/"):
+            candidates.append(workspace_root() / "Frontend" / "kone-ui-master" / "public" / raw.lstrip("/"))
+        candidates.append(default_path)
+        for candidate in candidates:
+            if candidate.exists():
+                resolved[component] = str(candidate)
+                break
+    return resolved
+
+
 def public_status(status: str, error: Any = None) -> dict[str, Any]:
     return {
         "status": status,
@@ -64,20 +90,55 @@ def public_status(status: str, error: Any = None) -> dict[str, Any]:
 def precheck(payload: ProjectPayload):
     image_path = Path(payload.storage_dir) / "uploads" / "input.jpg"
     image = Image.open(image_path).convert("RGB")
+    image.thumbnail((900, 900), Image.Resampling.LANCZOS)
     image_array = np.asarray(image)
     result = validate_input_image(image_array, {})
+    if not result.get("valid", False):
+        reason = _validation_message(result)
+        failure = {
+            "reason": reason,
+            "validation": result,
+        }
+        write_status(payload.storage_dir, public_status("precheck_failed", failure))
+        return {
+            "ok": False,
+            "next_action": "reupload",
+            "image_type": "UNUSABLE",
+            "message": reason,
+            "reason": reason,
+            "validation": result,
+            "relevance": None,
+        }
     relevance = validate_elevator_or_cop_upload(image_array, result)
     ok = bool(relevance.get("valid"))
-    write_status(payload.storage_dir, public_status("precheck_passed" if ok else "precheck_failed", None if ok else relevance))
+    reason = None
+    if not ok:
+        reason = relevance.get("reason") or "Invalid image. Please upload a valid elevator image."
+    failure = None if ok else {
+        "reason": reason,
+        "relevance": relevance,
+    }
+    write_status(payload.storage_dir, public_status("precheck_passed" if ok else "precheck_failed", failure))
     return {
         "ok": ok,
         "next_action": "continue" if ok else "reupload",
-        "image_type": relevance.get("image_type"),
-        "message": relevance.get("reason"),
-        "reason": None if ok else relevance.get("reason", "Image failed precheck"),
+        "image_type": "ELEVATOR_IMAGE" if ok else relevance.get("image_type"),
+        "message": None if ok else reason,
+        "reason": None if ok else reason,
         "validation": result,
         "relevance": relevance,
     }
+
+
+def _validation_message(validation: dict[str, Any]) -> str:
+    reasons = validation.get("reasons", {}) or {}
+    hard_fail = reasons.get("hard_fail") or []
+    if hard_fail:
+        return str(hard_fail[0])
+    suggestions = reasons.get("suggestions") or []
+    if suggestions:
+        return str(suggestions[0])
+    return "Invalid image. Please upload a valid elevator image."
 
 
 @app.post("/run-components")
@@ -93,6 +154,7 @@ def run_components(payload: ProjectPayload):
     cfg_path = repo_root() / "config.yaml"
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     panel_path = repo_root() / "tests" / "panels" / "mod_panel.png"
+    component_assets = selected_component_asset_paths(payload.component_assets)
     cfg.update(
         {
             "run_dir": str(pipeline_dir),
@@ -101,6 +163,7 @@ def run_components(payload: ProjectPayload):
             "input_validation": {"enabled": False},
             "video": {**cfg.get("video", {}), "enabled": False},
             "selected_components": payload.selected_components or [],
+            "component_assets": component_assets,
             "environment": payload.environments or [],
         }
     )
@@ -124,6 +187,8 @@ def run_components(payload: ProjectPayload):
 
 @app.post("/generate-video")
 def generate_video(payload: ProjectPayload):
+    from video import render_elevator_video
+
     storage = Path(payload.storage_dir)
     preview_image = storage / "preview" / "final_output.png"
     pipeline_dir = storage / "pipeline"

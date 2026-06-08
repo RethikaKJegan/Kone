@@ -13,17 +13,24 @@ input_validation:
   fail_on_invalid: true
   require_elevator: true
   weights:
-    perspective: 0.40
-    visibility: 0.20
+    perspective: 0.28
+    visibility: 0.15
     sharpness: 0.10
-    exposure: 0.10
-    context: 0.10
-    crop_scale: 0.10
+    exposure: 0.12
+    context: 0.08
+    crop_scale: 0.07
+    composition: 0.08
+    technical_defects: 0.07
+    geometric_defects: 0.05
   hard_fails:
     perspective_fail: 0.62
     perspective_review: 0.68
     visibility_min: 0.40
     sharpness_extreme_min: 0.05
+    exposure_min: 0.30
+    composition_min: 0.30
+    technical_defects_min: 0.35
+    geometric_defects_min: 0.35
     min_short_side: 420
   thresholds:
     pass: 0.65
@@ -46,7 +53,7 @@ detection:
   min_box_area_ratio: 0.00005
   max_box_area_ratio: 0.90
   labels:
-    - tall stainless steel elevator operating panel with round buttons
+    - car operating panel
     - elevator call button panel
     - wheelchair button
     - floor_indicator_display
@@ -82,12 +89,12 @@ removal:
   # These detections become the LaMa mask. Tune this list per job.
   target_keywords:
     - elevator panel
-    - tall stainless steel elevator operating panel with round buttons
+    - car operating panel
     - elevator call button panel
     - call button
     - speaker
   mask_padding_px: 10
-  box_mask_padding_px: 2
+  box_mask_padding_px: 3
   mask_dilate_iterations: 2
   cleanup_engine: auto       # auto, lama, wall_patch, or opencv
   wall_sample_margin_px: 55
@@ -111,25 +118,30 @@ insertion:
   placement: detection
   target_keywords:
     - elevator panel
-    - tall stainless steel elevator operating panel with round buttons
+    - car operating panel
     - elevator call button panel
     - call button
     - speaker
   manual_box_xyxy: null     # Example: [95, 415, 140, 560]
   fallback_box_ratio_xyxy: [0.145, 0.39, 0.255, 0.61]
-  adjacent_wall_min_margin_ratio: 0.055
-  size_mode: fit_box         # fit_box, preserve_asset, or fixed_height
+  adjacent_wall_side: right
+  adjacent_wall_min_margin_ratio: 0.075
+  size_mode: fit_box
   fixed_height_px: null
   allow_upscale: false
   native_reference_width_px: 600
   native_reference_height_px: 800
-  target_height_multiplier: 1.55
+  target_height_multiplier: 1.0
   scale_multiplier: 1.0
-  top_shrink: 0.015
-  side_skew: 0.008
+  top_shrink: 0.0
+  side_skew: 0.0
+  large_edge_feather_px: 5
+  large_edge_protect_px: 14
+  large_component_area_ratio: 0.18
   shadow_strength: 0.12
   texture_strength: 0.04
   max_shadow_radius_px: 18
+  homography_max_local_shear: 0.03
 
 perspective_mod_placement:
   # Runs after normal MOD insertion. In auto mode, wall-plane corners and the

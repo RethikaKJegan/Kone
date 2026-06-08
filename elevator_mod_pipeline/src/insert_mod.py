@@ -8,13 +8,15 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .utils import load_image_rgba, load_image_rgb, save_rgb, select_detection, select_middle_floor_indicator_display
+from .utils import detection_mask, load_image_rgba, load_image_rgb, save_rgb, select_detection, select_middle_floor_indicator_display
 
 LOGGER = logging.getLogger(__name__)
 
-OPERATING_PANEL_CLASS = "tall stainless steel elevator operating panel with round buttons"
+OPERATING_PANEL_CLASS = "elevator operating panel"
+LANDING_CALL_INDICATOR_CLASS = "landing_call_indicator"
 VALID_MOD_PANEL_TARGETS = {OPERATING_PANEL_CLASS, "elevator call button panel"}
 INVALID_MOD_PANEL_TARGETS = {
+    LANDING_CALL_INDICATOR_CLASS,
     "accessibility_control_panel",
     "wheelchair button",
     "wheelchair_indicator",
@@ -35,27 +37,40 @@ def insert_mod_panel(background_path: str | Path, mod_path: str | Path, detectio
     height, width = bg.shape[:2]
     target_box, placement_reason = _target_box(width, height, detections, cfg, mod.shape[:2], removal_mask, bg)
     LOGGER.info("[PLACE] Final component placement: %s reason=%s", target_box, placement_reason)
-    mod = match_mod_appearance_to_cleaned_region(mod, bg, target_box)
+    insertion_box = large_opening_insertion_box(target_box, cfg, bg.shape[:2])
+    bg = cleanup_lci_call_panel_residue(bg, target_box, insertion_box, cfg)
+    mod = match_mod_appearance_to_cleaned_region(mod, bg, insertion_box)
     warped = (
-        _warp_long_panel_to_exact_box(mod, target_box, bg.shape[:2])
+        _warp_long_panel_to_exact_box(mod, insertion_box, bg.shape[:2])
         if _is_long_panel_track_case(cfg, mod.shape[:2])
-        else _warp_mod_to_scene(mod, target_box, geometry, bg.shape[:2], cfg, bg)
+        else _warp_mod_to_scene(mod, insertion_box, geometry, bg.shape[:2], cfg, bg)
     )
 
     fg = warped[:, :, :3]
     alpha = refine_alpha(warped[:, :, 3].astype(np.float32) / 255.0)
-    alpha, mask_debug = validate_or_rebuild_alpha(alpha, target_box, cfg, "harmonization")
+    if is_large_component_insertion(alpha, cfg):
+        alpha = refine_large_component_alpha(alpha, cfg)
+    alpha, mask_debug = validate_or_rebuild_alpha(alpha, insertion_box, cfg, "harmonization")
+    component_type = cfg.get("_requested_component_type") or cfg.get("_placement_debug", {}).get("selected_replacement_target_type")
+    is_lci = component_type in {"landing_call_indicator", "synthesized_lci_adjacent_wall"}
+
     fg = harmonize_foreground(fg, bg, alpha)
     fg = match_scene_white_balance(fg)
     fg = add_wall_bounce_light(fg, alpha)
     fg = perceptual_compress(fg)
-    fg = edge_integration(fg, alpha)
-    fg = transfer_wall_texture(bg, fg, alpha, float(cfg["insertion"]["texture_strength"]))
 
+    if not is_lci:
+        fg = edge_integration(fg, alpha)
+        fg = transfer_wall_texture(bg, fg, alpha, float(cfg["insertion"]["texture_strength"]))
+    else:
+        fg = transfer_wall_texture(bg, fg, alpha, 0.0)
+    frame_source = load_cabin_frame_source(cfg, bg.shape[:2])
     bg_shadowed = apply_realistic_shadow(bg, alpha, float(cfg["insertion"]["shadow_strength"]))
     bg_shadowed = add_contact_shadow(bg_shadowed, alpha, float(cfg["insertion"]["shadow_strength"]))
     bg_shadowed = add_wall_grounding(bg_shadowed, alpha)
     final = alpha_composite(bg_shadowed, fg, alpha)
+    final = add_cabin_recess_integration(bg, final, alpha, insertion_box, cfg)
+    final = restore_cabin_opening_frame(frame_source, final, target_box, insertion_box, cfg)
     final = add_camera_finish(final)
     final = recover_detail(final)
 
@@ -74,17 +89,28 @@ def preselect_mod_panel_placement(
     removal_mask: np.ndarray | None = None,
 ) -> list[int] | None:
     requested_type = cfg.get("_requested_component_type")
-    if requested_type not in {"elevator_ceiling", "elevator_door"} and not _is_elevator_mod_panel_request(cfg, mod_path):
+    preselect_types = {"elevator_ceiling", "elevator_cabin", "elevator_door", "landing_call_indicator"}
+    if requested_type not in preselect_types and not _is_elevator_mod_panel_request(cfg, mod_path):
         return None
-    if requested_type not in {"elevator_ceiling", "elevator_door"}:
+    if requested_type not in preselect_types:
         cfg["_requested_component_type"] = "elevator_mod_panel"
     mod = close_internal_alpha_holes(load_image_rgba(mod_path))
     height, width = image_rgb.shape[:2]
     target_box, reason = _target_box(width, height, detections, cfg, mod.shape[:2], removal_mask, image_rgb)
-    if cfg.get("_requested_component_type") == "elevator_mod_panel":
-        inpaint_box, cleanup_debug = extend_inpaint_bbox_for_aligned_panel_artifacts(target_box, detections.get("detections", []), width, height)
+    if cfg.get("_requested_component_type") == LANDING_CALL_INDICATOR_CLASS:
+        lci_combo_debug = cfg.get("_placement_debug", {}).get("lci_combo_expansion", {})
+        if lci_combo_debug.get("status") == "expanded_lci_with_floor_indicator":
+            inpaint_box, cleanup_debug = target_box, lci_combo_debug
+        else:
+            return None
     else:
-        inpaint_box, cleanup_debug = target_box, {"status": "not_needed"}
+        preserve_floor_indicator = bool(cfg.get("removal", {}).get("preserve_floor_indicator_display", True))
+        if cfg.get("_requested_component_type") == "elevator_mod_panel" and not preserve_floor_indicator:
+            inpaint_box, cleanup_debug = extend_inpaint_bbox_for_aligned_panel_artifacts(target_box, detections.get("detections", []), width, height)
+        else:
+            inpaint_box, cleanup_debug = target_box, {
+                "status": "preserved_floor_indicator_display" if cfg.get("_requested_component_type") == "elevator_mod_panel" else "not_needed"
+            }
     cfg.setdefault("_placement_debug", {})
     cfg["_placement_debug"].update(
         {
@@ -107,6 +133,43 @@ def localized_mask_from_bbox(image_shape: tuple[int, int] | tuple[int, int, int]
     if x2 <= x1 or y2 <= y1:
         raise RuntimeError(f"Invalid localized inpaint bbox: {bbox}")
     mask[y1:y2, x1:x2] = 255
+    return mask
+
+
+def localized_mask_from_preselected_detection(
+    image_shape: tuple[int, int] | tuple[int, int, int],
+    detections: dict[str, Any],
+    cfg: dict[str, Any],
+    fallback_bbox: list[int],
+    pad: int = 0,
+) -> np.ndarray:
+    height, width = image_shape[:2]
+    selected_boxes = [cfg.get("_placement_debug", {}).get("selected_replacement_target_bbox")]
+    combo = cfg.get("_placement_debug", {}).get("lci_combo_expansion", {})
+    selected_boxes.extend(item.get("bbox") for item in combo.get("included", []) if isinstance(item, dict))
+    force_rectangular_panel_cleanup = (
+        cfg.get("_requested_component_type") == LANDING_CALL_INDICATOR_CLASS
+        and cfg.get("_placement_debug", {}).get("selected_replacement_target_type") == "elevator call button panel"
+    )
+    rectangular_cleanup_box = cfg.get("_placement_debug", {}).get("selected_replacement_target_bbox") or fallback_bbox
+
+    mask = np.zeros((height, width), dtype=np.uint8)
+    for box in selected_boxes:
+        det = _find_detection_by_box(detections.get("detections", []), box)
+        if det is None:
+            continue
+        det_mask = detection_mask(det, height, width)
+        if det_mask.max() == 0:
+            continue
+        mask = np.maximum(mask, det_mask)
+
+    if mask.max() == 0:
+        return localized_mask_from_bbox(image_shape, rectangular_cleanup_box if force_rectangular_panel_cleanup else fallback_bbox, pad=pad)
+    if force_rectangular_panel_cleanup:
+        mask = np.maximum(mask, localized_mask_from_bbox(image_shape, rectangular_cleanup_box, pad=pad))
+    if pad > 0:
+        kernel = np.ones((3, 3), np.uint8)
+        mask = cv2.dilate(mask.astype(np.uint8), kernel, iterations=pad)
     return mask
 
 
@@ -135,19 +198,29 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
                 "placement_mode": "existing_ceiling",
             }
             return box, reason
+        if requested_type == "elevator_cabin":
+            box, reason = select_interior_target_box(detections["detections"], width, height)
+            cfg["_placement_debug"] = {
+                "requested_component_type": requested_type,
+                "selected_replacement_target_type": "elevator_cabin",
+                "selected_replacement_target_bbox": box,
+                "inpaint_bbox": box,
+                "scale_to_target_bbox": True,
+                "placement_mode": "existing_interior",
+            }
+            return box, reason
         if requested_type == "elevator_door":
-            det = _largest_detection_of_type(detections["detections"], {"elevator_door"}, width, height, 0.70)
-            if det:
-                box = padded_box([int(round(v)) for v in det["box_xyxy"]], width, height, int(ins.get("existing_panel_padding_px", 2)))
+            box, reason = select_door_opening_target_box(detections["detections"], width, height)
+            if box:
                 cfg["_placement_debug"] = {
                     "requested_component_type": requested_type,
                     "selected_replacement_target_type": "elevator_door",
                     "selected_replacement_target_bbox": box,
                     "inpaint_bbox": box,
                     "scale_to_target_bbox": True,
-                    "placement_mode": "existing_component",
+                    "placement_mode": "existing_door",
                 }
-                return box, "detected_elevator_door"
+                return box, reason
         is_mod_panel_request = requested_type == "elevator_mod_panel" or (
             not requested_type and _needs_contextual_panel_fallback(ins.get("target_keywords", []))
         )
@@ -165,6 +238,13 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
                     cfg,
                     max_ratio_override=0.55 if det.get("normalized_component_type") == OPERATING_PANEL_CLASS else None,
                 )
+                target_box, combo_debug = expand_lci_call_button_with_floor_indicator(
+                    target_box,
+                    detections["detections"],
+                    width,
+                    height,
+                    image,
+                )
                 cfg["_placement_debug"].update(
                     {
                         "requested_component_type": "elevator_mod_panel",
@@ -177,6 +257,7 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
                         "target_padding_px": int(ins.get("existing_panel_padding_px", 4)),
                         "target_box_clamp": target_clamp_debug,
                         "inpaint_bbox": target_box,
+                        "lci_combo_expansion": combo_debug,
                         "scale_to_target_bbox": True,
                         "placement_mode": "existing_panel",
                     }
@@ -202,24 +283,54 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
             )
             LOGGER.info("[TARGET] No valid panel detected; synthesizing adjacent-wall placement")
             return box, "adjacent_wall_next_to_selected_elevator_roi"
-
         det = select_valid_component_detection(detections["detections"], ins["target_keywords"], height, width, mod_hw, elevator_roi, rejected_components)
         cfg["_placement_debug"] = {"rejected_component_detections": rejected_components}
         if det:
             detection_box = [int(round(v)) for v in det["box_xyxy"]]
-            erased_box = _select_erased_long_panel_box(removal_mask, detection_box, cfg, mod_hw)
-            target_box = erased_box or detection_box
+            sam_box = detection_mask_bbox(det, height, width, pad=0) or detection_box
+
+            if cfg.get("_requested_component_type") == "landing_call_indicator":
+                target_box, lci_combo_debug = expand_lci_call_button_with_floor_indicator(
+                    sam_box,
+                    detections["detections"],
+                    width,
+                    height,
+                    image,
+                )
+            else:
+                erased_box = _select_erased_long_panel_box(removal_mask, sam_box, cfg, mod_hw)
+                target_box = erased_box or sam_box
+                lci_combo_debug = {"status": "not_lci"}
+
+    
             cfg["_placement_debug"].update(
                 {
                     "requested_component_type": cfg.get("_requested_component_type"),
                     "selected_replacement_target_type": det.get("normalized_component_type"),
                     "selected_replacement_target_bbox": detection_box,
+                    "selected_replacement_sam_bbox": sam_box,
                     "inpaint_bbox": target_box,
+                    "lci_combo_expansion": lci_combo_debug,
                     "scale_to_target_bbox": True,
-                    "placement_mode": "existing_component",
+                    "placement_mode": "existing_lci" if cfg.get("_requested_component_type") == "landing_call_indicator" else "existing_component",
                 }
             )
             return target_box, f"detected_{det.get('normalized_component_type') or det.get('phrase')}"
+        if cfg.get("_requested_component_type") == "landing_call_indicator":
+            if elevator_roi is None:
+                raise RuntimeError("No valid LCI placement target: no existing LCI and no elevator door detected")
+            box = adjacent_wall_panel_box(width, height, detections, cfg, mod_hw, image, elevator_roi)
+            cfg["_placement_debug"].update(
+                {
+                    "requested_component_type": "landing_call_indicator",
+                    "selected_replacement_target_type": "synthesized_lci_adjacent_wall",
+                    "selected_replacement_target_bbox": None,
+                    "inpaint_bbox": box,
+                    "scale_to_target_bbox": True,
+                    "placement_mode": "synthesized_lci_adjacent_wall",
+                }
+            )
+            return box, "lci_adjacent_wall_next_to_elevator_door"
     rx1, ry1, rx2, ry2 = ins["fallback_box_ratio_xyxy"]
     return [int(width * rx1), int(height * ry1), int(width * rx2), int(height * ry2)], "configured_fallback_ratio"
 
@@ -255,6 +366,29 @@ def select_ceiling_target_box(detections: list[dict[str, Any]], width: int, heig
         return padded_box(box, width, height, 2), "synthesized_ceiling_from_elevator_interior"
 
     return [int(width * 0.14), int(height * 0.04), int(width * 0.86), int(height * 0.20)], "fallback_top_ceiling_band"
+
+
+def select_interior_target_box(detections: list[dict[str, Any]], width: int, height: int) -> tuple[list[int], str]:
+    door_box, door_reason = select_door_opening_target_box(detections, width, height)
+    if door_box:
+        return door_box, f"{door_reason}_for_elevator_interior"
+
+    cabin = _largest_detection_of_type(detections, {"elevator_cabin"}, width, height, 0.75)
+    if cabin:
+        return padded_box([int(round(v)) for v in cabin["box_xyxy"]], width, height, 2), "detected_elevator_interior"
+
+    raise RuntimeError("No valid elevator interior placement target detected")
+
+
+def select_door_opening_target_box(detections: list[dict[str, Any]], width: int, height: int) -> tuple[list[int] | None, str]:
+    door = _largest_detection_of_type(detections, {"elevator_door"}, width, height, 0.70)
+    if not door:
+        return None, "no_detected_elevator_door_opening"
+    box = detection_mask_bbox(door, height, width, pad=0) or [int(round(v)) for v in door["box_xyxy"]]
+    box = padded_box(box, width, height, 0)
+    if box[2] - box[0] <= 8 or box[3] - box[1] <= 8:
+        return None, "invalid_elevator_door_opening"
+    return box, "detected_elevator_door_opening"
 
 
 def _largest_detection_of_type(
@@ -308,10 +442,13 @@ def select_mod_panel_target(
         valid.append(det)
     if not valid:
         return None
+    call_button_panels = [det for det in valid if str(det.get("normalized_component_type")) == "elevator call button panel"]
+    if call_button_panels:
+        return max(call_button_panels, key=lambda det: float(det.get("score", 0.0)))
     panels = [det for det in valid if str(det.get("normalized_component_type")) == OPERATING_PANEL_CLASS]
     if panels:
-        return max(panels, key=lambda det: _box_area(det.get("box_xyxy", [0, 0, 0, 0])) * (0.70 + float(det.get("score", 0.0))))
-    priority = {OPERATING_PANEL_CLASS: 0, "elevator call button panel": 1}
+        return max(panels, key=lambda det: float(det.get("score", 0.0)))
+    priority = {"elevator call button panel": 0, OPERATING_PANEL_CLASS: 1}
     return min(valid, key=lambda det: (priority.get(str(det.get("normalized_component_type")), 9), -float(det.get("score", 0.0))))
 
 
@@ -325,14 +462,20 @@ def invalid_mod_panel_target_reason(det: dict[str, Any], width: int, height: int
     x1, y1, x2, y2 = [float(v) for v in det.get("box_xyxy", [0, 0, 0, 0])]
     bw, bh = max(1.0, x2 - x1), max(1.0, y2 - y1)
     area_ratio = (bw * bh) / max(width * height, 1)
-    max_area_ratio = 0.55 if norm == OPERATING_PANEL_CLASS else 0.10
+    max_area_ratio = 0.20 if norm == OPERATING_PANEL_CLASS else 0.10
     if area_ratio > max_area_ratio:
         return "panel candidate too large"
-    max_aspect = 12.0 if norm == OPERATING_PANEL_CLASS else 8.5
+    max_aspect = 10.0 if norm == OPERATING_PANEL_CLASS else 8.5
     if bh / bw > max_aspect or bh / bw < 0.35:
         return "invalid panel aspect"
-    if norm != OPERATING_PANEL_CLASS and elevator_roi and box_overlap_fraction([int(x1), int(y1), int(x2), int(y2)], elevator_roi) > 0.35:
-        return "inside elevator opening"
+    if elevator_roi:
+        overlap_opening = box_overlap_fraction([int(x1), int(y1), int(x2), int(y2)], elevator_roi)
+        if norm == OPERATING_PANEL_CLASS and overlap_opening > 0.18:
+            return "operating panel overlaps elevator opening"
+        if norm != OPERATING_PANEL_CLASS and overlap_opening > 0.35:
+            return "inside elevator opening"
+    if norm == OPERATING_PANEL_CLASS and bw > width * 0.24:
+        return "operating panel candidate too wide"
     return None
 
 
@@ -355,6 +498,185 @@ def valid_target_debug(detections: list[dict[str, Any]]) -> list[dict[str, Any]]
 def padded_box(box: list[int], width: int, height: int, pad: int) -> list[int]:
     x1, y1, x2, y2 = box
     return [max(0, x1 - pad), max(0, y1 - pad), min(width, x2 + pad), min(height, y2 + pad)]
+
+
+def detection_mask_bbox(det: dict[str, Any], height: int, width: int, pad: int = 0) -> list[int] | None:
+    if not any(det.get(key) is not None for key in ("mask", "segmentation", "rle")):
+        return None
+    mask = detection_mask(det, height, width)
+    ys, xs = np.where(mask > 127)
+    if xs.size == 0 or ys.size == 0:
+        return None
+    mask_box = padded_box(
+        [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1],
+        width,
+        height,
+        pad,
+    )
+    det_box_values = [int(round(v)) for v in det.get("box_xyxy", [0, 0, 0, 0])]
+    det_w, det_h = max(1, det_box_values[2] - det_box_values[0]), max(1, det_box_values[3] - det_box_values[1])
+    mask_w, mask_h = max(1, mask_box[2] - mask_box[0]), max(1, mask_box[3] - mask_box[1])
+    det_cx, det_cy = (det_box_values[0] + det_box_values[2]) * 0.5, (det_box_values[1] + det_box_values[3]) * 0.5
+    mask_cx, mask_cy = (mask_box[0] + mask_box[2]) * 0.5, (mask_box[1] + mask_box[3]) * 0.5
+    if mask_w * mask_h > det_w * det_h * 1.80:
+        return None
+    if abs(mask_cx - det_cx) > max(det_w * 0.75, width * 0.035) or abs(mask_cy - det_cy) > max(det_h * 0.75, height * 0.035):
+        return None
+    return mask_box
+
+
+def _find_detection_by_box(detections: list[dict[str, Any]], box: list[int] | None) -> dict[str, Any] | None:
+    if not box:
+        return None
+    target = [int(round(v)) for v in box]
+    best: tuple[float, dict[str, Any]] | None = None
+    for det in detections:
+        det_box_values = [int(round(v)) for v in det.get("box_xyxy", [0, 0, 0, 0])]
+        distance = sum(abs(a - b) for a, b in zip(target, det_box_values))
+        if best is None or distance < best[0]:
+            best = (float(distance), det)
+    if best is None or best[0] > 16:
+        return None
+    return best[1]
+
+
+def expand_lci_call_button_with_floor_indicator(
+    target_box: list[int],
+    detections: list[dict[str, Any]],
+    width: int,
+    height: int,
+    image_rgb: np.ndarray | None = None,
+) -> tuple[list[int], dict[str, Any]]:
+    x1, y1, x2, y2 = [int(v) for v in target_box]
+    target_cx = (x1 + x2) * 0.5
+    target_w = max(1, x2 - x1)
+    target_h = max(1, y2 - y1)
+    combo = [x1, y1, x2, y2]
+    included: list[dict[str, Any]] = []
+
+    for det in detections:
+        norm = str(det.get("normalized_component_type") or "").lower()
+        phrase = str(det.get("phrase") or "").lower()
+        is_floor_indicator = norm == "floor_indicator_display" or (
+            "floor" in phrase and "indicator" in phrase
+        ) or "display" in phrase
+        if not is_floor_indicator:
+            continue
+
+        bx1, by1, bx2, by2 = [int(round(v)) for v in det.get("box_xyxy", [0, 0, 0, 0])]
+        bw = max(1, bx2 - bx1)
+        bh = max(1, by2 - by1)
+        bcx = (bx1 + bx2) * 0.5
+        horizontal_overlap = max(0, min(x2, bx2) - max(x1, bx1)) / max(1, min(target_w, bw))
+        aligned_x = abs(bcx - target_cx) <= max(target_w * 0.85, width * 0.035)
+        close_y = by2 >= y1 - target_h * 1.20 and by1 <= y2 + target_h * 0.20
+        reasonable_size = bh <= target_h * 1.35 and bw <= max(target_w * 1.45, width * 0.08)
+        if (aligned_x or horizontal_overlap >= 0.35) and close_y and reasonable_size:
+            combo = [
+                min(combo[0], bx1),
+                min(combo[1], by1),
+                max(combo[2], bx2),
+                max(combo[3], by2),
+            ]
+            included.append(
+                {
+                    "bbox": [bx1, by1, bx2, by2],
+                    "normalized_component_type": norm,
+                    "phrase": det.get("phrase"),
+                }
+            )
+
+    visual_box = _visual_floor_indicator_above_box(image_rgb, target_box, width, height)
+    if visual_box is not None:
+        vx1, vy1, vx2, vy2 = visual_box
+        visual_w, visual_h = max(1, vx2 - vx1), max(1, vy2 - vy1)
+        visual_overlap = max(0, min(x2, vx2) - max(x1, vx1)) / max(1, min(target_w, visual_w))
+        visual_is_sane = (
+            visual_w <= max(target_w * 1.20, width * 0.07)
+            and visual_h <= max(target_h * 0.90, height * 0.08)
+            and visual_overlap >= 0.30
+            and vy2 <= y2 + target_h * 0.12
+        )
+        if visual_is_sane:
+            combo = [
+                min(combo[0], visual_box[0]),
+                min(combo[1], visual_box[1]),
+                max(combo[2], visual_box[2]),
+                max(combo[3], visual_box[3]),
+            ]
+            included.append(
+                {
+                    "bbox": visual_box,
+                    "normalized_component_type": "floor_indicator_display",
+                    "phrase": "visual red/blue side floor indicator above call button",
+                    "source": "pixel_fallback",
+                }
+            )
+
+    if not included:
+        return target_box, {"status": "no_aligned_floor_indicator"}
+
+    combo_w, combo_h = max(1, combo[2] - combo[0]), max(1, combo[3] - combo[1])
+    if combo_w > max(target_w * 1.75, width * 0.12) or combo_h > max(target_h * 1.65, height * 0.22):
+        return target_box, {
+            "status": "rejected_oversized_lci_combo",
+            "included": included,
+            "combo_bbox": combo,
+            "target_bbox": target_box,
+        }
+
+    pad = max(8, int(min(combo[2] - combo[0], combo[3] - combo[1]) * 0.14))
+    combo = padded_box(combo, width, height, pad)
+    return combo, {
+        "status": "expanded_lci_with_floor_indicator",
+        "included": included,
+        "combo_bbox": combo,
+    }
+
+
+def _visual_floor_indicator_above_box(
+    image_rgb: np.ndarray | None,
+    target_box: list[int],
+    width: int,
+    height: int,
+) -> list[int] | None:
+    if image_rgb is None:
+        return None
+    x1, y1, x2, y2 = [int(v) for v in target_box]
+    target_w, target_h = max(1, x2 - x1), max(1, y2 - y1)
+    sx1 = max(0, int(round(x1 - target_w * 0.85)))
+    sx2 = min(width, int(round(x2 + target_w * 0.85)))
+    sy1 = max(0, int(round(y1 - target_h * 1.08)))
+    sy2 = min(height, int(round(y1 + target_h * 0.08)))
+    if sx2 <= sx1 or sy2 <= sy1:
+        return None
+
+    crop = np.asarray(image_rgb)[sy1:sy2, sx1:sx2]
+    hsv = cv2.cvtColor(crop, cv2.COLOR_RGB2HSV)
+    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    red = cv2.inRange(hsv, np.array([0, 95, 75]), np.array([12, 255, 255]))
+    red |= cv2.inRange(hsv, np.array([165, 95, 75]), np.array([179, 255, 255]))
+    blue = cv2.inRange(hsv, np.array([92, 70, 55]), np.array([135, 255, 255]))
+    color_mask = ((red > 0) | (blue > 0)).astype(np.uint8)
+    if int(np.count_nonzero(color_mask)) < max(4, int(color_mask.size * 0.0012)):
+        return None
+
+    color_rows, color_cols = np.where(color_mask > 0)
+    if color_rows.size == 0 or color_cols.size == 0:
+        return None
+    cx1, cx2 = sx1 + int(color_cols.min()), sx1 + int(color_cols.max()) + 1
+    cy1, cy2 = sy1 + int(color_rows.min()), sy1 + int(color_rows.max()) + 1
+    color_cx = (cx1 + cx2) * 0.5
+    target_cx = (x1 + x2) * 0.5
+    if abs(color_cx - target_cx) > max(target_w * 1.25, width * 0.045):
+        return None
+    return [
+        max(0, int(round(cx1 - max(4, target_w * 0.45)))),
+        max(0, int(round(cy1 - max(6, target_h * 0.30)))),
+        min(width, int(round(cx2 + max(4, target_w * 0.45)))),
+        min(height, int(round(cy2 + max(10, target_h * 0.65)))),
+    ]
+
 
 
 def extend_inpaint_bbox_for_aligned_panel_artifacts(
@@ -596,13 +918,20 @@ def adjacent_wall_panel_box(
     x1, y1, x2, y2 = roi
     wall_left = x1
     wall_right = width - x2
-    side = "left" if wall_left >= wall_right else "right"
+
+    preferred_side = cfg.get("insertion", {}).get("adjacent_wall_side", "right")
+    if preferred_side in {"left", "right"}:
+        side = preferred_side
+    else:
+        side = "left" if wall_left >= wall_right else "right"
+
     mh, mw = mod_hw or (180, 70)
-    target_h = int(np.clip((y2 - y1) * 0.22, height * 0.12, height * 0.24))
+    target_h = int(np.clip((y2 - y1) * 0.19, height * 0.12, height * 0.22))
     target_w = max(18, int(round(target_h * mw / max(mh, 1))))
-    cy = int(np.clip(y1 + (y2 - y1) * 0.48, height * 0.34, height * 0.68))
-    min_margin = max(18, int(width * float(cfg.get("insertion", {}).get("adjacent_wall_min_margin_ratio", 0.055))))
-    gap = max(min_margin, int(width * 0.035))
+    cy = int(np.clip(y1 + (y2 - y1) * 0.46, height * 0.34, height * 0.66))
+
+    min_margin = max(18, int(width * float(cfg.get("insertion", {}).get("adjacent_wall_min_margin_ratio", 0.075))))
+    gap = max(min_margin, int(width * 0.055))
     strip_pad = max(8, min_margin // 2)
     if side == "left":
         usable_w = max(0, x1 - gap)
@@ -610,6 +939,15 @@ def adjacent_wall_panel_box(
         px2 = min(x1 - gap, px1 + target_w)
     else:
         usable_w = max(0, width - (x2 + gap))
+        min_free_w = max(target_w + gap, int(width * 0.10))
+        if side == "left":
+            usable_w = max(0, x1 - gap)
+            if usable_w < min_free_w:
+                side = "right"
+        if side == "right":
+            usable_w = max(0, width - (x2 + gap))
+            if usable_w < min_free_w:
+                side = "left"
         px1 = min(width - target_w, x2 + gap + max(0, (usable_w - target_w) // 2)) if usable_w < target_w + strip_pad * 2 else min(width - target_w - strip_pad, x2 + gap)
         px2 = min(width, px1 + target_w)
     py1 = int(np.clip(cy - target_h // 2, max(0, y1 + int((y2 - y1) * 0.12)), min(height - target_h, y2 - target_h)))
@@ -643,6 +981,43 @@ def has_credible_elevator_detection(detections: dict[str, Any], width: int, heig
     return False
 
 
+def _draw_local_component_grid(image_rgb: np.ndarray, quad: np.ndarray, surface_quad: np.ndarray | None = None, grid_cols: int = 4, grid_rows: int = 8) -> np.ndarray:
+    image_bgr = cv2.cvtColor(image_rgb.copy(), cv2.COLOR_RGB2BGR)
+    if quad.shape != (4, 2) or cv2.contourArea(quad.astype(np.float32)) <= 1.0:
+        return image_bgr
+    if surface_quad is not None and surface_quad.shape == (4, 2) and cv2.contourArea(surface_quad.astype(np.float32)) > 1.0:
+        surface_pts = np.round(surface_quad).astype(np.int32)
+        surface_overlay = image_bgr.copy()
+        cv2.fillPoly(surface_overlay, [surface_pts], (0, 180, 255))
+        image_bgr = cv2.addWeighted(surface_overlay, 0.14, image_bgr, 0.86, 0)
+        cv2.polylines(image_bgr, [surface_pts], True, (0, 220, 255), 2, cv2.LINE_AA)
+    pts = np.round(quad).astype(np.int32)
+    overlay = image_bgr.copy()
+    cv2.fillPoly(overlay, [pts], (255, 80, 0))
+    image_bgr = cv2.addWeighted(overlay, 0.18, image_bgr, 0.82, 0)
+    cv2.polylines(image_bgr, [pts], True, (255, 80, 0), 2, cv2.LINE_AA)
+    src = np.array([[0, 0], [grid_cols, 0], [grid_cols, grid_rows], [0, grid_rows]], dtype=np.float32)
+    matrix = cv2.getPerspectiveTransform(src, (surface_quad if surface_quad is not None else quad).astype(np.float32))
+    for col in range(grid_cols + 1):
+        p1 = _project_local_grid_point(matrix, float(col), 0.0)
+        p2 = _project_local_grid_point(matrix, float(col), float(grid_rows))
+        cv2.line(image_bgr, p1, p2, (0, 255, 255), 1, cv2.LINE_AA)
+    for row in range(grid_rows + 1):
+        p1 = _project_local_grid_point(matrix, 0.0, float(row))
+        p2 = _project_local_grid_point(matrix, float(grid_cols), float(row))
+        cv2.line(image_bgr, p1, p2, (0, 255, 255), 1, cv2.LINE_AA)
+    return image_bgr
+
+
+def _project_local_grid_point(matrix: np.ndarray, x: float, y: float) -> tuple[int, int]:
+    point = matrix.astype(np.float64) @ np.array([x, y, 1.0], dtype=np.float64)
+    denom = float(point[2])
+    if abs(denom) < 1e-9:
+        denom = 1e-9
+    point = point[:2] / denom
+    return int(round(point[0])), int(round(point[1]))
+
+
 def write_component_placement_debug(
     cfg: dict[str, Any],
     bbox: list[int],
@@ -656,13 +1031,29 @@ def write_component_placement_debug(
         return
     path = Path(run_dir) / "component_placement_debug.json"
     placement_debug = cfg.get("_placement_debug", {})
+    output_mask_bbox = (mask_debug or {}).get("harmonization_mask_bbox")
     payload = {
+        "component_id": placement_debug.get("component_id") or cfg.get("_replacement_id"),
         "requested_component_type": placement_debug.get("requested_component_type"),
         "valid_replacement_targets": placement_debug.get("valid_replacement_targets", []),
         "rejected_replacement_targets": placement_debug.get("rejected_component_detections", []),
         "selected_replacement_target_type": placement_debug.get("selected_replacement_target_type"),
         "selected_replacement_target_source": placement_debug.get("selected_replacement_target_source"),
         "selected_replacement_target_bbox": placement_debug.get("selected_replacement_target_bbox"),
+        "selected_target_bbox": placement_debug.get("selected_replacement_target_bbox") or placement_debug.get("inpaint_bbox") or bbox,
+        "selected_target_quad": placement_debug.get("selected_target_quad") or placement_debug.get("homography_destination_quad"),
+        "component_type": placement_debug.get("requested_component_type") or placement_debug.get("selected_replacement_target_type"),
+        "target_bbox": placement_debug.get("inpaint_bbox") or bbox,
+        "supporting_surface_quad": placement_debug.get("supporting_surface_quad"),
+        "destination_asset_quad": placement_debug.get("destination_asset_quad") or placement_debug.get("selected_target_quad") or placement_debug.get("homography_destination_quad"),
+        "surface_angle_degrees": placement_debug.get("surface_angle_degrees"),
+        "local_homography_3x3": placement_debug.get("local_homography_3x3"),
+        "local_angle_degrees": placement_debug.get("local_angle_degrees"),
+        "homography_3x3": placement_debug.get("local_homography_3x3"),
+        "used_surface_source": placement_debug.get("used_surface_source"),
+        "fallback_used": placement_debug.get("fallback_used"),
+        "source_asset_size": placement_debug.get("source_asset_size"),
+        "output_mask_bbox": output_mask_bbox,
         "target_panel_bbox": placement_debug.get("target_panel_bbox"),
         "placement_mode": placement_debug.get("placement_mode"),
         "target_padding_px": placement_debug.get("target_padding_px"),
@@ -675,7 +1066,7 @@ def write_component_placement_debug(
         "homography_alignment": placement_debug.get("homography_alignment"),
         "final_component_placement": {"bbox": placement_debug.get("final_insertion_bbox") or bbox, "reason": reason},
         "rejected_component_detections": placement_debug.get("rejected_component_detections", []),
-        "harmonization_mask_bbox": (mask_debug or {}).get("harmonization_mask_bbox"),
+        "harmonization_mask_bbox": output_mask_bbox,
         "harmonization_mask_white_area_ratio": (mask_debug or {}).get("harmonization_mask_white_area_ratio"),
         "harmonization_mask_validation_status": (mask_debug or {}).get("harmonization_mask_validation_status"),
         "mask_rebuilt_reason": (mask_debug or {}).get("mask_rebuilt_reason"),
@@ -697,6 +1088,15 @@ def write_component_placement_debug(
         overlay = cv2.cvtColor(image_rgb.copy(), cv2.COLOR_RGB2BGR)
         x1, y1, x2, y2 = [int(v) for v in bbox]
         cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 220, 255), 3)
+        surface_quad = placement_debug.get("supporting_surface_quad")
+        destination_quad = placement_debug.get("destination_asset_quad") or placement_debug.get("selected_target_quad") or placement_debug.get("homography_destination_quad")
+        if destination_quad:
+            grid_overlay = _draw_local_component_grid(
+                image_rgb,
+                np.array(destination_quad, dtype=np.float32),
+                np.array(surface_quad, dtype=np.float32) if surface_quad else None,
+            )
+            cv2.imwrite(str(Path(run_dir) / f"local_perspective_grid_{cfg.get('_replacement_id', 'component')}.png"), grid_overlay)
         cv2.imwrite(str(Path(run_dir) / "final_component_placement.png"), overlay)
         target_overlay = cv2.cvtColor(image_rgb.copy(), cv2.COLOR_RGB2BGR)
         for item in placement_debug.get("valid_replacement_targets", []):
@@ -752,6 +1152,20 @@ def _valid_component_detection(det: dict[str, Any], keywords: list[str], width: 
     cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
     target_text = " ".join(k.lower() for k in keywords)
 
+    if any(term in target_text for term in ("landing call", "hall call", "lci")):
+        norm = str(det.get("normalized_component_type") or "").lower()
+        if norm in {OPERATING_PANEL_CLASS, "floor_indicator_display", "weight_limit_sign"}:
+            return False, "not_landing_call_indicator"
+        if any(term in phrase for term in ("floor", "display", "capacity", "weight")):
+            return False, "not_landing_call_indicator"
+        aspect = bh / bw
+        near_side_wall = cx < width * 0.45 or cx > width * 0.55
+        return (
+            norm in {LANDING_CALL_INDICATOR_CLASS, "elevator call button panel", "accessibility_control_panel", "wheelchair button"}
+            and 0.00004 <= area_ratio <= 0.10
+            and 0.35 <= aspect <= 5.5
+            and near_side_wall
+        ), "invalid_landing_call_indicator_geometry"
     if "floor indicator" in target_text or "display" in target_text:
         return (cy < height * 0.42 and area_ratio < 0.08 and bw > 6 and bh > 4), "invalid_floor_indicator_geometry"
     if "button panel" in target_text or "elevator panel" in target_text or "call button" in target_text:
@@ -862,6 +1276,39 @@ def _warp_mod_to_scene(
     mh, mw = mod.shape[:2]
     mode = cfg["insertion"].get("size_mode", "fit_box")
     placement_debug = cfg.get("_placement_debug", {})
+    exact_bbox_targets = {"elevator_cabin", "elevator_door"}
+    if (
+        placement_debug.get("scale_to_target_bbox")
+        and placement_debug.get("selected_replacement_target_type") in exact_bbox_targets
+    ):
+        scale = max(box_w / max(mw, 1), box_h / max(mh, 1)) * float(cfg["insertion"].get("target_bbox_fill_ratio", 1.0))
+        scale, scale_clamp_debug = clamp_insertion_scale(scale, [mw, mh], [x1, y1, x2, y2], out_hw, cfg)
+        resized_w, resized_h = max(box_w, int(mw * scale)), max(box_h, int(mh * scale))
+        mod = cv2.resize(mod, (resized_w, resized_h), interpolation=cv2.INTER_LANCZOS4)
+        crop_x = max(0, (resized_w - box_w) // 2)
+        crop_y = max(0, (resized_h - box_h) // 2)
+        mod = mod[crop_y:crop_y + box_h, crop_x:crop_x + box_w]
+        validate_insertion_size([x1, y1, x2, y2], [box_w, box_h], out_hw, cfg)
+        placement_debug["insertion_scale_factor"] = float(scale)
+        placement_debug["insertion_scale_reason"] = "cover_detected_elevator_opening_bbox"
+        placement_debug["opening_cover_crop_xywh"] = [int(crop_x), int(crop_y), int(box_w), int(box_h)]
+        if scale_clamp_debug:
+            placement_debug.update(scale_clamp_debug)
+        placement_debug["insertion_size_validation_status"] = "passed"
+        quad, homography_debug = build_wall_aligned_destination_quad(
+            image_rgb=image_rgb,
+            box=[x1, y1, x2, y2],
+            target_box=[x1, y1, x2, y2],
+            geometry=geometry,
+            cfg=cfg,
+            out_hw=out_hw,
+        )
+        placement_debug["final_insertion_bbox"] = [int(x1), int(y1), int(x2), int(y2)]
+        placement_debug["homography_destination_quad"] = quad.round(3).tolist()
+        placement_debug["homography_alignment"] = homography_debug
+        _record_local_component_perspective_debug(placement_debug, [box_w, box_h], quad)
+        cfg["_placement_debug"] = placement_debug
+        return warp_rgba_to_quad(mod, quad, out_hw)
     if placement_debug.get("scale_to_target_bbox"):
         scale = min(box_w / max(mw, 1), box_h / max(mh, 1)) * float(cfg["insertion"].get("target_bbox_fill_ratio", 0.96))
         scale_reason = "fit_detected_or_synthesized_target_bbox"
@@ -913,8 +1360,36 @@ def _warp_mod_to_scene(
     ]
     placement_debug["homography_destination_quad"] = quad.round(3).tolist()
     placement_debug["homography_alignment"] = homography_debug
+    _record_local_component_perspective_debug(placement_debug, [new_w, new_h], quad)
     cfg["_placement_debug"] = placement_debug
     return warp_rgba_to_quad(mod, quad, out_hw)
+
+
+def _record_local_component_perspective_debug(placement_debug: dict[str, Any], source_size: list[int], quad: np.ndarray) -> None:
+    source_w, source_h = max(1, int(source_size[0])), max(1, int(source_size[1]))
+    src = np.array([[0, 0], [source_w - 1, 0], [source_w - 1, source_h - 1], [0, source_h - 1]], dtype=np.float32)
+    matrix = cv2.getPerspectiveTransform(src, quad.astype(np.float32))
+    top = quad[1] - quad[0]
+    bottom = quad[2] - quad[3]
+    edge = (top + bottom) * 0.5
+    angle = float(np.degrees(np.arctan2(float(edge[1]), float(edge[0]))))
+    placement_debug["component_id"] = placement_debug.get("component_id")
+    placement_debug["source_asset_size"] = [source_w, source_h]
+    placement_debug["selected_target_quad"] = quad.round(3).tolist()
+    alignment = placement_debug.get("homography_alignment", {})
+    if alignment.get("supporting_surface_quad"):
+        placement_debug["supporting_surface_quad"] = alignment.get("supporting_surface_quad")
+    if alignment.get("destination_asset_quad"):
+        placement_debug["destination_asset_quad"] = alignment.get("destination_asset_quad")
+    placement_debug["local_homography_3x3"] = matrix.round(8).tolist()
+    placement_debug["local_angle_degrees"] = angle
+    if alignment.get("surface_angle_degrees") is not None:
+        placement_debug["surface_angle_degrees"] = alignment.get("surface_angle_degrees")
+    if alignment.get("used_surface_source") is not None:
+        placement_debug["used_surface_source"] = alignment.get("used_surface_source")
+    if alignment.get("fallback_used") is not None:
+        placement_debug["fallback_used"] = alignment.get("fallback_used")
+    placement_debug["local_perspective_mode"] = "component_target_quad"
 
 
 def build_wall_aligned_destination_quad(
@@ -932,7 +1407,26 @@ def build_wall_aligned_destination_quad(
     cx = (x1 + x2) * 0.5
     cy = (y1 + y2) * 0.5
     placement_debug = cfg.get("_placement_debug", {})
-    if placement_debug.get("placement_mode") in {"existing_panel", "existing_ceiling"}:
+    component_type = cfg.get("_requested_component_type") or placement_debug.get("selected_replacement_target_type") or ""
+    component_key = str(component_type).lower().replace("-", "_").replace(" ", "_")
+    local_surface_components = {
+        "elevator_door",
+        "door",
+        "elevator_cabin",
+        "elevator_interior",
+        "interior",
+        "elevator_ceiling",
+        "ceiling",
+    }
+    rectified_components = {
+        LANDING_CALL_INDICATOR_CLASS,
+        "synthesized_lci_adjacent_wall",
+        "elevator_call_button_panel",
+        "car_operating_panel",
+        "elevator_operating_panel",
+        OPERATING_PANEL_CLASS.replace(" ", "_"),
+    }
+    if component_key in rectified_components:
         quad = np.array(
             [
                 [x1, y1],
@@ -943,13 +1437,48 @@ def build_wall_aligned_destination_quad(
             dtype=np.float32,
         )
         return quad, {
-            "mode": f"{placement_debug.get('placement_mode')}_rectified_homography",
-            "reason": "use_detected_or_synthesized_component_bbox_without_wall_shear",
+            "mode": f"{placement_debug.get('placement_mode') or 'component'}_rectified_homography",
+            "reason": "lci_cop_use_clean_axis_aligned_bbox",
             "vertical_shear": 0.0,
             "horizontal_shear": 0.0,
             "top_shrink": 0.0,
             "side_skew": 0.0,
         }
+    if component_key not in local_surface_components:
+        component_key = ""
+    try:
+        if not component_key:
+            raise ValueError("local surface perspective disabled for this component")
+        from .perspective_mod_placement import (
+            build_asset_quad_on_surface,
+            estimate_local_surface_angle_degrees,
+            estimate_local_surface_quad,
+        )
+
+        surface_quad, surface_debug = estimate_local_surface_quad(
+            image_rgb,
+            str(component_type),
+            target_box,
+        )
+        quad = build_asset_quad_on_surface([x1, y1, x2, y2], surface_quad, str(component_type))
+        quad[:, 0] = np.clip(quad[:, 0], 0, image_w - 1)
+        quad[:, 1] = np.clip(quad[:, 1], 0, image_h - 1)
+        return quad.astype(np.float32), {
+            "mode": f"{placement_debug.get('placement_mode') or 'component'}_surface_homography",
+            "reason": "local_supporting_surface_perspective",
+            "supporting_surface_quad": surface_quad.round(3).tolist(),
+            "destination_asset_quad": quad.round(3).tolist(),
+            "surface_angle_degrees": estimate_local_surface_angle_degrees(surface_quad),
+            "used_surface_source": surface_debug.get("used_surface_source"),
+            "fallback_used": bool(surface_debug.get("fallback_used", False)),
+            "surface_debug": surface_debug,
+            "vertical_shear": float((surface_quad[3][0] - surface_quad[0][0] + surface_quad[2][0] - surface_quad[1][0]) * 0.5 / max(height, 1.0)),
+            "horizontal_shear": float((surface_quad[1][1] - surface_quad[0][1] + surface_quad[2][1] - surface_quad[3][1]) * 0.5 / max(width, 1.0)),
+            "top_shrink": 0.0,
+            "side_skew": 0.0,
+        }
+    except Exception as exc:
+        LOGGER.info("[PLACE] Local surface perspective fallback for %s: %s", component_type, exc)
 
     orientation = estimate_local_wall_orientation(image_rgb, target_box)
     normal = geometry.get("wall_plane", {}).get("normal") or [0, 0, 1]
@@ -1068,6 +1597,8 @@ def clamp_insertion_scale(
         max_area_ratio = max(max_area_ratio, 0.70)
     elif target_type == "elevator_ceiling":
         max_area_ratio = max(max_area_ratio, 0.35)
+    elif target_type == "elevator_cabin":
+        max_area_ratio = max(max_area_ratio, 0.75)
     max_area_px = max(1.0, image_w * image_h * max_area_ratio)
     projected_area = (mod_w * original_scale) * (mod_h * original_scale)
     if projected_area > max_area_px:
@@ -1109,6 +1640,8 @@ def validate_insertion_size(target_box: list[int], insert_wh: list[int], out_hw:
         max_area_ratio = max(max_area_ratio, 0.70)
     elif target_type == "elevator_ceiling":
         max_area_ratio = max(max_area_ratio, 0.35)
+    elif target_type == "elevator_cabin":
+        max_area_ratio = max(max_area_ratio, 0.75)
     if area_ratio > max_area_ratio:
         raise RuntimeError(f"Insertion size validation failed: area_ratio={area_ratio:.3f} > {max_area_ratio:.3f}")
     if cfg.get("_placement_debug", {}).get("placement_mode") == "existing_panel":
@@ -1149,12 +1682,93 @@ def warp_rgba_to_quad(rgba: np.ndarray, quad: np.ndarray, out_hw: tuple[int, int
 
 
 def refine_alpha(alpha: np.ndarray) -> np.ndarray:
-    return np.clip(cv2.GaussianBlur(alpha, (3, 3), 0.12), 0, 1)
+    return np.clip(cv2.GaussianBlur(alpha, (3, 3), 0.06), 0, 1)
+
+
+def large_opening_insertion_box(target_box: list[int], cfg: dict[str, Any], out_hw: tuple[int, int]) -> list[int]:
+    component_type = cfg.get("_requested_component_type") or cfg.get("_placement_debug", {}).get("selected_replacement_target_type")
+    if component_type == "elevator_door":
+        cfg.setdefault("_placement_debug", {})["door_exact_insertion_bbox"] = [int(round(value)) for value in target_box]
+        return [int(round(value)) for value in target_box]
+    if component_type != "elevator_cabin":
+        return target_box
+
+    height, width = out_hw
+    x1, y1, x2, y2 = [int(round(value)) for value in target_box]
+    box_w = max(1, x2 - x1)
+    box_h = max(1, y2 - y1)
+    side_inset = int(np.clip(box_w * 0.018, 3, 6))
+    top_inset = int(np.clip(box_h * 0.008, 2, 5))
+    bottom_inset = int(np.clip(box_h * 0.012, 3, 7))
+
+    recessed = [
+        min(max(0, x1 + side_inset), width - 1),
+        min(max(0, y1 + top_inset), height - 1),
+        max(min(width, x2 - side_inset), 1),
+        max(min(height, y2 - bottom_inset), 1),
+    ]
+    if recessed[2] <= recessed[0] or recessed[3] <= recessed[1]:
+        return target_box
+
+    cfg.setdefault("_placement_debug", {})["cabin_recessed_insertion_bbox"] = recessed
+    LOGGER.info("[PLACE] Recessed elevator_cabin insertion behind frame: %s -> %s", target_box, recessed)
+    return recessed
+
+
+def load_cabin_frame_source(cfg: dict[str, Any], out_hw: tuple[int, int]) -> np.ndarray | None:
+    component_type = cfg.get("_requested_component_type") or cfg.get("_placement_debug", {}).get("selected_replacement_target_type")
+    if component_type != "elevator_cabin":
+        return None
+    image_path = cfg.get("input_image")
+    if not image_path:
+        return None
+    try:
+        image = load_image_rgb(image_path)
+    except Exception as exc:
+        LOGGER.warning("[PLACE] Could not load original cabin frame source: %s", exc)
+        return None
+    out_h, out_w = out_hw
+    if image.shape[:2] != (out_h, out_w):
+        image = cv2.resize(image, (out_w, out_h), interpolation=cv2.INTER_AREA)
+    return image
+
+
+def is_large_component_insertion(alpha: np.ndarray, cfg: dict[str, Any]) -> bool:
+    component_type = cfg.get("_requested_component_type") or cfg.get("_placement_debug", {}).get("selected_replacement_target_type")
+
+    if component_type in {"landing_call_indicator", "synthesized_lci_adjacent_wall"}:
+        return False
+
+    if component_type in {"elevator_door", "elevator_cabin", "elevator_ceiling"}:
+        return True
+
+    area_ratio = float((alpha > 0.03).mean()) if alpha.size else 0.0
+    threshold = float(cfg["insertion"].get("large_component_area_ratio", 0.18))
+    return area_ratio >= threshold
+
+def refine_large_component_alpha(alpha: np.ndarray, cfg: dict[str, Any]) -> np.ndarray:
+    ins = cfg["insertion"]
+    feather_px = int(ins.get("large_edge_feather_px", 5))
+    protect_px = int(ins.get("large_edge_protect_px", 14))
+    solid = (alpha > 0.03).astype(np.uint8)
+    if solid.max() == 0:
+        return np.clip(alpha, 0, 1)
+    if feather_px <= 0:
+        return solid.astype(np.float32)
+
+    inside_dist = cv2.distanceTransform(solid, cv2.DIST_L2, 3)
+    outside_dist = cv2.distanceTransform(1 - solid, cv2.DIST_L2, 3)
+    signed_dist = inside_dist - outside_dist
+    edge_alpha = np.clip((signed_dist + feather_px) / max(2 * feather_px, 1), 0, 1)
+
+    core = inside_dist >= max(protect_px, feather_px + 1)
+    edge_alpha[core] = 1.0
+    return np.clip(edge_alpha.astype(np.float32), 0, 1)
 
 
 def validate_or_rebuild_alpha(alpha: np.ndarray, insertion_bbox: list[int], cfg: dict[str, Any], mask_name: str) -> tuple[np.ndarray, dict[str, Any]]:
     ratio, bbox, nearly_full = mask_stats(alpha)
-    max_ratio = float(cfg["insertion"].get("max_harmonization_mask_area_ratio", 0.35))
+    max_ratio = harmonization_mask_max_ratio(alpha, cfg)
     debug = {
         f"{mask_name}_mask_bbox": bbox,
         f"{mask_name}_mask_white_area_ratio": ratio,
@@ -1185,6 +1799,20 @@ def validate_or_rebuild_alpha(alpha: np.ndarray, insertion_bbox: list[int], cfg:
             f"Harmonization mask validation failed after rebuild: coverage={ratio2:.4f} bbox={bbox2}"
         )
     return rebuilt, debug
+
+
+def harmonization_mask_max_ratio(alpha: np.ndarray, cfg: dict[str, Any]) -> float:
+    base_ratio = float(cfg["insertion"].get("max_harmonization_mask_area_ratio", 0.35))
+    component_type = cfg.get("_requested_component_type") or cfg.get("_placement_debug", {}).get("selected_replacement_target_type")
+    if component_type == "elevator_door":
+        return max(base_ratio, 0.70)
+    if component_type == "elevator_cabin":
+        return max(base_ratio, 0.75)
+    if component_type == "elevator_ceiling":
+        return max(base_ratio, 0.45)
+    if is_large_component_insertion(alpha, cfg):
+        return max(base_ratio, float(cfg["insertion"].get("large_max_harmonization_mask_area_ratio", 0.75)))
+    return base_ratio
 
 
 def mask_stats(alpha: np.ndarray) -> tuple[float, list[int] | None, bool]:
@@ -1288,6 +1916,81 @@ def edge_integration(fg: np.ndarray, alpha: np.ndarray) -> np.ndarray:
     return np.clip(fg.astype(np.float32) * (1 - edge_mask[:, :, None]) + soft.astype(np.float32) * edge_mask[:, :, None], 0, 255).astype(np.uint8)
 
 
+def add_cabin_recess_integration(bg: np.ndarray, composite: np.ndarray, alpha: np.ndarray, target_box: list[int], cfg: dict[str, Any]) -> np.ndarray:
+    component_type = cfg.get("_requested_component_type") or cfg.get("_placement_debug", {}).get("selected_replacement_target_type")
+    if component_type != "elevator_cabin":
+        return composite
+
+    height, width = composite.shape[:2]
+    x1, y1, x2, y2 = [int(round(value)) for value in target_box]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(width, x2), min(height, y2)
+    if x2 <= x1 or y2 <= y1:
+        return composite
+
+    box_w = max(1, x2 - x1)
+    box_h = max(1, y2 - y1)
+    side_band = int(np.clip(box_w * 0.070, 12, 26))
+    top_band = int(np.clip(box_h * 0.050, 10, 24))
+    bottom_band = int(np.clip(box_h * 0.040, 8, 18))
+
+    yy, xx = np.mgrid[0:height, 0:width]
+    inside_box = (xx >= x1) & (xx < x2) & (yy >= y1) & (yy < y2) & (alpha > 0.03)
+    if not np.any(inside_box):
+        return composite
+
+    left = np.clip(1.0 - ((xx - x1) / max(side_band, 1)), 0.0, 1.0)
+    right = np.clip(1.0 - ((x2 - 1 - xx) / max(side_band, 1)), 0.0, 1.0)
+    top = np.clip(1.0 - ((yy - y1) / max(top_band, 1)), 0.0, 1.0)
+    bottom = np.clip(1.0 - ((y2 - 1 - yy) / max(bottom_band, 1)), 0.0, 1.0)
+
+    side_shadow = np.maximum(left, right)
+    recess_shadow = np.maximum(side_shadow * 0.22, top * 0.18)
+    recess_shadow = np.maximum(recess_shadow, bottom * 0.10)
+    recess_shadow = np.where(inside_box, recess_shadow, 0.0)
+    recess_shadow = cv2.GaussianBlur(recess_shadow.astype(np.float32), (0, 0), 2.2)
+
+    out = composite.astype(np.float32)
+    out[inside_box] *= 0.985
+    out *= 1.0 - recess_shadow[:, :, None]
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def restore_cabin_opening_frame(frame_source: np.ndarray | None, composite: np.ndarray, target_box: list[int], insertion_box: list[int], cfg: dict[str, Any]) -> np.ndarray:
+    component_type = cfg.get("_requested_component_type") or cfg.get("_placement_debug", {}).get("selected_replacement_target_type")
+    if component_type != "elevator_cabin" or frame_source is None:
+        return composite
+
+    height, width = composite.shape[:2]
+    tx1, ty1, tx2, ty2 = [int(round(value)) for value in target_box]
+    ix1, iy1, ix2, iy2 = [int(round(value)) for value in insertion_box]
+    tx1, ty1 = max(0, tx1), max(0, ty1)
+    tx2, ty2 = min(width, tx2), min(height, ty2)
+    ix1, iy1 = max(0, ix1), max(0, iy1)
+    ix2, iy2 = min(width, ix2), min(height, iy2)
+    if tx2 <= tx1 or ty2 <= ty1 or ix2 <= ix1 or iy2 <= iy1:
+        return composite
+
+    mask = np.zeros((height, width), dtype=np.float32)
+    mask[ty1:ty2, tx1:tx2] = 1.0
+    mask[iy1:iy2, ix1:ix2] = 0.0
+
+    inner_edge = np.zeros_like(mask)
+    feather = 5
+    inner_edge[max(ty1, iy1 - feather) : min(ty2, iy1 + feather), ix1:ix2] = 0.35
+    inner_edge[max(ty1, iy2 - feather) : min(ty2, iy2 + feather), ix1:ix2] = 0.22
+    inner_edge[iy1:iy2, max(tx1, ix1 - feather) : min(tx2, ix1 + feather)] = 0.38
+    inner_edge[iy1:iy2, max(tx1, ix2 - feather) : min(tx2, ix2 + feather)] = 0.38
+    mask = np.maximum(mask, inner_edge)
+    mask = cv2.GaussianBlur(mask, (0, 0), 1.2)
+    mask = np.clip(mask, 0, 0.92)
+
+    out = composite.astype(np.float32)
+    source = frame_source.astype(np.float32)
+    out = out * (1.0 - mask[:, :, None]) + source * mask[:, :, None]
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 def transfer_wall_texture(bg: np.ndarray, fg: np.ndarray, alpha: np.ndarray, strength: float) -> np.ndarray:
     mask = alpha > 0.03
     wall_detail = bg.astype(np.float32) - cv2.GaussianBlur(bg, (0, 0), 2.0).astype(np.float32)
@@ -1323,6 +2026,72 @@ def add_wall_grounding(bg: np.ndarray, alpha: np.ndarray) -> np.ndarray:
     halo = cv2.GaussianBlur(solid, (51, 51), 18)
     halo = np.clip(halo - solid, 0, 1)
     return np.clip(bg.astype(np.float32) * (1 - halo[:, :, None] * 0.035), 0, 255).astype(np.uint8)
+
+
+def cleanup_lci_call_panel_residue(bg: np.ndarray, target_box: list[int], insertion_box: list[int], cfg: dict[str, Any]) -> np.ndarray:
+    if (
+        cfg.get("_requested_component_type") != LANDING_CALL_INDICATOR_CLASS
+        or cfg.get("_placement_debug", {}).get("selected_replacement_target_type") != "elevator call button panel"
+    ):
+        return bg
+    height, width = bg.shape[:2]
+    cleanup_box = cfg.get("_placement_debug", {}).get("selected_replacement_target_bbox") or target_box
+    x1, y1, x2, y2 = [int(round(v)) for v in cleanup_box]
+    ix1, iy1, ix2, iy2 = [int(round(v)) for v in insertion_box]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(width, x2), min(height, y2)
+    ix1, iy1 = max(0, ix1), max(0, iy1)
+    ix2, iy2 = min(width, ix2), min(height, iy2)
+    if x2 <= x1 or y2 <= y1:
+        return bg
+
+    cleanup = np.zeros((height, width), dtype=np.uint8)
+    cleanup[y1:y2, x1:x2] = 255
+    protect = max(1, int(min(max(1, ix2 - ix1), max(1, iy2 - iy1)) * 0.015))
+    cleanup[max(0, iy1 - protect) : min(height, iy2 + protect), max(0, ix1 - protect) : min(width, ix2 + protect)] = 0
+    if cleanup.max() == 0:
+        return bg
+
+    out = bg.astype(np.float32).copy()
+    target_w = max(1, x2 - x1)
+    sample_margin = max(18, int(target_w * 0.75))
+    sample_gap = max(3, int(target_w * 0.08))
+    sx1 = max(0, x1 - sample_margin)
+    sx2 = min(width, x2 + sample_margin)
+    rng = np.random.default_rng(42)
+
+    global_ring = bg[y1:y2, sx1:sx2]
+    ring_mask = np.ones(global_ring.shape[:2], dtype=bool)
+    ring_mask[:, x1 - sx1 : x2 - sx1] = False
+    global_samples = global_ring[ring_mask]
+    fallback = np.median(global_samples, axis=0) if global_samples.size else np.median(bg.reshape(-1, 3), axis=0)
+    fallback_std = np.std(global_samples, axis=0) if global_samples.size else np.array([2.0, 2.0, 2.0])
+
+    for yy in range(y1, y2):
+        cols = np.where(cleanup[yy, x1:x2] > 0)[0]
+        if cols.size == 0:
+            continue
+        row1, row2 = max(y1, yy - 2), min(y2, yy + 3)
+        samples: list[np.ndarray] = []
+        if x1 - sample_gap > sx1:
+            samples.append(bg[row1:row2, sx1 : x1 - sample_gap].reshape(-1, 3))
+        if sx2 > x2 + sample_gap:
+            samples.append(bg[row1:row2, x2 + sample_gap : sx2].reshape(-1, 3))
+        row_samples = np.concatenate([sample for sample in samples if sample.size], axis=0) if any(sample.size for sample in samples) else np.empty((0, 3))
+        center = np.median(row_samples, axis=0) if row_samples.size else fallback
+        spread = np.clip(np.std(row_samples, axis=0) if row_samples.size else fallback_std, 1.0, 8.0)
+        fill = center + rng.normal(0, spread * 0.18, (cols.size, 3))
+        out[yy, x1 + cols] = np.clip(fill, 0, 255)
+
+    alpha = cv2.GaussianBlur((cleanup > 0).astype(np.float32), (0, 0), 2.0)
+    alpha = np.clip(alpha, 0.0, 1.0)
+    blended = bg.astype(np.float32) * (1.0 - alpha[:, :, None]) + out * alpha[:, :, None]
+    cfg.setdefault("_placement_debug", {})["lci_panel_residue_cleanup"] = {
+        "status": "applied",
+        "target_bbox": [x1, y1, x2, y2],
+        "protected_insertion_bbox": [ix1, iy1, ix2, iy2],
+    }
+    return np.clip(blended, 0, 255).astype(np.uint8)
 
 
 def alpha_composite(bg: np.ndarray, fg: np.ndarray, alpha: np.ndarray) -> np.ndarray:

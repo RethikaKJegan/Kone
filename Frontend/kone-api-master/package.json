@@ -12,7 +12,7 @@
   },
   "scripts": {
     "start": "pm2 start ecosystem.config.json --no-daemon",
-    "dev": "cross-env NODE_ENV=development nodemon --ignore storage --ignore tmp_uploads src/index.js",
+    "dev": "cross-env NODE_ENV=development PORT=4000 nodemon --watch src --ext js,json --ignore \"storage/**\" --ignore \"tmp_uploads/**\" src/index.js",
     "test": "jest -i --colors --verbose --detectOpenHandles",
     "test:watch": "jest -i --watchAll",
     "coverage": "jest -i --coverage",

@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
+import axios from 'axios'
 import apiClient from '../../../api/client'
 import { getGuestSessionId, isGuestSession } from '../../../api/guestWorkflow'
 import { useOfferingStore } from '../../../store/offeringStore'
@@ -38,15 +39,23 @@ export default function Step1Upload() {
     }
     setCheckStatus('checking')
     setPrecheckReason(null)
-    const sessionId = await getGuestSessionId()
-    const { data } = await apiClient.post('/guest/precheck', {
-      is_guest: true,
-      session_id: sessionId,
-      project_id: projectId,
-      project_name: currentOffering.name,
-    })
-    setCheckStatus(data.ok ? 'passed' : 'failed')
-    setPrecheckReason(data.ok ? null : data.reason ?? 'Image failed precheck')
+    try {
+      const sessionId = await getGuestSessionId()
+      const { data } = await apiClient.post('/guest/precheck', {
+        is_guest: true,
+        session_id: sessionId,
+        project_id: projectId,
+        project_name: currentOffering.name,
+      }, { timeout: 20000 })
+      setCheckStatus(data.ok ? 'passed' : 'failed')
+      setPrecheckReason(data.ok ? null : data.reason ?? 'Invalid image. Please upload a valid elevator image.')
+    } catch (error) {
+      const reason = axios.isAxiosError(error) && error.code === 'ECONNABORTED'
+        ? 'Image validation timed out. Please upload a clear elevator image and try again.'
+        : 'Invalid image. Please upload a valid elevator image.'
+      setCheckStatus('failed')
+      setPrecheckReason(reason)
+    }
   }
 
   const handleContinue = () => {

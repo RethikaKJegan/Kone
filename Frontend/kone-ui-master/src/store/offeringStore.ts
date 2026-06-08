@@ -1,11 +1,12 @@
 import { create } from 'zustand'
 import apiClient from '../api/client'
 import { getGuestSessionId, isGuestSession } from '../api/guestWorkflow'
+import { AI_PLACEMENT_DEFAULTS, KONE_COMPONENTS } from '../lib/constants'
 import type { Offering, OfferingStep, Environment, ComponentKey, ComponentPin } from '../types'
 
 function getGuestData<T>(key: string): T | null {
   try {
-    const raw = sessionStorage.getItem(key)
+    const raw = localStorage.getItem(key) ?? sessionStorage.getItem(key)
     return raw ? (JSON.parse(raw) as T) : null
   } catch {
     return null
@@ -14,7 +15,9 @@ function getGuestData<T>(key: string): T | null {
 
 function setGuestData(key: string, value: unknown) {
   try {
-    sessionStorage.setItem(key, JSON.stringify(value))
+    const raw = JSON.stringify(value)
+    localStorage.setItem(key, raw)
+    sessionStorage.setItem(key, raw)
   } catch {}
 }
 
@@ -40,6 +43,10 @@ function makeGuestOffering(projectId: string): Offering {
     renderComplete: false,
     outputImageUrl: null,
     outputVideoUrl: null,
+    savedStep: 1,
+    previewRequestKey: null,
+    videoGenerated: false,
+    downloadUrl: null,
   }
 }
 
@@ -58,6 +65,7 @@ interface OfferingState {
   setVideoSettings: (
     settings: Partial<Pick<Offering, 'videoMotionStyle' | 'videoSpeed' | 'videoQuality'>>
   ) => void
+  setDownloadReady: (downloadUrl: string | null) => void
   triggerRender: () => Promise<void>
   goToStep: (step: OfferingStep) => void
   completeOffering: () => Promise<void>
@@ -74,6 +82,26 @@ function saveGuestOfferings(state: { offerings: Record<string, Offering[]>; curr
   if (state.currentOffering) {
     setGuestData('guest_current_offering', state.currentOffering)
   }
+}
+
+function componentSignature(environments: Environment[], components: ComponentKey[]) {
+  return JSON.stringify({
+    environments: [...environments].sort(),
+    components: [...components].sort(),
+  })
+}
+
+function writeOfferingState(state: OfferingState, offering: Offering) {
+  const projectOfferings = state.offerings[offering.projectId] ?? []
+  const exists = projectOfferings.some(o => o.id === offering.id)
+  const offerings = {
+    ...state.offerings,
+    [offering.projectId]: exists
+      ? projectOfferings.map(o => (o.id === offering.id ? offering : o))
+      : [...projectOfferings, offering],
+  }
+  saveGuestOfferings({ offerings, currentOffering: offering })
+  return { offerings, currentOffering: offering }
 }
 
 export const useOfferingStore = create<OfferingState>()((set, get) => ({
@@ -125,8 +153,8 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
   },
 
   setCurrentOffering: offering => set(state => {
-    saveGuestOfferings({ offerings: state.offerings, currentOffering: offering })
-    return { currentOffering: offering }
+    const savedStep = offering.savedStep ?? state.currentStep ?? 1
+    return { ...writeOfferingState(state, { ...offering, savedStep }), currentStep: savedStep }
   }),
 
   setUpload: async (file: File) => {
@@ -151,11 +179,15 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
         uploadedFileUrl: data.image_url,
         uploadedFileName: file.name,
         uploadedFileType: 'image',
+        componentPins: [],
+        renderComplete: false,
+        outputImageUrl: null,
+        outputVideoUrl: null,
+        previewRequestKey: null,
+        videoGenerated: false,
+        downloadUrl: null,
       })
-      set(state => {
-        saveGuestOfferings({ offerings: state.offerings, currentOffering: updated })
-        return { currentOffering: updated }
-      })
+      set(state => writeOfferingState(state, updated))
       return
     }
 
@@ -182,33 +214,46 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       uploadedFileUrl: fileUrl,
       uploadedFileName: file.name,
       uploadedFileType: file.type.startsWith('video') ? 'video' : 'image',
+      componentPins: [],
+      renderComplete: false,
+      outputImageUrl: null,
+      outputVideoUrl: null,
+      previewRequestKey: null,
+      videoGenerated: false,
+      downloadUrl: null,
       ...(imageId ? { imageId } : {}),
     }
     const updated = patchOffering(currentOffering, updates)
-    set(state => {
-      saveGuestOfferings({ offerings: state.offerings, currentOffering: updated })
-      return { currentOffering: updated }
-    })
+    set(state => writeOfferingState(state, updated))
   },
 
   setComponents: async (environments, components) => {
     const { currentOffering } = get()
     if (!currentOffering) return
-    const selectedComponents = components.slice(0, 1)
+    const selectedComponents = components
+    const previewRequestKey = componentSignature(environments, selectedComponents)
     const updates: Partial<Offering> = {
       environments,
       selectedComponents,
       componentPins: [],
       activeAnnotationFilters: selectedComponents,
+      renderComplete: false,
+      outputImageUrl: null,
+      outputVideoUrl: null,
+      previewRequestKey,
+      videoGenerated: false,
+      downloadUrl: null,
     }
     const updated = patchOffering(currentOffering, updates)
-    set(state => {
-      saveGuestOfferings({ offerings: state.offerings, currentOffering: updated })
-      return { currentOffering: updated }
-    })
+    set(state => writeOfferingState(state, updated))
 
-    if (isGuestSession()) {
+    if (isGuestSession() && selectedComponents.length > 0) {
       const sessionId = await getGuestSessionId()
+      const componentAssets = Object.fromEntries(
+        KONE_COMPONENTS
+          .filter(component => selectedComponents.includes(component.key))
+          .map(component => [component.key, component.imageUrl])
+      )
       await apiClient.post('/guest/components', {
         is_guest: true,
         session_id: sessionId,
@@ -216,8 +261,10 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
         project_name: currentOffering.name,
         environments,
         selected_components: selectedComponents,
+        component_assets: componentAssets,
+        preview_request_key: previewRequestKey,
       })
-    } else {
+    } else if (!isGuestSession()) {
       await apiClient.patch(`/offerings/${currentOffering.id}`, updates)
 
       // Drive the video pipeline steps if an imageId exists
@@ -241,10 +288,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       apiClient.patch(`/offerings/${currentOffering.id}`, { componentPins: pins })
     }
     const updated = patchOffering(currentOffering, { componentPins: pins })
-    set(state => {
-      saveGuestOfferings({ offerings: state.offerings, currentOffering: updated })
-      return { currentOffering: updated }
-    })
+    set(state => writeOfferingState(state, updated))
   },
 
   runAIPlacement: async () => {
@@ -253,19 +297,19 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
     set({ isProcessing: true })
     try {
       if (isGuestSession()) {
-        await new Promise(r => setTimeout(r, 800))
-        const { AI_PLACEMENT_DEFAULTS } = await import('../lib/constants')
-        const pins: ComponentPin[] = currentOffering.selectedComponents.map(key => ({
+        const sessionId = await getGuestSessionId()
+        const { data } = await apiClient.get('/guest/status', {
+          params: { session_id: sessionId, project_id: currentOffering.projectId },
+        })
+        const placementPins = (data.component_pins ?? []) as ComponentPin[]
+        const pins: ComponentPin[] = currentOffering.selectedComponents.map(key => placementPins.find(pin => pin.componentKey === key) ?? ({
           componentKey: key,
           x: AI_PLACEMENT_DEFAULTS[key]?.x ?? 50,
           y: AI_PLACEMENT_DEFAULTS[key]?.y ?? 50,
           aiPlaced: true,
         }))
         const updated = patchOffering(currentOffering, { componentPins: pins })
-        set(state => {
-          saveGuestOfferings({ offerings: state.offerings, currentOffering: updated })
-          return { currentOffering: updated, isProcessing: false }
-        })
+        set(state => ({ ...writeOfferingState(state, updated), isProcessing: false }))
         return pins
       }
       const { data } = await apiClient.post<ComponentPin[]>(
@@ -290,10 +334,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       apiClient.patch(`/offerings/${currentOffering.id}`, updates)
     }
     const updated = patchOffering(currentOffering, updates)
-    set(state => {
-      saveGuestOfferings({ offerings: state.offerings, currentOffering: updated })
-      return { currentOffering: updated }
-    })
+    set(state => writeOfferingState(state, updated))
   },
 
   setVideoSettings: settings => {
@@ -302,11 +343,21 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
     if (!isGuestSession()) {
       apiClient.patch(`/offerings/${currentOffering.id}`, settings)
     }
-    const updated = patchOffering(currentOffering, settings)
-    set(state => {
-      saveGuestOfferings({ offerings: state.offerings, currentOffering: updated })
-      return { currentOffering: updated }
+    const changed = Object.entries(settings).some(
+      ([key, value]) => currentOffering[key as keyof Offering] !== value
+    )
+    const updated = patchOffering(currentOffering, {
+      ...settings,
+      ...(changed ? { outputVideoUrl: null, videoGenerated: false, downloadUrl: null } : {}),
     })
+    set(state => writeOfferingState(state, updated))
+  },
+
+  setDownloadReady: downloadUrl => {
+    const { currentOffering } = get()
+    if (!currentOffering) return
+    const updated = patchOffering(currentOffering, { downloadUrl, savedStep: 6 })
+    set(state => ({ ...writeOfferingState(state, updated), currentStep: 6 }))
   },
 
   triggerRender: async () => {
@@ -317,10 +368,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       if (isGuestSession()) {
         await new Promise(r => setTimeout(r, 1200))
         const updated = patchOffering(currentOffering, { renderComplete: true })
-        set(state => {
-          saveGuestOfferings({ offerings: state.offerings, currentOffering: updated })
-          return { currentOffering: updated, isProcessing: false }
-        })
+        set(state => ({ ...writeOfferingState(state, updated), isProcessing: false }))
         return
       }
 
@@ -339,7 +387,12 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
     }
   },
 
-  goToStep: step => set({ currentStep: step }),
+  goToStep: step => set(state => {
+    const currentOffering = state.currentOffering
+    if (!currentOffering) return { currentStep: step }
+    const updated = patchOffering(currentOffering, { savedStep: step })
+    return { ...writeOfferingState(state, updated), currentStep: step }
+  }),
 
   completeOffering: async () => {
     const { currentOffering } = get()

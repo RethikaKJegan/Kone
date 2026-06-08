@@ -61,6 +61,10 @@ export interface Offering {
   renderComplete: boolean
   outputImageUrl: string | null
   outputVideoUrl: string | null
+  savedStep?: OfferingStep
+  previewRequestKey?: string | null
+  videoGenerated?: boolean
+  downloadUrl?: string | null
 }
 
 export type BrochureSection =
