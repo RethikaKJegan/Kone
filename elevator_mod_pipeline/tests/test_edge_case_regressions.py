@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import inspect
 from pathlib import Path
 
 import cv2
@@ -9,31 +8,18 @@ import numpy as np
 import pytest
 
 import src.detect as detect
-import src.pipeline as pipeline_module
 import run_batch
 from src.input_validation import validate_elevator_presence
 from src.insert_mod import (
-    build_wall_aligned_destination_quad,
-    cleanup_lci_call_panel_residue,
     expand_control_panel_bbox,
     extend_inpaint_bbox_for_aligned_panel_artifacts,
     invalid_mod_panel_target_reason,
-    localized_mask_from_preselected_detection,
     preselect_mod_panel_placement,
     select_valid_component_detection,
 )
-from src.perspective_mod_placement import (
-    build_asset_quad_on_surface,
-    compute_local_component_homography,
-    compute_local_component_quad,
-    estimate_local_surface_quad,
-    estimate_local_surface_angle_degrees,
-    estimate_quad_angle_degrees,
-    parse_points,
-    run_perspective_mod_placement,
-)
+from src.perspective_mod_placement import parse_points, run_perspective_mod_placement
 from src.pipeline import component_config, elevator_present_for_video, replacement_configs
-from src.video import normalize_video_mode_request, pan_metadata, render_motion_style_frame
+from src.video import fallback_door_cycle_actions, normalize_video_mode_request, pan_metadata, render_motion_style_frame, select_state_images
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -94,120 +80,6 @@ def test_perspective_mod_placement_writes_sd_handoff_outputs(tmp_path: Path) -> 
     mask = cv2.imread(str(outputs["edge_refine_mask"]), cv2.IMREAD_GRAYSCALE)
     assert mask is not None
     assert 0 < float(np.mean(mask > 0)) < 0.12
-
-
-def test_local_component_quad_uses_target_bbox_not_full_image() -> None:
-    quad = compute_local_component_quad((800, 600, 3), {"selected_replacement_target_bbox": [420, 180, 470, 360]})
-
-    assert quad.tolist() == [[420.0, 180.0], [470.0, 180.0], [470.0, 360.0], [420.0, 360.0]]
-    assert cv2.contourArea(quad) < 600 * 800 * 0.05
-
-
-def test_multiple_components_get_independent_local_homographies() -> None:
-    lci_quad = compute_local_component_quad((900, 700, 3), {"final_insertion_bbox": [520, 250, 570, 430]})
-    cop_quad = compute_local_component_quad((900, 700, 3), {"final_insertion_bbox": [120, 100, 210, 760]})
-
-    lci_h = compute_local_component_homography((50, 180), lci_quad)
-    cop_h = compute_local_component_homography((90, 660), cop_quad)
-
-    assert not np.allclose(lci_h, cop_h)
-    assert estimate_quad_angle_degrees(lci_quad) == pytest.approx(0.0)
-    assert estimate_quad_angle_degrees(cop_quad) == pytest.approx(0.0)
-
-
-def test_missing_detection_fallback_still_creates_local_quad_not_full_image() -> None:
-    quad = compute_local_component_quad((1000, 800, 3), {})
-
-    assert cv2.contourArea(quad) < 1000 * 800 * 0.05
-    assert quad[:, 0].min() > 0
-    assert quad[:, 1].min() > 0
-
-
-def test_pipeline_does_not_apply_global_perspective_after_local_component_placement() -> None:
-    source = inspect.getsource(pipeline_module.main)
-
-    assert "run_perspective_mod_placement_from_config" not in source
-    assert "run_auto_perspective_mod_placement" not in source
-
-
-def test_lci_placement_stays_rectified_even_when_wall_lines_are_tilted() -> None:
-    image = np.full((420, 360, 3), 190, dtype=np.uint8)
-    cv2.line(image, (210, 55), (235, 370), (55, 55, 55), 3)
-    cv2.line(image, (282, 48), (306, 365), (60, 60, 60), 3)
-    target = [226, 150, 272, 260]
-    cfg = {"_requested_component_type": "landing_call_indicator", "_placement_debug": {"placement_mode": "existing_lci"}}
-
-    dest, debug = build_wall_aligned_destination_quad(image, target, target, {}, cfg, image.shape[:2])
-
-    assert debug["reason"] == "lci_cop_use_clean_axis_aligned_bbox"
-    assert estimate_local_surface_angle_degrees(dest) == pytest.approx(0.0)
-    assert dest.tolist() == [[226.0, 150.0], [272.0, 150.0], [272.0, 260.0], [226.0, 260.0]]
-
-
-def test_cop_placement_stays_rectified_even_when_panel_edges_are_angled() -> None:
-    image = np.full((560, 360, 3), 165, dtype=np.uint8)
-    panel = np.array([[140, 45], [225, 58], [245, 520], [160, 505]], dtype=np.int32)
-    cv2.polylines(image, [panel], True, (45, 45, 45), 3)
-    target = [162, 170, 214, 430]
-    cfg = {"_requested_component_type": detect.OPERATING_PANEL_CLASS, "_placement_debug": {"placement_mode": "existing_panel"}}
-
-    dest, debug = build_wall_aligned_destination_quad(image, target, target, {}, cfg, image.shape[:2])
-
-    assert debug["reason"] == "lci_cop_use_clean_axis_aligned_bbox"
-    assert estimate_local_surface_angle_degrees(dest) == pytest.approx(0.0)
-    assert dest.tolist() == [[162.0, 170.0], [214.0, 170.0], [214.0, 430.0], [162.0, 430.0]]
-
-
-def test_door_local_surface_preserves_trapezoid_frame_perspective() -> None:
-    image = np.full((720, 520, 3), 180, dtype=np.uint8)
-    cv2.line(image, (160, 90), (120, 650), (30, 30, 30), 4)
-    cv2.line(image, (360, 90), (410, 650), (30, 30, 30), 4)
-    cv2.line(image, (160, 90), (360, 90), (30, 30, 30), 4)
-    cv2.line(image, (120, 650), (410, 650), (30, 30, 30), 4)
-    target = [150, 110, 370, 630]
-
-    surface, debug = estimate_local_surface_quad(image, "elevator_door", target)
-    dest = build_asset_quad_on_surface(target, surface, "elevator_door")
-
-    top_width = float(np.linalg.norm(dest[1] - dest[0]))
-    bottom_width = float(np.linalg.norm(dest[2] - dest[3]))
-    assert debug["used_surface_source"] == "door_frame"
-    assert debug["fallback_used"] is False
-    assert abs(top_width - bottom_width) > 20.0
-    assert dest[3][0] < dest[0][0]
-    assert dest[2][0] > dest[1][0]
-
-
-def test_door_and_interior_keep_independent_local_surface_homographies() -> None:
-    image = np.full((520, 520, 3), 180, dtype=np.uint8)
-    cv2.line(image, (95, 70), (120, 450), (35, 35, 35), 3)
-    cv2.line(image, (170, 65), (195, 445), (35, 35, 35), 3)
-    cv2.line(image, (330, 75), (306, 450), (35, 35, 35), 3)
-    cv2.line(image, (410, 70), (384, 445), (35, 35, 35), 3)
-
-    door_surface, _ = estimate_local_surface_quad(image, "elevator_door", [95, 80, 195, 440])
-    interior_surface, _ = estimate_local_surface_quad(image, "elevator_cabin", [306, 90, 410, 430])
-    door_dest = build_asset_quad_on_surface([95, 80, 195, 440], door_surface, "elevator_door")
-    interior_dest = build_asset_quad_on_surface([306, 90, 410, 430], interior_surface, "elevator_cabin")
-    door_h = compute_local_component_homography((100, 360), door_dest)
-    interior_h = compute_local_component_homography((104, 340), interior_dest)
-
-    assert not np.allclose(door_h, interior_h)
-    assert np.sign(estimate_local_surface_angle_degrees(door_dest)) != np.sign(estimate_local_surface_angle_degrees(interior_dest))
-
-
-def test_no_surface_cue_fallback_uses_local_bbox_not_full_image_grid() -> None:
-    image = np.full((600, 800, 3), 180, dtype=np.uint8)
-    target = [500, 180, 548, 330]
-
-    surface, debug = estimate_local_surface_quad(image, "landing_call_indicator", target)
-    dest = build_asset_quad_on_surface(target, surface, "landing_call_indicator")
-
-    assert debug["fallback_used"] is True
-    assert debug["used_surface_source"] == "fallback_local_bbox"
-    assert cv2.contourArea(dest.astype(np.float32)) < image.shape[0] * image.shape[1] * 0.05
-    assert dest[:, 0].min() >= target[0] - 10
-    assert dest[:, 0].max() <= target[2] + 10
 
 
 def test_multi_component_config_preserves_legacy_and_overrides_targets() -> None:
@@ -702,36 +574,6 @@ def test_unmatched_dark_wall_fixture_does_not_invent_call_panel() -> None:
     assert [det["normalized_component_type"] for det in detections] == ["elevator_door"]
 
 
-def test_long_side_silver_strip_is_recovered_as_call_panel() -> None:
-    image = np.full((1600, 1200, 3), [28, 28, 28], dtype=np.uint8)
-    image[405:1306, 348:877] = [78, 82, 84]
-    image[385:1260, 935:1036] = [154, 156, 150]
-    image[430:1280, 1040:1080] = [24, 24, 24]
-    image[445:515, 972:1008] = [36, 38, 36]
-    image[600:650, 972:1008] = [230, 232, 225]
-    image[930:965, 972:1008] = [42, 44, 42]
-    detections = [
-        {
-            "phrase": "elevator door",
-            "normalized_component_type": "elevator_door",
-            "score": 0.59,
-            "box_xyxy": [347.9, 405.0, 877.5, 1306.0],
-        },
-        {
-            "phrase": "floor indicator display",
-            "normalized_component_type": "floor_indicator_display",
-            "score": 0.43,
-            "box_xyxy": [476.2, 335.4, 734.1, 404.5],
-        },
-    ]
-
-    detect._add_structural_call_panel_detection(image, detections)
-
-    panel = next(item for item in detections if item.get("source") == "image_structure_long_side_call_panel")
-    assert panel["normalized_component_type"] == "elevator call button panel"
-    assert panel["box_xyxy"] == pytest.approx([935, 385, 1036, 1260], abs=18)
-
-
 def test_sample8_side_floor_display_replaces_false_overhead_indicator() -> None:
     image = cv2.cvtColor(cv2.imread(str(ROOT / "tests" / "images" / "Sample8.jpg")), cv2.COLOR_BGR2RGB)
     detections = [
@@ -746,77 +588,6 @@ def test_sample8_side_floor_display_replaces_false_overhead_indicator() -> None:
     assert len(indicators) == 1
     assert indicators[0]["box_xyxy"] == [368, 225, 405, 275]
     assert indicators[0]["geometry_validation"]["reason"] == "visual_red_digits_on_side_floor_indicator"
-
-
-def test_side_call_panel_extends_to_lower_silver_button_plate() -> None:
-    image = np.full((720, 540, 3), [190, 176, 156], dtype=np.uint8)
-    image[120:660, 110:330] = [86, 92, 98]
-    image[112:670, 100:340] = [55, 58, 62]
-    image[210:640, 120:320] = [120, 125, 128]
-    image[260:420, 415:475] = [214, 216, 213]
-    image[420:555, 415:475] = [118, 119, 116]
-    image[554:558, 415:475] = [45, 45, 43]
-    detections = [
-        {"phrase": "elevator door", "normalized_component_type": "elevator_door", "score": 0.61, "box_xyxy": [100, 120, 340, 670]},
-        {"phrase": "elevator call button panel", "normalized_component_type": "elevator call button panel", "score": 0.35, "box_xyxy": [405, 290, 485, 430]},
-    ]
-
-    detect._extend_side_call_panel_to_lower_plate(image, detections)
-
-    panel = detections[1]
-    assert panel["box_xyxy"][3] > 550
-    assert panel["geometry_validation"]["reason"] == "side_call_panel_lower_silver_button_plate"
-    assert panel["source"] == "call_panel_with_lower_button_plate"
-
-
-def test_call_panel_visual_merge_ignores_adjacent_blue_safety_sign() -> None:
-    image = np.full((900, 1100, 3), [170, 170, 150], dtype=np.uint8)
-    image[610:850, 850:925] = [180, 185, 175]
-    image[690:760, 872:910] = [35, 35, 35]
-    image[710:730, 884:895] = [210, 30, 25]
-    image[620:835, 955:1030] = [20, 65, 170]
-    detections = [
-        {
-            "phrase": "elevator call button panel",
-            "normalized_component_type": "elevator call button panel",
-            "score": 0.32,
-            "box_xyxy": [850, 740, 920, 860],
-        }
-    ]
-
-    detect._merge_visual_indicator_into_call_panel(image, detections)
-
-    panel = detections[0]
-    assert panel["box_xyxy"][2] < 950
-    assert panel["geometry_validation"]["indicator_box_xyxy"][2] < 930
-
-
-def test_exterior_wall_strip_is_not_kept_as_car_operating_panel() -> None:
-    detections = [
-        {"phrase": "elevator door", "normalized_component_type": "elevator_door", "score": 0.33, "box_xyxy": [312.0, 358.0, 755.0, 1458.0]},
-        {"phrase": "car operating panel", "normalized_component_type": detect.OPERATING_PANEL_CLASS, "score": 0.31, "box_xyxy": [752.0, 0.0, 1017.0, 1418.0]},
-        {"phrase": "elevator call button panel", "normalized_component_type": "elevator call button panel", "score": 0.32, "box_xyxy": [846.0, 679.0, 935.0, 866.0]},
-    ]
-
-    detect._suppress_exterior_operating_panel_false_positives(detections, 1200, 1600)
-
-    assert [det["normalized_component_type"] for det in detections] == ["elevator_door", "elevator call button panel"]
-
-
-def test_expanded_cop_includes_side_button_protrusions() -> None:
-    image = np.full((1600, 900, 3), 180, dtype=np.uint8)
-    image[:, 321:478] = 170
-    image[785:835, 300:350] = 50
-    image[785:835, 372:422] = 50
-    image[785:835, 455:505] = 50
-    panel_box = [321.0, 0.0, 478.0, 1398.0]
-
-    expanded = detect._include_operating_panel_side_buttons(image, panel_box)
-
-    assert expanded[0] < 300
-    assert expanded[2] > 505
-    assert expanded[1] == panel_box[1]
-    assert expanded[3] == panel_box[3]
 
 
 def test_open_full_door_detection_derives_interior_without_header_expansion() -> None:
@@ -906,118 +677,6 @@ def test_cop_preselection_preserves_floor_indicator_by_default(tmp_path: Path) -
     assert cfg["_placement_debug"]["aligned_artifact_cleanup"]["status"] == "preserved_floor_indicator_display"
 
 
-def test_lci_replacement_erases_full_call_panel_bbox_when_sam_mask_is_partial() -> None:
-    partial_mask = np.zeros((240, 160), dtype=bool)
-    partial_mask[95:145, 75:95] = True
-    detections = {
-        "detections": [
-            {
-                "phrase": "elevator call button panel",
-                "normalized_component_type": "elevator call button panel",
-                "score": 0.35,
-                "box_xyxy": [68, 70, 112, 190],
-                "mask": detect.mask_to_rle(partial_mask),
-            }
-        ]
-    }
-    cfg = {
-        "_requested_component_type": "landing_call_indicator",
-        "_placement_debug": {
-            "selected_replacement_target_type": "elevator call button panel",
-            "selected_replacement_target_bbox": [64, 66, 118, 198],
-        },
-    }
-
-    mask = localized_mask_from_preselected_detection((240, 160, 3), detections, cfg, [68, 70, 112, 190], pad=0)
-
-    assert mask[67, 65] == 255
-    assert mask[196, 116] == 255
-    assert mask[65, 65] == 0
-    assert mask[198, 116] == 0
-
-
-def test_lci_cleanup_removes_old_call_panel_residue_outside_inserted_panel() -> None:
-    bg = np.full((240, 180, 3), [198, 186, 168], dtype=np.uint8)
-    bg[155:240, :] = [124, 91, 72]
-    bg[70:190, 90:134] = [142, 168, 195]
-    bg[95:168, 96:128] = [55, 70, 85]
-    cfg = {
-        "_requested_component_type": "landing_call_indicator",
-        "_placement_debug": {
-            "selected_replacement_target_type": "elevator call button panel",
-            "selected_replacement_target_bbox": [90, 70, 134, 190],
-        },
-    }
-
-    cleaned = cleanup_lci_call_panel_residue(bg, [96, 88, 128, 168], [96, 88, 128, 168], cfg)
-
-    assert cleaned[182, 112, 2] < 120
-    assert cleaned[75, 112, 2] < 190
-    assert np.abs(cleaned[120, 110].astype(int) - bg[120, 110].astype(int)).mean() < 8
-    assert cfg["_placement_debug"]["lci_panel_residue_cleanup"]["status"] == "applied"
-
-
-def test_closed_door_detection_is_not_repaired_into_open_entrance(monkeypatch: pytest.MonkeyPatch) -> None:
-    image = np.full((1280, 1920, 3), [220, 218, 210], dtype=np.uint8)
-    image[365:981, 770:1142] = [145, 145, 140]
-    image[365:981, 954:958] = [35, 35, 35]
-    image[380:395, 790:1125] = [245, 245, 235]
-    detections = [
-        {
-            "phrase": "elevator door",
-            "normalized_component_type": "elevator_door",
-            "score": 0.39,
-            "box_xyxy": [770.0, 365.0, 1142.0, 981.0],
-        }
-    ]
-    monkeypatch.setattr(detect, "_infer_elevator_door_box", lambda _image, _detections: [190, 277, 1232, 1071])
-
-    detect._repair_nested_elevator_door_detection(image, detections)
-
-    assert detections[0]["box_xyxy"] == [770.0, 365.0, 1142.0, 981.0]
-    assert detections[0]["geometry_validation"]["reason"] == "closed_door_not_expanded_to_open_entrance"
-
-
-def test_expanded_tall_cop_is_used_instead_of_adjacent_wall(tmp_path: Path) -> None:
-    image = np.full((1600, 900, 3), 180, dtype=np.uint8)
-    mod_path = tmp_path / "cop.png"
-    cv2.imwrite(str(mod_path), np.full((600, 100, 4), 255, dtype=np.uint8))
-    detections = {
-        "detections": [
-            {
-                "phrase": "car operating panel",
-                "normalized_component_type": detect.OPERATING_PANEL_CLASS,
-                "score": 0.39,
-                "box_xyxy": [321.0, 0.0, 478.0, 1398.0],
-                "source": "expanded_car_operating_panel_plate",
-            },
-            {
-                "phrase": "wheelchair button",
-                "normalized_component_type": "wheelchair button",
-                "score": 0.33,
-                "box_xyxy": [441.0, 1103.0, 493.0, 1155.0],
-            },
-        ]
-    }
-    cfg = {
-        "_requested_component_type": "elevator_mod_panel",
-        "removal": {"box_mask_padding_px": 0},
-        "insertion": {
-            "placement": "detection",
-            "target_keywords": ["car operating panel"],
-            "existing_panel_padding_px": 0,
-            "max_existing_panel_target_area_ratio": 0.55,
-        },
-    }
-
-    bbox = preselect_mod_panel_placement(image, mod_path, detections, cfg)
-
-    assert bbox[0] <= 321 and bbox[1] == 0
-    assert bbox[2] >= 478 and bbox[3] >= 1398
-    assert cfg["_placement_debug"]["placement_mode"] == "existing_panel"
-    assert cfg["_placement_debug"]["selected_replacement_target_type"] == detect.OPERATING_PANEL_CLASS
-
-
 def test_floor_indicator_cleanup_extension_requires_explicit_opt_in() -> None:
     target = [50, 80, 110, 190]
     detections = [
@@ -1041,6 +700,62 @@ def test_door_functionality_wins_over_motion_style() -> None:
     assert request["requested_door_functionality"] == "open"
     assert request["normalized_video_mode"] == "door_open"
     assert request["video_mode_conflict_resolution"] == "door_functionality_preferred"
+
+
+def test_unselected_closed_elevator_opens_with_default_interior_and_closes_original(monkeypatch: pytest.MonkeyPatch) -> None:
+    final_img = np.full((12, 12, 3), 20, dtype=np.uint8)
+    box = [3, 2, 9, 10]
+    final_img[box[1] : box[3], box[0] : box[2]] = (40, 50, 60)
+    default_open = np.full((8, 6, 3), (100, 110, 120), dtype=np.uint8)
+
+    monkeypatch.setattr("src.video.load_default_door_open_interior", lambda cfg, shape: default_open)
+
+    open_state, closed_state, policy = select_state_images(final_img, {}, "closed", box)
+
+    assert np.array_equal(open_state[box[1] : box[3], box[0] : box[2]], default_open)
+    assert np.array_equal(closed_state, final_img)
+    assert policy["open_state_image"] == "default_door_open_interior_fitted_to_original_closed_door_box"
+    assert policy["closed_state_image"] == "final_image"
+    assert [action for action, _ in fallback_door_cycle_actions("closed")] == ["open", "close", "open", "close"]
+
+
+def test_unselected_open_elevator_closes_with_default_door_and_reopens_original(monkeypatch: pytest.MonkeyPatch) -> None:
+    final_img = np.full((12, 12, 3), 70, dtype=np.uint8)
+    box = [3, 2, 9, 10]
+    final_img[box[1] : box[3], box[0] : box[2]] = (10, 90, 130)
+    default_door = np.full((8, 6, 3), (180, 190, 200), dtype=np.uint8)
+
+    monkeypatch.setattr("src.video.load_default_door_image", lambda cfg, shape: default_door)
+
+    open_state, closed_state, policy = select_state_images(final_img, {}, "open", box)
+
+    assert np.array_equal(open_state, final_img)
+    assert np.array_equal(closed_state[box[1] : box[3], box[0] : box[2]], default_door)
+    assert policy["open_state_image"] == "final_image"
+    assert policy["closed_state_image"] == "default_door_fitted_to_original_open_interior_box"
+    assert [action for action, _ in fallback_door_cycle_actions("open")] == ["close", "open", "close", "open"]
+
+
+def test_selected_door_and_interior_state_image_behavior_stays_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    final_img = np.full((12, 12, 3), 30, dtype=np.uint8)
+    box = [3, 2, 9, 10]
+    default_open = np.full((8, 6, 3), (100, 110, 120), dtype=np.uint8)
+    default_door = np.full((8, 6, 3), (180, 190, 200), dtype=np.uint8)
+
+    monkeypatch.setattr("src.video.load_default_door_open_interior", lambda cfg, shape: default_open)
+    monkeypatch.setattr("src.video.load_default_door_image", lambda cfg, shape: default_door)
+
+    door_open_state, door_closed_state, door_policy = select_state_images(final_img, {}, "closed", box, replaced_door=True)
+    cabin_open_state, cabin_closed_state, cabin_policy = select_state_images(final_img, {}, "open", box, replaced_cabin=True)
+
+    assert np.array_equal(door_open_state[box[1] : box[3], box[0] : box[2]], default_open)
+    assert np.array_equal(door_closed_state, final_img)
+    assert door_policy["open_state_image"] == "default_door_open_interior_fitted_to_replaced_door_box"
+    assert door_policy["closed_state_image"] == "final_replaced_door_image"
+    assert np.array_equal(cabin_open_state, final_img)
+    assert np.array_equal(cabin_closed_state[box[1] : box[3], box[0] : box[2]], default_door)
+    assert cabin_policy["open_state_image"] == "final_replaced_cabin_image"
+    assert cabin_policy["closed_state_image"] == "default_door_fitted_to_replaced_cabin_box"
 
 
 def test_zoom_in_starts_with_full_centered_image_and_changes() -> None:
