@@ -148,6 +148,10 @@ def render_elevator_video(
         actions = [("close", ACTION_SECONDS["close"]), ("open", ACTION_SECONDS["open"])]
         first_action = "close"
         state_debug["replacement_cabin_sequence"] = "close_then_open_to_replaced_interior"
+    elif replaced_door_box is None and replaced_cabin_box is None:
+        actions = fallback_door_cycle_actions(state)
+        first_action = actions[0][0]
+        state_debug["fallback_door_sequence"] = "two_full_open_close_cycles"
 
     open_state_img, closed_state_img, source_policy = select_state_images(
         img,
@@ -419,6 +423,11 @@ def replacement_door_open_close_timing(duration: float) -> tuple[float, float, f
         float(close_seconds),
         float(closed_hold_seconds),
     )
+
+
+def fallback_door_cycle_actions(state: str) -> list[tuple[str, float]]:
+    sequence = ["close", "open", "close", "open"] if state == "open" else ["open", "close", "open", "close"]
+    return [(action, ACTION_SECONDS[action]) for action in sequence]
 
 
 def resize_frames_for_quality(frames: list[np.ndarray], quality: str, mode: str = "cover") -> list[np.ndarray]:
@@ -1229,29 +1238,31 @@ def select_state_images(
         )
 
     if state == "open":
-        closed_ref = load_reference_image(cfg, "closed")
+        closed_ref = load_default_door_image(cfg, final_img.shape[:2])
         closed_state = replace_box_with_reference(final_img, closed_ref, box) if closed_ref is not None else final_img
         return (
             final_img,
             closed_state,
             {
                 "open_state_image": "final_image",
-                "closed_state_image": "closed_reference_image" if closed_ref is not None else "final_image_fallback",
+                "closed_state_image": "default_door_fitted_to_original_open_interior_box" if closed_ref is not None else "final_image_fallback",
                 "open_reference_image_used": "false",
                 "closed_reference_image_used": "true" if closed_ref is not None else "false",
+                "fallback_door_animation": "open_input_close_with_default_door_reopen_original_interior",
             },
         )
 
-    open_ref = load_reference_image(cfg, "open")
+    open_ref = load_default_door_open_interior(cfg, final_img.shape[:2])
     open_state = replace_box_with_reference(final_img, open_ref, box) if open_ref is not None else final_img
     return (
         open_state,
         final_img,
         {
-            "open_state_image": "open_reference_image_fitted_to_door_box" if open_ref is not None else "final_image_fallback",
+            "open_state_image": "default_door_open_interior_fitted_to_original_closed_door_box" if open_ref is not None else "final_image_fallback",
             "closed_state_image": "final_image",
             "open_reference_image_used": "true" if open_ref is not None else "false",
             "closed_reference_image_used": "false",
+            "fallback_door_animation": "closed_input_open_with_default_interior_close_original_door",
         },
     )
 
