@@ -16,20 +16,29 @@ const COMP_LABELS = Object.fromEntries(KONE_COMPONENTS.map(c => [c.key, c.label]
 export default function Step3Place() {
   const { projectId, offeringId } = useParams()
   const navigate = useNavigate()
-  const { currentOffering, runAIPlacement, setPins, setCurrentOffering, goToStep, isProcessing } = useOfferingStore()
+  const { currentOffering, runAIPlacement, setCurrentOffering, goToStep, isProcessing } = useOfferingStore()
   const [hasRunAI, setHasRunAI] = useState(false)
   const [showAnnotations, setShowAnnotations] = useState(true)
 
   const offering = currentOffering
   const components = offering?.selectedComponents ?? []
   const pins = offering?.componentPins ?? []
-  const previewReady = !isGuestSession() || !!(offering?.renderComplete && offering.outputImageUrl)
+  const previewReady = !!(
+    offering?.outputImageUrl &&
+    (offering.renderComplete || offering.pipelineStatus === 'preview_ready' || offering.pipelineStatus === 'video_ready')
+  )
 
   useEffect(() => {
     if (!previewReady) return
+    if (!isGuestSession()) {
+      setHasRunAI(true)
+      return
+    }
     if (!hasRunAI && components.length > 0 && pins.length === 0) {
       setHasRunAI(true)
-      runAIPlacement().then(() => toast('Components placed by AI'))
+      runAIPlacement().then(placedPins => {
+        toast(placedPins.length === components.length ? 'Components placed by AI' : 'Some components need placement')
+      })
     } else if (pins.length > 0) {
       setHasRunAI(true)
     }
@@ -38,35 +47,61 @@ export default function Step3Place() {
   useEffect(() => {
     let stopped = false
     async function poll() {
-      if (!projectId || !currentOffering || !isGuestSession()) return
-      const sessionId = await getGuestSessionId()
+      if (!projectId || !offeringId || !currentOffering) return
+      const guest = isGuestSession()
+      const sessionId = guest ? await getGuestSessionId() : null
       while (!stopped) {
-        const { data } = await apiClient.get('/guest/status', {
-          params: { session_id: sessionId, project_id: projectId },
-        })
-        if (data.status === 'preview_ready') {
-          if (data.preview_request_key && data.preview_request_key !== currentOffering.previewRequestKey) {
-            await new Promise(resolve => setTimeout(resolve, 2000))
-            continue
-          }
-          setCurrentOffering({
-            ...currentOffering,
-            outputImageUrl: `${data.preview_url}?v=${Date.now()}`,
-            outputVideoUrl: null,
-            renderComplete: true,
-            videoGenerated: false,
-            downloadUrl: null,
-            componentPins: data.component_pins ?? [],
+        if (guest) {
+          const { data } = await apiClient.get('/guest/status', {
+            params: { session_id: sessionId, project_id: projectId },
           })
-          return
-        }
-        if (data.status === 'failed') {
-          if (data.preview_request_key && data.preview_request_key !== currentOffering.previewRequestKey) {
+          if (data.status === 'preview_ready') {
+            if (data.preview_request_key && data.preview_request_key !== currentOffering.previewRequestKey) {
+              await new Promise(resolve => setTimeout(resolve, 2000))
+              continue
+            }
+            setCurrentOffering({
+              ...currentOffering,
+              outputImageUrl: `${data.preview_url}?v=${Date.now()}`,
+              outputVideoUrl: null,
+              renderComplete: true,
+              pipelineStatus: 'preview_ready',
+              videoGenerated: false,
+              downloadUrl: null,
+              componentPins: data.component_pins ?? [],
+            })
+            return
+          }
+          if (data.status === 'failed') {
+            if (data.preview_request_key && data.preview_request_key !== currentOffering.previewRequestKey) {
+              await new Promise(resolve => setTimeout(resolve, 2000))
+              continue
+            }
+            toast(data.error || 'Preview generation failed')
+            return
+          }
+        } else {
+          const { data } = await apiClient.get(`/offerings/${offeringId}`)
+          if (data.previewRequestKey && data.previewRequestKey !== currentOffering.previewRequestKey) {
             await new Promise(resolve => setTimeout(resolve, 2000))
             continue
           }
-          toast(data.error || 'Preview generation failed')
-          return
+          if (data.pipelineStatus === 'preview_ready' || data.pipelineStatus === 'video_ready') {
+            setCurrentOffering({
+              ...data,
+              renderComplete: true,
+              outputImageUrl: data.outputImageUrl ? `${data.outputImageUrl}${data.outputImageUrl.includes('?') ? '&' : '?'}v=${Date.now()}` : null,
+              outputVideoUrl: null,
+              videoGenerated: false,
+              downloadUrl: null,
+            })
+            return
+          }
+          if (data.pipelineStatus === 'failed') {
+            setCurrentOffering({ ...data, renderComplete: false })
+            toast(data.lastError || 'Preview generation failed')
+            return
+          }
         }
         await new Promise(resolve => setTimeout(resolve, 2000))
       }
@@ -77,15 +112,20 @@ export default function Step3Place() {
     }
   }, [projectId, currentOffering?.id, currentOffering?.previewRequestKey])
 
-  const handleRestore = async () => {
-    setPins([])
-    setHasRunAI(false)
-    await runAIPlacement()
-    toast('Components placed by AI')
+  const handleRestore = () => {
+    if (!projectId || !offeringId || !offering || offering.projectId !== projectId || offering.id !== offeringId) {
+      toast('Visualization state is not ready. Please reopen this visualization.', 'destructive')
+      return
+    }
+    goToStep(1)
+    navigate(`/projects/${projectId}/offerings/${offeringId}/step/1`, {
+      state: { restoreToDefault: true, projectId, offeringId },
+    })
   }
 
   const allPlaced = components.every(k => pins.some(p => p.componentKey === k))
   const placedCount = components.filter(k => pins.some(p => p.componentKey === k)).length
+  const hasMissingPlacements = components.length > 0 && !allPlaced
 
   const handleContinue = () => {
     goToStep(5)
@@ -124,8 +164,12 @@ export default function Step3Place() {
       <div className="mx-8 mb-4 flex items-start gap-3 rounded-lg border border-[#DBEAFE] bg-[#EFF6FF] px-4 py-3">
         <Sparkles className="shrink-0 text-[#1450F5] mt-0.5" style={{ width: 15, height: 15 }} />
         <div>
-          <p className="text-sm font-medium text-[#1e3a5f]">AI has pre-placed all components based on spatial intelligence.</p>
-          <p className="mt-0.5 text-xs text-[#3b82f6]">Final preview is ready.</p>
+          <p className="text-sm font-medium text-[#1e3a5f]">
+            {hasMissingPlacements ? 'AI placed the detected components from the generated preview.' : 'AI has pre-placed all components based on spatial intelligence.'}
+          </p>
+          <p className="mt-0.5 text-xs text-[#3b82f6]">
+            {hasMissingPlacements ? 'Some selected components need review before continuing.' : 'Final preview is ready.'}
+          </p>
         </div>
       </div>
 

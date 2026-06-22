@@ -58,7 +58,7 @@ export default function SignUpPage() {
       await signUp(data.name, data.email, data.password)
       navigate('/projects')
     } catch (err) {
-      if (axios.isAxiosError(err) && err.response?.status === 409) {
+      if (axios.isAxiosError(err) && [400, 409].includes(err.response?.status ?? 0)) {
         setError('email', { message: 'An account with this email already exists' })
       } else {
         setError('email', { message: 'Something went wrong. Try again.' })

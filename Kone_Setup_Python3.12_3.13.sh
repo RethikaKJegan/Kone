@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="${ROOT_DIR:-$HOME/Downloads/Kone/Kone}"
-HF_TOKEN="${HF_TOKEN:}"
+ROOT_DIR="${ROOT_DIR:-/root/Kone}"
+HF_TOKEN="${HF_TOKEN:-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}"
 
 BACKEND_PORT="${BACKEND_PORT:-8001}"
 API_PORT="${API_PORT:-4000}"

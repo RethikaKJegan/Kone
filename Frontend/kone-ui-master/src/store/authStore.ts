@@ -10,6 +10,15 @@ interface AuthTokens {
   refresh: { token: string; expires: string }
 }
 
+interface ApiUser {
+  id: string
+  name: string
+  email: string
+  status?: 'active' | 'locked' | 'disabled'
+  company?: string
+  avatarInitials?: string
+}
+
 interface AuthState {
   user: User | null
   isAuthenticated: boolean
@@ -25,7 +34,7 @@ interface AuthState {
   resetGuestBanner: () => void
 }
 
-function mapApiUser(apiUser: { id: string; name: string; email: string; role?: string; company?: string; avatarInitials?: string }): User {
+function mapApiUser(apiUser: ApiUser): User {
   return {
     id: apiUser.id,
     email: apiUser.email,
@@ -44,7 +53,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   guestBannerDismissed: false,
 
   signIn: async (email, password) => {
-    const { data } = await apiClient.post<{ user: { id: string; name: string; email: string; role?: string }; tokens: AuthTokens }>('/auth/login', {
+    const { data } = await apiClient.post<{ user: ApiUser; tokens: AuthTokens }>('/auth/login', {
       email,
       password,
     })
@@ -60,7 +69,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   },
 
   signUp: async (name, email, password) => {
-    const { data } = await apiClient.post<{ user: { id: string; name: string; email: string; role?: string }; tokens: AuthTokens }>('/auth/register', {
+    const { data } = await apiClient.post<{ user: ApiUser; tokens: AuthTokens }>('/auth/register', {
       name,
       email,
       password,

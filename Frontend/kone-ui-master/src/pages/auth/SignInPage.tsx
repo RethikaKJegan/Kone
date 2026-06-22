@@ -31,7 +31,7 @@ export default function SignInPage() {
       await signIn(data.email, data.password)
       navigate('/projects')
     } catch (err) {
-      if (axios.isAxiosError(err) && err.response?.status === 400) {
+      if (axios.isAxiosError(err) && [400, 401, 403].includes(err.response?.status ?? 0)) {
         setError('password', { message: 'Incorrect email or password' })
       } else {
         setError('password', { message: 'Something went wrong. Try again.' })

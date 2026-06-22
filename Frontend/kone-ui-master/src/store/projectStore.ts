@@ -27,6 +27,7 @@ interface ProjectState {
   error: string | null
   fetchProjects: () => Promise<void>
   createProject: (name: string) => Promise<Project>
+  updateProject: (id: string, name: string) => Promise<Project>
   deleteProject: (id: string) => Promise<void>
 }
 
@@ -70,6 +71,22 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
     }
     const { data } = await apiClient.post<Project>('/projects', { name })
     set({ projects: [...get().projects, data] })
+    return data
+  },
+
+  updateProject: async (id: string, name: string) => {
+    if (isGuestSession()) {
+      const updated = get().projects.map(p =>
+        p.id === id ? { ...p, name, updatedAt: new Date().toISOString() } : p
+      )
+      const project = updated.find(p => p.id === id)
+      if (!project) throw new Error('Project not found')
+      set({ projects: updated })
+      setGuestData('guest_projects', updated)
+      return project
+    }
+    const { data } = await apiClient.patch<Project>(`/projects/${id}`, { name })
+    set({ projects: get().projects.map(p => (p.id === id ? data : p)) })
     return data
   },
 

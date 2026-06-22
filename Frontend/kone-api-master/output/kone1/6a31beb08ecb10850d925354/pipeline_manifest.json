@@ -1,0 +1,14 @@
+{
+  "imageId": "6f6325b1-5392-4177-8bfa-11d298039848",
+  "generatedAt": "2026-06-16T21:23:18.271Z",
+  "environment": "lobby",
+  "components": [
+    "ceiling",
+    "lci"
+  ],
+  "files": [
+    "01_original.jpg",
+    "final_output.png",
+    "elevator_animation.mp4"
+  ]
+}

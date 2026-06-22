@@ -38,7 +38,7 @@ export interface ComponentPin {
   aiPlaced: boolean
 }
 
-export type OfferingStatus = 'draft' | 'complete'
+export type OfferingStatus = 'draft' | 'active' | 'complete'
 
 export interface Offering {
   id: string
@@ -47,6 +47,10 @@ export interface Offering {
   status: OfferingStatus
   createdAt: string
   imageId: string | null
+  inputImagePath?: string | null
+  previewImagePath?: string | null
+  outputImagePath?: string | null
+  outputVideoPath?: string | null
   uploadedFileUrl: string | null
   uploadedFileName: string | null
   uploadedFileType: 'image' | 'video' | null
@@ -59,8 +63,10 @@ export interface Offering {
   videoSpeed: 0.5 | 1 | 1.5
   videoQuality: '360p' | '480p' | '720p' | '1080p'
   renderComplete: boolean
+  pipelineStatus?: 'idle' | 'uploaded' | 'processing' | 'preview_ready' | 'video_ready' | 'ready_for_download' | 'failed'
   outputImageUrl: string | null
   outputVideoUrl: string | null
+  lastError?: string | null
   savedStep?: OfferingStep
   previewRequestKey?: string | null
   videoGenerated?: boolean

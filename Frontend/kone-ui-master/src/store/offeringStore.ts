@@ -1,7 +1,8 @@
 import { create } from 'zustand'
 import apiClient from '../api/client'
 import { getGuestSessionId, isGuestSession } from '../api/guestWorkflow'
-import { AI_PLACEMENT_DEFAULTS, KONE_COMPONENTS } from '../lib/constants'
+import { KONE_COMPONENTS } from '../lib/constants'
+import { useProjectStore } from './projectStore'
 import type { Offering, OfferingStep, Environment, ComponentKey, ComponentPin } from '../types'
 
 function getGuestData<T>(key: string): T | null {
@@ -18,7 +19,15 @@ function setGuestData(key: string, value: unknown) {
     const raw = JSON.stringify(value)
     localStorage.setItem(key, raw)
     sessionStorage.setItem(key, raw)
-  } catch {}
+  } catch {
+    // Browser storage can be unavailable or full; guest persistence is best-effort.
+  }
+}
+
+function refreshProjects() {
+  if (!isGuestSession()) {
+    useProjectStore.getState().fetchProjects().catch(() => {})
+  }
 }
 
 function makeGuestOffering(projectId: string): Offering {
@@ -57,6 +66,8 @@ interface OfferingState {
   isProcessing: boolean
   fetchOfferings: (projectId: string) => Promise<void>
   createOffering: (projectId: string) => Promise<Offering>
+  updateOfferingName: (projectId: string, offeringId: string, name: string) => Promise<Offering>
+  deleteOffering: (projectId: string, offeringId: string) => Promise<void>
   setUpload: (file: File) => Promise<void>
   setComponents: (environments: Environment[], components: ComponentKey[]) => Promise<void>
   setPins: (pins: ComponentPin[]) => void
@@ -76,6 +87,22 @@ function patchOffering(offering: Offering, updates: Partial<Offering>): Offering
   return { ...offering, ...updates }
 }
 
+function normalizeOffering(offering: Offering): Offering {
+  const uploadedFileUrl = offering.uploadedFileUrl ?? offering.inputImagePath ?? null
+  const outputImageUrl = offering.outputImageUrl ?? offering.outputImagePath ?? null
+  const outputVideoUrl = offering.outputVideoUrl ?? offering.outputVideoPath ?? null
+  return {
+    ...offering,
+    uploadedFileUrl,
+    outputImageUrl,
+    outputVideoUrl,
+    renderComplete: Boolean(offering.renderComplete ?? outputImageUrl),
+    savedStep: offering.savedStep ?? 1,
+    videoGenerated: Boolean(offering.videoGenerated ?? outputVideoUrl),
+    downloadUrl: offering.downloadUrl ?? null,
+  }
+}
+
 function saveGuestOfferings(state: { offerings: Record<string, Offering[]>; currentOffering: Offering | null }) {
   if (!isGuestSession()) return
   setGuestData('guest_offerings', state.offerings)
@@ -91,17 +118,36 @@ function componentSignature(environments: Environment[], components: ComponentKe
   })
 }
 
+function isHttpStatus(error: unknown, status: number) {
+  return Boolean(
+    error &&
+      typeof error === 'object' &&
+      'response' in error &&
+      (error as { response?: { status?: number } }).response?.status === status
+  )
+}
+
+function imageIdFromOffering(offering: Offering | null) {
+  if (!offering) return null
+  if (offering.imageId) return offering.imageId
+  const fromInput = offering.inputImagePath?.match(/\/uploads\/([^/]+)\/input\.jpg(?:\?.*)?$/)
+  if (fromInput?.[1]) return fromInput[1]
+  const fromOutput = (offering.outputImageUrl || offering.uploadedFileUrl || '').match(/\/output\/([^/?]+)\/final_output\.png(?:\?.*)?$/)
+  return fromOutput?.[1] ?? null
+}
+
 function writeOfferingState(state: OfferingState, offering: Offering) {
-  const projectOfferings = state.offerings[offering.projectId] ?? []
-  const exists = projectOfferings.some(o => o.id === offering.id)
+  const normalized = normalizeOffering(offering)
+  const projectOfferings = state.offerings[normalized.projectId] ?? []
+  const exists = projectOfferings.some(o => o.id === normalized.id)
   const offerings = {
     ...state.offerings,
-    [offering.projectId]: exists
-      ? projectOfferings.map(o => (o.id === offering.id ? offering : o))
-      : [...projectOfferings, offering],
+    [normalized.projectId]: exists
+      ? projectOfferings.map(o => (o.id === normalized.id ? normalized : o))
+      : [...projectOfferings, normalized],
   }
-  saveGuestOfferings({ offerings, currentOffering: offering })
-  return { offerings, currentOffering: offering }
+  saveGuestOfferings({ offerings, currentOffering: normalized })
+  return { offerings, currentOffering: normalized }
 }
 
 export const useOfferingStore = create<OfferingState>()((set, get) => ({
@@ -120,7 +166,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       return
     }
     const { data } = await apiClient.get<Offering[]>(`/projects/${projectId}/offerings`)
-    set(state => ({ offerings: { ...state.offerings, [projectId]: data } }))
+    set(state => ({ offerings: { ...state.offerings, [projectId]: data.map(normalizeOffering) } }))
   },
 
   createOffering: async projectId => {
@@ -141,20 +187,84 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       return offering
     }
     const { data } = await apiClient.post<Offering>(`/projects/${projectId}/offerings`)
+    const offering = normalizeOffering(data)
+    refreshProjects()
     set(state => ({
       offerings: {
         ...state.offerings,
-        [projectId]: [...(state.offerings[projectId] ?? []), data],
+        [projectId]: [...(state.offerings[projectId] ?? []), offering],
       },
-      currentOffering: data,
+      currentOffering: offering,
       currentStep: 1,
     }))
-    return data
+    return offering
+  },
+
+  updateOfferingName: async (projectId, offeringId, name) => {
+    if (isGuestSession()) {
+      const current = get().offerings[projectId] ?? []
+      const updated = current.map(o =>
+        o.id === offeringId ? normalizeOffering({ ...o, name }) : o
+      )
+      const offering = updated.find(o => o.id === offeringId)
+      if (!offering) throw new Error('Visualization not found')
+      set(state => ({
+        offerings: { ...state.offerings, [projectId]: updated },
+        currentOffering: state.currentOffering?.id === offeringId ? offering : state.currentOffering,
+      }))
+      return offering
+    }
+    const { data } = await apiClient.patch<Offering>(
+      `/projects/${projectId}/visualizations/${offeringId}`,
+      { name }
+    )
+    const offering = normalizeOffering(data)
+    refreshProjects()
+    set(state => {
+      const current = state.offerings[projectId] ?? []
+      return {
+        offerings: {
+          ...state.offerings,
+          [projectId]: current.map(o => (o.id === offeringId ? offering : o)),
+        },
+        currentOffering: state.currentOffering?.id === offeringId ? offering : state.currentOffering,
+      }
+    })
+    return offering
+  },
+
+  deleteOffering: async (projectId, offeringId) => {
+    if (isGuestSession()) {
+      set(state => {
+        const remaining = (state.offerings[projectId] ?? []).filter(o => o.id !== offeringId)
+        const currentOffering = state.currentOffering?.id === offeringId
+          ? remaining[0] ?? null
+          : state.currentOffering
+        const offerings = { ...state.offerings, [projectId]: remaining }
+        saveGuestOfferings({ offerings, currentOffering })
+        return { offerings, currentOffering, currentStep: currentOffering?.savedStep ?? 1 }
+      })
+      return
+    }
+    await apiClient.delete(`/projects/${projectId}/visualizations/${offeringId}`)
+    refreshProjects()
+    set(state => {
+      const remaining = (state.offerings[projectId] ?? []).filter(o => o.id !== offeringId)
+      const currentOffering = state.currentOffering?.id === offeringId
+        ? remaining[0] ?? null
+        : state.currentOffering
+      return {
+        offerings: { ...state.offerings, [projectId]: remaining },
+        currentOffering,
+        currentStep: currentOffering?.savedStep ?? 1,
+      }
+    })
   },
 
   setCurrentOffering: offering => set(state => {
-    const savedStep = offering.savedStep ?? state.currentStep ?? 1
-    return { ...writeOfferingState(state, { ...offering, savedStep }), currentStep: savedStep }
+    const normalized = normalizeOffering(offering)
+    const savedStep = normalized.savedStep ?? state.currentStep ?? 1
+    return { ...writeOfferingState(state, { ...normalized, savedStep }), currentStep: savedStep }
   }),
 
   setUpload: async (file: File) => {
@@ -208,9 +318,11 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
         uploadedFileName: file.name,
         uploadedFileType: file.type.startsWith('video') ? 'video' : 'image',
       })
+      refreshProjects()
     }
 
     const updates: Partial<Offering> = {
+      status: 'active',
       uploadedFileUrl: fileUrl,
       uploadedFileName: file.name,
       uploadedFileType: file.type.startsWith('video') ? 'video' : 'image',
@@ -233,11 +345,13 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
     const selectedComponents = components
     const previewRequestKey = componentSignature(environments, selectedComponents)
     const updates: Partial<Offering> = {
+      status: 'active',
       environments,
       selectedComponents,
       componentPins: [],
       activeAnnotationFilters: selectedComponents,
       renderComplete: false,
+      pipelineStatus: 'processing',
       outputImageUrl: null,
       outputVideoUrl: null,
       previewRequestKey,
@@ -265,17 +379,39 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
         preview_request_key: previewRequestKey,
       })
     } else if (!isGuestSession()) {
-      await apiClient.patch(`/offerings/${currentOffering.id}`, updates)
+      await apiClient.patch(`/offerings/${currentOffering.id}`, {
+        environments,
+        selectedComponents,
+        componentPins: [],
+        activeAnnotationFilters: selectedComponents,
+        renderComplete: false,
+        pipelineStatus: 'processing',
+        previewRequestKey,
+        outputImageUrl: null,
+        outputVideoUrl: null,
+        downloadUrl: null,
+      })
+      refreshProjects()
 
       // Drive the video pipeline steps if an imageId exists
-      if (currentOffering.imageId) {
+      const imageId = imageIdFromOffering(currentOffering)
+      if (imageId) {
         await apiClient.post('/video/select-environment', {
-          imageId: currentOffering.imageId,
+          imageId,
           environment: environments[0] ?? '',
         })
+        const componentAssets = Object.fromEntries(
+          KONE_COMPONENTS
+            .filter(component => selectedComponents.includes(component.key))
+            .map(component => [component.key, component.imageUrl])
+        )
         await apiClient.post('/video/select-components', {
-          imageId: currentOffering.imageId,
+          imageId,
+          offeringId: currentOffering.id,
           components: selectedComponents,
+          environments,
+          component_assets: componentAssets,
+          preview_request_key: previewRequestKey,
         })
       }
     }
@@ -302,12 +438,8 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
           params: { session_id: sessionId, project_id: currentOffering.projectId },
         })
         const placementPins = (data.component_pins ?? []) as ComponentPin[]
-        const pins: ComponentPin[] = currentOffering.selectedComponents.map(key => placementPins.find(pin => pin.componentKey === key) ?? ({
-          componentKey: key,
-          x: AI_PLACEMENT_DEFAULTS[key]?.x ?? 50,
-          y: AI_PLACEMENT_DEFAULTS[key]?.y ?? 50,
-          aiPlaced: true,
-        }))
+        const selected = new Set(currentOffering.selectedComponents)
+        const pins = placementPins.filter(pin => selected.has(pin.componentKey))
         const updated = patchOffering(currentOffering, { componentPins: pins })
         set(state => ({ ...writeOfferingState(state, updated), isProcessing: false }))
         return pins
@@ -315,10 +447,9 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       const { data } = await apiClient.post<ComponentPin[]>(
         `/offerings/${currentOffering.id}/ai-placement`
       )
-      set({
-        currentOffering: patchOffering(currentOffering, { componentPins: data }),
-        isProcessing: false,
-      })
+      const updated = patchOffering(currentOffering, { componentPins: data, status: 'active' })
+      refreshProjects()
+      set(state => ({ ...writeOfferingState(state, updated), isProcessing: false }))
       return data
     } catch {
       set({ isProcessing: false })
@@ -343,12 +474,8 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
     if (!isGuestSession()) {
       apiClient.patch(`/offerings/${currentOffering.id}`, settings)
     }
-    const changed = Object.entries(settings).some(
-      ([key, value]) => currentOffering[key as keyof Offering] !== value
-    )
     const updated = patchOffering(currentOffering, {
       ...settings,
-      ...(changed ? { outputVideoUrl: null, videoGenerated: false, downloadUrl: null } : {}),
     })
     set(state => writeOfferingState(state, updated))
   },
@@ -373,23 +500,44 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       }
 
       // Call video pipeline generate if imageId is available
-      if (currentOffering.imageId) {
-        await apiClient.post('/video/generate', { imageId: currentOffering.imageId })
+      const imageId = imageIdFromOffering(currentOffering)
+      if (imageId) {
+        try {
+          await apiClient.post('/video/generate', {
+            imageId,
+            sourceImageUrl: currentOffering.outputImageUrl ?? currentOffering.uploadedFileUrl ?? undefined,
+            videoOptions: {
+              motion: currentOffering.videoMotionStyle,
+              speed: currentOffering.videoSpeed,
+              quality: currentOffering.videoQuality,
+            },
+          })
+        } catch (error) {
+          if (!isHttpStatus(error, 404) || currentOffering.videoMotionStyle === 'door-functionality') {
+            throw error
+          }
+        }
       }
 
       // Mark offering as render complete in the backend
       const { data } = await apiClient.post<Offering>(
         `/offerings/${currentOffering.id}/render`
       )
-      set({ currentOffering: data, isProcessing: false })
-    } catch {
+      const updated = patchOffering(currentOffering, data)
+      refreshProjects()
+      set(state => ({ ...writeOfferingState(state, updated), isProcessing: false }))
+    } catch (error) {
       set({ isProcessing: false })
+      throw error
     }
   },
 
   goToStep: step => set(state => {
     const currentOffering = state.currentOffering
     if (!currentOffering) return { currentStep: step }
+    if (!isGuestSession()) {
+      apiClient.patch(`/offerings/${currentOffering.id}`, { savedStep: step }).catch(() => {})
+    }
     const updated = patchOffering(currentOffering, { savedStep: step })
     return { ...writeOfferingState(state, updated), currentStep: step }
   }),
@@ -415,6 +563,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
     const { data } = await apiClient.post<Offering>(
       `/offerings/${currentOffering.id}/complete`
     )
+    refreshProjects()
     set(state => {
       const projectOfferings = state.offerings[currentOffering.projectId] ?? []
       return {

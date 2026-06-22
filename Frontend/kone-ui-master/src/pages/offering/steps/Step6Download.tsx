@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { useParams, useNavigate, Link } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { useParams, useNavigate } from 'react-router-dom'
 import { Loader2, Image as ImageIcon, Layers, Video, Download, Eye, EyeOff, FileText, ArrowLeft, CheckCircle2 } from 'lucide-react'
 import apiClient from '../../../api/client'
 import { getGuestSessionId } from '../../../api/guestWorkflow'
@@ -171,12 +171,34 @@ function getSelectedBrochureIds(offering: NonNullable<ReturnType<typeof useOffer
   return [...new Set(selectedComponentKeys.map(key => componentKeyToBrochureId[key]))]
 }
 
+function inputImageUrl(offering: NonNullable<ReturnType<typeof useOfferingStore.getState>['currentOffering']>) {
+  if (offering.inputImagePath) return offering.inputImagePath
+  if (offering.imageId) return `/uploads/${offering.imageId}/input.jpg`
+
+  const previewUrl = offering.previewImagePath ?? ''
+  if (previewUrl.startsWith('/storage/') || previewUrl.startsWith('/uploads/')) return previewUrl
+
+  const outputUrl = offering.outputImageUrl ?? offering.outputImagePath ?? ''
+  const outputImageId = outputUrl.match(/\/output\/([^/?]+)\/final_output\.png(?:\?.*)?$/)?.[1]
+  if (outputImageId) return `/uploads/${outputImageId}/input.jpg`
+
+  const guestUploadUrl = outputUrl.replace(/\/preview\/final_output\.png(?:\?.*)?$/, '/uploads/input.jpg')
+  if (guestUploadUrl !== outputUrl) return guestUploadUrl
+
+  const uploadedUrl = offering.uploadedFileUrl ?? null
+  if (uploadedUrl?.startsWith('/storage/') || uploadedUrl?.startsWith('/uploads/') || uploadedUrl?.startsWith('data:') || uploadedUrl?.startsWith('blob:')) {
+    return uploadedUrl
+  }
+
+  return null
+}
+
 async function generateBrochurePdf(offering: NonNullable<ReturnType<typeof useOfferingStore.getState>['currentOffering']>) {
   const { jsPDF } = await import('jspdf')
   const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' })
   const selectedIds = getSelectedBrochureIds(offering)
   const primary = componentBrochureData[selectedIds[selectedIds.length - 1] ?? 'cop']
-  const beforeImage = await imageUrlToDataUrl(offering.uploadedFileUrl ?? offering.outputImageUrl)
+  const beforeImage = await imageUrlToDataUrl(inputImageUrl(offering))
   const afterImage = await imageUrlToDataUrl(offering.outputImageUrl ?? offering.uploadedFileUrl)
   const componentImages = Object.fromEntries(
     await Promise.all(Object.values(componentBrochureData).map(async component => [component.id, await imageUrlToDataUrl(componentAsset(component.id))]))
@@ -486,7 +508,7 @@ async function downloadAnnotatedImage(imageUrl: string, pins: ComponentPin[], la
 export default function Step6Download() {
   const { projectId, offeringId } = useParams()
   const navigate = useNavigate()
-  const { currentOffering, triggerRender, completeOffering, goToStep, setDownloadReady } = useOfferingStore()
+  const { currentOffering, triggerRender, goToStep, setDownloadReady, completeOffering } = useOfferingStore()
   const { isGuest } = useAuthStore()
   const [rendered, setRendered] = useState(currentOffering?.renderComplete ?? false)
   const [annotationsOn, setAnnotationsOn] = useState(true)
@@ -494,6 +516,7 @@ export default function Step6Download() {
     currentOffering?.selectedComponents ?? []
   )
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null)
+  const guestFinalizeState = useRef<Record<string, 'running' | 'done'>>({})
 
   useEffect(() => {
     if (!currentOffering?.outputVideoUrl) {
@@ -504,6 +527,15 @@ export default function Step6Download() {
     }
 
     if (isGuest && projectId && currentOffering) {
+      const finalizeKey = `${projectId}:${offeringId ?? currentOffering.id ?? 'guest'}`
+      if (guestFinalizeState.current[finalizeKey] === 'done') {
+        setRendered(true)
+        return
+      }
+      if (guestFinalizeState.current[finalizeKey] === 'running') return
+
+      let cancelled = false
+      guestFinalizeState.current[finalizeKey] = 'running'
       getGuestSessionId()
         .then(sessionId => apiClient.post('/guest/finalize', {
           is_guest: true,
@@ -517,14 +549,17 @@ export default function Step6Download() {
           },
         }).then(() => sessionId))
         .then(async sessionId => {
-          for (;;) {
+          while (!cancelled) {
             const { data } = await apiClient.get('/guest/status', {
               params: { session_id: sessionId, project_id: projectId },
             })
             if (data.status === 'ready_for_download') {
+              if (cancelled) return
               setDownloadUrl(data.download_url)
               setDownloadReady(data.download_url)
+              completeOffering().catch(() => {})
               setRendered(true)
+              guestFinalizeState.current[finalizeKey] = 'done'
               toast('Your outputs are ready to download')
               return
             }
@@ -532,25 +567,50 @@ export default function Step6Download() {
             await new Promise(resolve => setTimeout(resolve, 1500))
           }
         })
-        .catch(error => toast(error.message || 'Final files are not ready'))
+        .catch(error => {
+          if (cancelled) return
+          delete guestFinalizeState.current[finalizeKey]
+          toast(error.message || 'Final files are not ready')
+        })
+      return () => {
+        cancelled = true
+      }
+    }
+
+    if (currentOffering.outputVideoUrl) {
+      if (currentOffering.status !== 'complete') {
+        completeOffering().catch(() => {})
+      }
+      setRendered(true)
       return
     }
 
-    if (!currentOffering?.renderComplete) {
+    if (!currentOffering.renderComplete) {
       triggerRender().then(() => {
+        completeOffering().catch(() => {})
         setRendered(true)
         toast('Your outputs are ready to download')
       })
     } else {
       setRendered(true)
     }
-  }, [])
+  }, [
+    completeOffering,
+    currentOffering,
+    goToStep,
+    isGuest,
+    navigate,
+    offeringId,
+    projectId,
+    setDownloadReady,
+    triggerRender,
+  ])
 
   useEffect(() => {
     if (currentOffering?.selectedComponents) {
       setActiveFilters(currentOffering.selectedComponents)
     }
-  }, [currentOffering?.id])
+  }, [currentOffering?.id, currentOffering?.selectedComponents])
 
   const handleDownload = async (url: string | null, filename: string, type: DownloadType) => {
     if (type === 'annotations') {
@@ -581,7 +641,10 @@ export default function Step6Download() {
       return
     }
     toast(`Downloading ${filename}...`)
-    downloadFromUrl(url, filename)
+    const href = type === 'video'
+      ? `${url}${url.includes('?') ? '&' : '?'}download=${Date.now()}`
+      : url
+    downloadFromUrl(href, filename)
   }
 
   const handleBrochureDownload = async () => {
@@ -595,12 +658,6 @@ export default function Step6Download() {
     } catch (error) {
       toast(error instanceof Error ? error.message : 'Brochure PDF could not be generated', 'destructive')
     }
-  }
-
-  const handleSave = async () => {
-    await completeOffering()
-    toast('Visualization saved to project')
-    navigate(`/projects/${projectId}`)
   }
 
   const handleBack = () => {
@@ -758,7 +815,7 @@ export default function Step6Download() {
                 style={{ height: 32 }}
               >
                 <Download style={{ width: 11, height: 11 }} />
-                Download Brochure
+                Download 
               </button>
             </div>
           </div>
@@ -787,6 +844,7 @@ export default function Step6Download() {
                   <p className="mb-2 text-[11px] font-medium text-[#4A5568]">Video Export</p>
                   <div className="overflow-hidden rounded-xl border border-[#E8EDF5] bg-[#F8FAFF]">
                     <video
+                      key={offering.outputVideoUrl}
                       src={offering.outputVideoUrl}
                       controls
                       className="w-full"
@@ -844,63 +902,6 @@ export default function Step6Download() {
             />
           </div>
         </div>
-      </div>
-
-      {/* ── Save / complete banner ───────────────────────────────────────────── */}
-      <div className="overflow-hidden rounded-2xl border border-[#0A0A0A] bg-[#0A0A0A]">
-        <div className="flex items-start justify-between gap-6 px-8 py-6">
-          <div className="flex-1">
-            <div className="flex items-center gap-2">
-              {/* KONE "K" logotype mark */}
-              <div className="flex h-7 w-7 items-center justify-center rounded-md bg-[#1A6AFF]">
-                <span className="text-[11px] font-black tracking-tight text-white">K</span>
-              </div>
-              <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-[#4A6A9A]">KONE SalesNXT</span>
-            </div>
-            <h3 className="mt-3 text-base font-semibold text-white">Visualization complete</h3>
-            <p className="mt-1.5 text-sm leading-relaxed text-[#6A8AAA]">
-              {isGuest
-                ? 'Create a free account to save this visualization permanently and access it across sessions.'
-                : 'Save this visualization to your project. You can then build a full Sales Brochure from the project screen.'}
-            </p>
-            {offering && (
-              <div className="mt-4 flex flex-wrap gap-1.5">
-                {offering.environments.map(e => (
-                  <span key={e} className="rounded-md border border-[#1E3050] bg-[#111D30] px-2.5 py-1 text-[11px] font-medium capitalize text-[#8AAAD0]">
-                    {e}
-                  </span>
-                ))}
-                {offering.selectedComponents.map(k => (
-                  <span key={k} className="rounded-md border border-[#1E3050] bg-[#111D30] px-2.5 py-1 text-[11px] font-medium text-[#8AAAD0]">
-                    {COMP_LABELS[k]}
-                  </span>
-                ))}
-              </div>
-            )}
-          </div>
-          <div className="flex shrink-0 flex-col items-end gap-3 pt-1">
-            {isGuest ? (
-              <Link
-                to="/signup"
-                className="flex items-center gap-2 rounded-xl bg-white px-5 text-sm font-semibold text-[#0A0A0A] transition-colors hover:bg-[#F0F4FF]"
-                style={{ height: 40 }}
-              >
-                Sign up — it's free
-              </Link>
-            ) : (
-              <button
-                onClick={handleSave}
-                className="flex items-center gap-2 rounded-xl bg-white px-5 text-sm font-semibold text-[#0A0A0A] transition-colors hover:bg-[#F0F4FF]"
-                style={{ height: 40 }}
-              >
-                Save to project
-              </button>
-            )}
-            <p className="text-[10px] text-[#3A5070]">All files remain accessible after saving</p>
-          </div>
-        </div>
-        {/* Bottom accent bar */}
-        <div className="h-0.5 bg-gradient-to-r from-[#1A6AFF] via-[#4A90FF] to-transparent" />
       </div>
 
     </div>

@@ -7,7 +7,10 @@ const { offeringController, brochureController } = require('../../controllers');
 
 const router = express.Router();
 
-router.route('/:offeringId').patch(auth(), validate(offeringValidation.updateOffering), offeringController.updateOffering);
+router
+  .route('/:offeringId')
+  .get(auth(), validate(offeringValidation.offeringId), offeringController.getOffering)
+  .patch(auth(), validate(offeringValidation.updateOffering), offeringController.updateOffering);
 
 router.post('/:offeringId/ai-placement', auth(), validate(offeringValidation.offeringId), offeringController.runAIPlacement);
 router.post('/:offeringId/render', auth(), validate(offeringValidation.offeringId), offeringController.triggerRender);

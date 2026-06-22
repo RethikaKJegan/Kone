@@ -10,14 +10,14 @@ components:
           format: email
         name:
           type: string
-        role:
+        status:
           type: string
-          enum: [user, admin]
+          enum: [active, locked, disabled]
       example:
         id: 5ebac534954b54139806c112
         email: fake@example.com
         name: fake name
-        role: user
+        status: active
 
     Token:
       type: object

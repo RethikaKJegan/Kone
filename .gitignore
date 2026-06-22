@@ -23,6 +23,7 @@ node_modules/
 
 # Local caches
 .cache/
+.hf_home/
 *.cache
 
 # Local agent/tooling
@@ -56,6 +57,7 @@ Frontend/kone-api-master/storage/
 elevator_mod_pipeline/input.jpg
 elevator_mod_pipeline/run_single.py
 Video/
+setup_logs
 *.mp4
 *.avi
 *.mov

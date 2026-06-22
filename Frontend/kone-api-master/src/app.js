@@ -25,6 +25,14 @@ const storageDir = path.join(__dirname, '..', 'storage');
 if (!fs.existsSync(storageDir)) {
   fs.mkdirSync(storageDir, { recursive: true });
 }
+const uploadsDir = path.join(__dirname, '..', 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+const tmpUploadsDir = path.join(__dirname, '..', 'tmp_uploads');
+if (!fs.existsSync(tmpUploadsDir)) {
+  fs.mkdirSync(tmpUploadsDir, { recursive: true });
+}
 
 const app = express();
 
@@ -65,6 +73,7 @@ if (config.env === 'production') {
 // serve pipeline output files
 app.use('/output', express.static(outputDir));
 app.use('/storage', express.static(storageDir));
+app.use('/uploads', express.static(uploadsDir));
 
 // v1 api routes
 app.use('/api/v1', routes);

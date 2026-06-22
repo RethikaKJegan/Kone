@@ -19,9 +19,10 @@ const projectSchema = mongoose.Schema(
       enum: ['draft', 'active', 'complete'],
       default: 'draft',
     },
-    offeringCount: {
-      type: Number,
-      default: 0,
+    lastOpenedOfferingId: {
+      type: mongoose.SchemaTypes.ObjectId,
+      ref: 'Offering',
+      default: null,
     },
   },
   {

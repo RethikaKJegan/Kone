@@ -16,10 +16,19 @@ function availableMotionStyle(value: MotionStyle | undefined): MotionStyle {
   return value ?? 'zoom-in'
 }
 
+function imageIdFromOffering(offering: Offering | null) {
+  if (!offering) return null
+  if (offering.imageId) return offering.imageId
+  const fromInput = offering.inputImagePath?.match(/\/uploads\/([^/]+)\/input\.jpg(?:\?.*)?$/)
+  if (fromInput?.[1]) return fromInput[1]
+  const fromOutput = (offering.outputImageUrl || offering.uploadedFileUrl || '').match(/\/output\/([^/?]+)\/final_output\.png(?:\?.*)?$/)
+  return fromOutput?.[1] ?? null
+}
+
 export default function Step5Video() {
   const { projectId, offeringId } = useParams()
   const navigate = useNavigate()
-  const { currentOffering, setVideoSettings, setCurrentOffering, goToStep } = useOfferingStore()
+  const { currentOffering, setCurrentOffering, goToStep } = useOfferingStore()
 
   const [motion, setMotion] = useState<MotionStyle>(availableMotionStyle(currentOffering?.videoMotionStyle))
   const [quality, setQuality] = useState<Quality>(currentOffering?.videoQuality ?? '1080p')
@@ -27,20 +36,16 @@ export default function Step5Video() {
   const [generating, setGenerating] = useState(false)
   const [loadFailed, setLoadFailed] = useState(false)
   const videoReady = !!currentOffering?.outputVideoUrl
-    && currentOffering.videoMotionStyle === motion
-    && currentOffering.videoQuality === quality
     && !loadFailed
 
   const selectMotion = (value: MotionStyle) => {
     setMotion(value)
     setLoadFailed(false)
-    setVideoSettings({ videoMotionStyle: value, videoQuality: quality })
   }
 
   const selectQuality = (value: Quality) => {
     setQuality(value)
     setLoadFailed(false)
-    setVideoSettings({ videoMotionStyle: motion, videoQuality: value })
   }
 
   const handlePlay = () => {
@@ -51,13 +56,16 @@ export default function Step5Video() {
   const motionLabel = VIDEO_MOTION_STYLES.find(m => m.value === motion)?.label ?? ''
   const isDoorFunctionality = motion === 'door-functionality'
   const videoStyles = VIDEO_MOTION_STYLES
+  const effectiveImageId = imageIdFromOffering(currentOffering)
 
-  const handleContinue = async () => {
-    setVideoSettings({ videoMotionStyle: motion, videoQuality: quality })
-    if (isGuestSession() && projectId && currentOffering && !videoReady) {
+  const handleGeneratePreview = async () => {
+    const videoOptions = isDoorFunctionality
+      ? { mode: 'door_functionality', duration_seconds: 8, speed: currentOffering?.videoSpeed, quality }
+      : { motion, speed: currentOffering?.videoSpeed, quality }
+
+    if (isGuestSession() && projectId && currentOffering) {
       setGenerating(true)
       setLoadFailed(false)
-      setCurrentOffering({ ...currentOffering, outputVideoUrl: null })
       try {
         const sessionId = await getGuestSessionId()
         await apiClient.post('/guest/video', {
@@ -65,9 +73,7 @@ export default function Step5Video() {
           session_id: sessionId,
           project_id: projectId,
           project_name: currentOffering.name,
-          video_options: isDoorFunctionality
-            ? { mode: 'door_functionality', duration_seconds: 8, speed: currentOffering.videoSpeed, quality }
-            : { motion, speed: currentOffering.videoSpeed, quality },
+          video_options: videoOptions,
         })
 
         for (let attempt = 0; attempt < 120; attempt += 1) {
@@ -83,7 +89,6 @@ export default function Step5Video() {
 
           if (data.status === 'failed') {
             setLoadFailed(true)
-            setCurrentOffering({ ...currentOffering, outputVideoUrl: null })
             toast(data.error || 'Video generation failed', 'destructive')
             return
           }
@@ -92,17 +97,86 @@ export default function Step5Video() {
         }
 
         setLoadFailed(true)
-        setCurrentOffering({ ...currentOffering, outputVideoUrl: null })
         toast('Video generation timed out. Check the API and logic terminals.', 'destructive')
       } catch (error) {
         setLoadFailed(true)
-        setCurrentOffering({ ...currentOffering, outputVideoUrl: null })
         toast(error instanceof Error ? error.message : 'Video generation failed', 'destructive')
       } finally {
         setGenerating(false)
       }
       return
     }
+
+    if (!isGuestSession() && currentOffering) {
+      if (!effectiveImageId) {
+        toast('Upload an image before generating the video preview.', 'destructive')
+        return
+      }
+      if (!currentOffering.outputImageUrl) {
+        toast('Generate the image preview before generating the video.', 'destructive')
+        return
+      }
+
+      setGenerating(true)
+      setLoadFailed(false)
+      setCurrentOffering({
+        ...currentOffering,
+        videoMotionStyle: motion,
+        videoQuality: quality,
+        pipelineStatus: 'processing',
+      })
+
+      try {
+        await apiClient.patch(`/offerings/${currentOffering.id}`, {
+          videoMotionStyle: motion,
+          videoQuality: quality,
+          pipelineStatus: 'processing',
+          lastError: null,
+        })
+
+        await apiClient.post('/video/generate', {
+          imageId: effectiveImageId,
+          sourceImageUrl: currentOffering.outputImageUrl,
+          videoOptions,
+        }, { timeout: 0 })
+
+        const { data } = await apiClient.post<Offering>(`/offerings/${currentOffering.id}/render`)
+        if (!data.outputVideoUrl) {
+          throw new Error('Video file was not generated. Check the API and Python logic terminals.')
+        }
+
+        setLoadFailed(false)
+        setCurrentOffering({
+          ...data,
+          videoMotionStyle: motion,
+          videoQuality: quality,
+          outputVideoUrl: `${data.outputVideoUrl}${data.outputVideoUrl.includes('?') ? '&' : '?'}v=${Date.now()}`,
+          videoGenerated: true,
+          pipelineStatus: 'video_ready',
+        })
+      } catch (error) {
+        setLoadFailed(true)
+        const message = error instanceof Error ? error.message : 'Video generation failed'
+        setCurrentOffering({
+          ...currentOffering,
+          videoMotionStyle: motion,
+          videoQuality: quality,
+          pipelineStatus: 'failed',
+          lastError: message,
+        })
+        await apiClient.patch(`/offerings/${currentOffering.id}`, {
+          pipelineStatus: 'failed',
+          lastError: message,
+        }).catch(() => {})
+        toast(message, 'destructive')
+      } finally {
+        setGenerating(false)
+      }
+      return
+    }
+  }
+
+  const handleContinue = () => {
     if (!videoReady) {
       toast('Generate the video preview before opening Downloads.', 'destructive')
       return
@@ -142,6 +216,7 @@ export default function Step5Video() {
           >
             {videoReady ? (
               <video
+                key={currentOffering.outputVideoUrl}
                 src={currentOffering.outputVideoUrl ?? ''}
                 controls
                 className="h-full w-full object-contain"
@@ -151,11 +226,6 @@ export default function Step5Video() {
                   if (!generating) toast('Video preview failed to load. Generate it again.', 'destructive')
                 }}
               />
-            ) : generating ? (
-              <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-[#1A1A1A] text-white">
-                <div className="h-7 w-7 animate-spin rounded-full border-2 border-white/20 border-t-white" />
-                <p className="text-sm font-medium">Generating video preview...</p>
-              </div>
             ) : (currentOffering?.outputImageUrl ?? currentOffering?.uploadedFileUrl) ? (
               <img
                 src={currentOffering.outputImageUrl ?? currentOffering.uploadedFileUrl ?? ''}
@@ -165,7 +235,7 @@ export default function Step5Video() {
             ) : (
               <div className="h-full w-full bg-[#1A1A1A]" />
             )}
-            {!videoReady && !playing && (
+            {!videoReady && !playing && !generating && (
               <div className="absolute inset-0 flex items-center justify-center">
                 <div className="flex items-center justify-center rounded-full bg-white/20 transition-colors duration-[120ms] hover:bg-white/30" style={{ width: 48, height: 48 }}>
                   <Play className="ml-0.5 text-white" style={{ width: 18, height: 18 }} />
@@ -216,14 +286,22 @@ export default function Step5Video() {
         </div>
       </div>
 
-      <div className="mt-8 flex justify-end">
+      <div className="mt-8 flex justify-end gap-3">
         <button
-          onClick={handleContinue}
+          onClick={handleGeneratePreview}
           disabled={generating}
           className="rounded-lg bg-[#1450F5] px-6 text-[13px] font-semibold text-white transition-all duration-[150ms] hover:bg-[#1040D0] hover:shadow-md hover:shadow-[#1450F5]/20 disabled:cursor-not-allowed disabled:opacity-40"
           style={{ height: 38 }}
         >
-          {generating ? 'Generating...' : videoReady ? 'Continue' : 'Generate Preview'}
+          {generating ? 'Generating...' : 'Generate Preview'}
+        </button>
+        <button
+          onClick={handleContinue}
+          disabled={!videoReady || generating}
+          className="rounded-lg bg-[#0A0A0A] px-6 text-[13px] font-semibold text-white transition-all duration-[150ms] hover:bg-[#262626] disabled:cursor-not-allowed disabled:opacity-40"
+          style={{ height: 38 }}
+        >
+          Continue
         </button>
       </div>
 
