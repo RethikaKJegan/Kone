@@ -94,6 +94,7 @@ def render_wan_video(image_path, detections=None, geometry=None, cfg=None, out_p
     generated_dir = out_path.parent / "_wan_generation"
     generated_dir.mkdir(parents=True, exist_ok=True)
     generated_file = generated_dir / "wan22_14b_i2v.mp4"
+    error_path = out_path.with_name("wan_error.txt")
 
     if not image_path.exists():
         raise FileNotFoundError(f"Wan2.2 input image not found: {image_path}")
@@ -119,11 +120,11 @@ def render_wan_video(image_path, detections=None, geometry=None, cfg=None, out_p
         str(wan_cfg.get("sample_steps", 4)),
         "--sample_shift",
         str(wan_cfg.get("sample_shift", 5)),
-        "--sample_guide_scale",
-        str(wan_cfg.get("sample_guide_scale", 5)),
         "--save_file",
         str(generated_file),
     ]
+    if wan_cfg.get("sample_guide_scale") is not None:
+        cmd.extend(["--sample_guide_scale", str(wan_cfg["sample_guide_scale"])])
 
     if "offload_model" in wan_cfg:
         cmd.extend(["--offload_model", str(bool(wan_cfg.get("offload_model")))])
@@ -146,8 +147,11 @@ def render_wan_video(image_path, detections=None, geometry=None, cfg=None, out_p
     )
 
     if result.returncode != 0:
+        _write_wan_error(error_path, cmd, result.stdout, result.stderr)
+        reason = _summarize_wan_failure(result.stderr, result.stdout)
         raise RuntimeError(
-            "Wan2.2 generation failed\n"
+            f"Wan2.2 generation failed: {reason}\n"
+            f"Full Wan log: {error_path}\n"
             f"Command: {' '.join(cmd)}\n"
             f"STDOUT:\n{result.stdout}\n"
             f"STDERR:\n{result.stderr}"
@@ -155,8 +159,10 @@ def render_wan_video(image_path, detections=None, geometry=None, cfg=None, out_p
 
     generated_mp4s = sorted(generated_dir.rglob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not generated_mp4s:
+        _write_wan_error(error_path, cmd, result.stdout, result.stderr)
         raise RuntimeError(
             "Wan2.2 completed but no mp4 was found\n"
+            f"Full Wan log: {error_path}\n"
             f"Command: {' '.join(cmd)}\n"
             f"STDOUT:\n{result.stdout}\n"
             f"STDERR:\n{result.stderr}"
@@ -183,7 +189,7 @@ def render_wan_video(image_path, detections=None, geometry=None, cfg=None, out_p
         "size": wan_cfg.get("size", "1280*720"),
         "sample_steps": wan_cfg.get("sample_steps", 4),
         "sample_shift": wan_cfg.get("sample_shift", 5),
-        "sample_guide_scale": wan_cfg.get("sample_guide_scale", 5),
+        "sample_guide_scale": wan_cfg.get("sample_guide_scale", "wan_default"),
         "runner_task": task,
         "runner_command": cmd,
     }
@@ -235,3 +241,25 @@ def _validate_cuda_available(python_exe: str) -> None:
             f"Run `{python_exe} -c \"import torch; print(torch.cuda.is_available()); print(torch.cuda.device_count())\"` "
             "and make sure it prints `True` and at least `1` before generating."
         )
+
+
+def _write_wan_error(path: Path, cmd: list[str], stdout: str, stderr: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "Command:\n"
+        + " ".join(cmd)
+        + "\n\nSTDOUT:\n"
+        + stdout
+        + "\n\nSTDERR:\n"
+        + stderr,
+        encoding="utf-8",
+    )
+
+
+def _summarize_wan_failure(stderr: str, stdout: str) -> str:
+    combined = stderr.strip() or stdout.strip()
+    lines = [line.strip() for line in combined.splitlines() if line.strip()]
+    for line in reversed(lines):
+        if any(token in line for token in ("Error:", "RuntimeError:", "ModuleNotFoundError:", "AssertionError:", "TypeError:", "CUDA out of memory")):
+            return line[:500]
+    return (lines[-1] if lines else "unknown error")[:500]

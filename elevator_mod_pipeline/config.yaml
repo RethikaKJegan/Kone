@@ -194,7 +194,7 @@ video:
     size: "1280*720"
     sample_steps: 4
     sample_shift: 5
-    sample_guide_scale: 5
+    sample_guide_scale: null
     fps: 24
     duration_seconds: 5
     repo_dir: /root/wan22_install/Wan2.2
