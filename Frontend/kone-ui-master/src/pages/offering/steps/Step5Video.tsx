@@ -160,7 +160,7 @@ export default function Step5Video() {
           ? (error as { response?: { data?: { message?: string; error?: string } } }).response?.data?.message
             ?? (error as { response?: { data?: { message?: string; error?: string } } }).response?.data?.error
           : null
-        const message = responseMessage || (error instanceof Error ? error.message : 'Video generation failed')
+        const message = summarizeVideoError(responseMessage || (error instanceof Error ? error.message : 'Video generation failed'))
         setCurrentOffering({
           ...currentOffering,
           videoMotionStyle: motion,
@@ -316,4 +316,16 @@ export default function Step5Video() {
       `}</style>
     </div>
   )
+}
+
+function summarizeVideoError(message: string) {
+  if (message.includes('No CUDA GPUs are available') || message.includes('sees no GPU')) {
+    return 'Wan2.2 needs CUDA, but the Wan Python environment cannot see a GPU. Check the Python logic terminal.'
+  }
+  const missingModule = message.match(/No module named ['"]([^'"]+)['"]/)
+  if (missingModule?.[1]) {
+    return `Wan2.2 is missing Python dependency: ${missingModule[1]}`
+  }
+  const firstLine = message.split('\n').find(line => line.trim())?.trim() || message
+  return firstLine.length > 240 ? `${firstLine.slice(0, 237)}...` : firstLine
 }

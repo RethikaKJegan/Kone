@@ -99,6 +99,7 @@ def render_wan_video(image_path, detections=None, geometry=None, cfg=None, out_p
         raise FileNotFoundError(f"Wan2.2 input image not found: {image_path}")
     if not (repo_dir / "generate.py").exists():
         raise FileNotFoundError(f"Wan2.2 runner not found: {repo_dir / 'generate.py'}")
+    _validate_cuda_available(python_exe)
 
     task = normalize_wan_task(wan_cfg.get("task", "i2v-14B"))
     cmd = [
@@ -206,3 +207,31 @@ def _default_python_exe(repo_dir: Path) -> str:
     if venv_python.exists():
         return str(venv_python)
     return sys.executable
+
+
+def _validate_cuda_available(python_exe: str) -> None:
+    result = subprocess.run(
+        [
+            python_exe,
+            "-c",
+            "import torch; print(torch.cuda.is_available()); print(torch.cuda.device_count())",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Wan2.2 CUDA preflight failed before generation.\n"
+            f"Command: {python_exe} -c 'import torch; print(torch.cuda.is_available()); print(torch.cuda.device_count())'\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
+        )
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    cuda_available = lines[0].lower() == "true" if lines else False
+    device_count = int(lines[1]) if len(lines) > 1 and lines[1].isdigit() else 0
+    if not cuda_available or device_count < 1:
+        raise RuntimeError(
+            "Wan2.2 requires CUDA, but the Wan Python environment sees no GPU. "
+            f"Run `{python_exe} -c \"import torch; print(torch.cuda.is_available()); print(torch.cuda.device_count())\"` "
+            "and make sure it prints `True` and at least `1` before generating."
+        )
