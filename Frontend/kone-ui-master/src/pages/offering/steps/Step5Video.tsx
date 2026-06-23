@@ -60,8 +60,8 @@ export default function Step5Video() {
 
   const handleGeneratePreview = async () => {
     const videoOptions = isDoorFunctionality
-      ? { mode: 'door_functionality', duration_seconds: 8, speed: currentOffering?.videoSpeed, quality }
-      : { motion, speed: currentOffering?.videoSpeed, quality }
+      ? { engine: 'wan2.2', mode: 'door_functionality', duration_seconds: 8, speed: currentOffering?.videoSpeed, quality }
+      : { engine: 'wan2.2', motion, speed: currentOffering?.videoSpeed, quality }
 
     if (isGuestSession() && projectId && currentOffering) {
       setGenerating(true)

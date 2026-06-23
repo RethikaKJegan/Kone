@@ -20,7 +20,7 @@ from .preprocess import run_preprocessing
 from .refine import maybe_refine
 from .resource_monitor import ResourceMonitor
 from .utils import load_config, load_image_rgb, load_json, save_json, save_rgb
-from .video import render_elevator_video
+from .video_router import render_video
 from .visualize import save_detection_visuals
 
 
@@ -282,7 +282,7 @@ def run(config_path: str | Path) -> None:
                 save_json(run_dir / "video_skip_debug.json", video_debug)
                 status("video_skip", "[VIDEO] Skipping video generation: no elevator door detected")
             else:
-                render_elevator_video(final_path, detections, geometry, cfg, video_path, depth_path)
+                render_video(final_path, detections, geometry, cfg, video_path, depth_path)
                 video_debug = _load_optional_json(video_path.with_suffix(".json"))
                 video_debug["elevator_present"] = True
                 video_debug["video_generated"] = True

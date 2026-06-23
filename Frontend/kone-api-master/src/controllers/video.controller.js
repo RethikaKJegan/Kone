@@ -478,6 +478,7 @@ const normalizeVideoOptions = (videoOptions = {}) => {
   const motion = videoOptions.motion || videoOptions.motionStyle;
   if (motion === 'door-functionality') {
     return {
+      engine: videoOptions.engine,
       mode: 'door_functionality',
       duration_seconds: videoOptions.duration_seconds || 8,
       speed: videoOptions.speed,
@@ -485,6 +486,7 @@ const normalizeVideoOptions = (videoOptions = {}) => {
     };
   }
   return {
+    engine: videoOptions.engine,
     motion,
     speed: videoOptions.speed,
     quality: videoOptions.quality,

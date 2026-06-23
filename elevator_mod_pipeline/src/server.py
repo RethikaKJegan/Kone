@@ -187,7 +187,7 @@ def run_components(payload: ProjectPayload):
 
 @app.post("/generate-video")
 def generate_video(payload: ProjectPayload):
-    from video import render_elevator_video
+    from video_router import render_video
 
     storage = Path(payload.storage_dir)
     preview_image = storage / "preview" / "final_output.png"
@@ -204,23 +204,30 @@ def generate_video(payload: ProjectPayload):
         cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else yaml.safe_load((repo_root() / "config.yaml").read_text(encoding="utf-8"))
         video_options = payload.video_options or {}
         motion = video_options.get("motion") or video_options.get("motion_style")
+        video_cfg = cfg.get("video", {})
         cfg["video"] = {
-            **cfg.get("video", {}),
+            **video_cfg,
             "enabled": True,
-            "quality": video_options.get("quality", cfg.get("video", {}).get("quality", "1080p")),
+            "engine": video_options.get("engine", "opencv"),
+            "quality": video_options.get("quality", video_cfg.get("quality", "720p")),
             "duration_seconds": video_options.get("duration_seconds", video_options.get("duration", 9.0)),
             "preserve_source_aspect": True,
             "ffmpeg_pan_overscan": 0.20,
             "ffmpeg_zoom_amount": 0.35,
         }
+        if cfg["video"].get("engine") == "wan2.2":
+            cfg["video"].setdefault("wan", {})
+            cfg["video"]["wan"]["enabled"] = True
         if video_options.get("mode") == "door_functionality":
             cfg["video"].update({"mode": "door_functionality"})
             cfg["video"].pop("motion_style", None)
         elif motion:
             cfg["video"].update({"motion_style": motion, "mode": "motion"})
+        elif cfg["video"].get("engine") == "wan2.2":
+            cfg["video"].setdefault("motion_style", "zoom_in")
         detections = json.loads(detections_path.read_text(encoding="utf-8")) if detections_path.exists() else {}
         geometry = json.loads(geometry_path.read_text(encoding="utf-8")) if geometry_path.exists() else {}
-        render_elevator_video(
+        render_video(
             preview_image,
             detections,
             geometry,
