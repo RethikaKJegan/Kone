@@ -13,12 +13,11 @@ except ImportError:
 
 
 REQUIRED_WAN22_14B_I2V_FILES = {
-    "high_noise_model": "wan2.2_i2v_high_noise_14B_fp16.safetensors",
-    "low_noise_model": "wan2.2_i2v_low_noise_14B_fp16.safetensors",
-    "high_noise_lora": "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors",
-    "low_noise_lora": "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors",
-    "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
-    "vae_name": "wan_2.1_vae.safetensors",
+    "high_noise_model": "high_noise_model",
+    "low_noise_model": "low_noise_model",
+    "t5_checkpoint": "models_t5_umt5-xxl-enc-bf16.pth",
+    "t5_tokenizer": "google/umt5-xxl",
+    "vae_checkpoint": "Wan2.1_VAE.pth",
 }
 
 WAN_MOTION_ALIASES = {
@@ -43,7 +42,7 @@ WAN_MOTION_ALIASES = {
 
 
 def resolve_required_wan_files(wan_cfg: dict) -> dict:
-    checkpoint_dir = Path(wan_cfg.get("checkpoint_dir", "/root/wan22_install/Wan2.2/models"))
+    checkpoint_dir = Path(wan_cfg.get("checkpoint_dir", "/root/wan22_install/Wan2.2/Wan2.2-I2V-A14B"))
 
     resolved = {}
     missing = []
@@ -53,11 +52,7 @@ def resolve_required_wan_files(wan_cfg: dict) -> dict:
         path = Path(value)
 
         if not path.is_absolute():
-            matches = list(checkpoint_dir.rglob(value))
-            if matches:
-                path = matches[0]
-            else:
-                path = checkpoint_dir / value
+            path = checkpoint_dir / value
 
         if not path.exists():
             missing.append(f"{key}: {path}")
@@ -66,7 +61,8 @@ def resolve_required_wan_files(wan_cfg: dict) -> dict:
 
     if missing:
         raise FileNotFoundError(
-            "Missing Wan2.2 14B I2V model files:\n" + "\n".join(missing)
+            "Missing Wan2.2 I2V-A14B checkpoint files for the installed Wan generate.py runner:\n"
+            + "\n".join(missing)
         )
 
     return resolved
@@ -88,7 +84,7 @@ def render_wan_video(image_path, detections=None, geometry=None, cfg=None, out_p
         raise RuntimeError(f"Unsupported Wan model_key: {model_key}")
 
     repo_dir = Path(wan_cfg.get("repo_dir", "/root/wan22_install/Wan2.2"))
-    checkpoint_dir = Path(wan_cfg.get("checkpoint_dir", "/root/wan22_install/Wan2.2/models"))
+    checkpoint_dir = Path(wan_cfg.get("checkpoint_dir", "/root/wan22_install/Wan2.2/Wan2.2-I2V-A14B"))
 
     wan_files = resolve_required_wan_files(wan_cfg)
     motion_style = normalize_wan_motion(video_cfg.get("motion_style", "zoom_in"))
@@ -180,10 +176,9 @@ def render_wan_video(image_path, detections=None, geometry=None, cfg=None, out_p
         "checkpoint_dir": str(checkpoint_dir),
         "high_noise_model": str(wan_files["high_noise_model"]),
         "low_noise_model": str(wan_files["low_noise_model"]),
-        "high_noise_lora": str(wan_files["high_noise_lora"]),
-        "low_noise_lora": str(wan_files["low_noise_lora"]),
-        "clip_name": str(wan_files["clip_name"]),
-        "vae_name": str(wan_files["vae_name"]),
+        "t5_checkpoint": str(wan_files["t5_checkpoint"]),
+        "t5_tokenizer": str(wan_files["t5_tokenizer"]),
+        "vae_checkpoint": str(wan_files["vae_checkpoint"]),
         "size": wan_cfg.get("size", "1280*720"),
         "sample_steps": wan_cfg.get("sample_steps", 4),
         "sample_shift": wan_cfg.get("sample_shift", 5),

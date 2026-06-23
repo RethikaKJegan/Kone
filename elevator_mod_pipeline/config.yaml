@@ -198,13 +198,12 @@ video:
     fps: 24
     duration_seconds: 5
     repo_dir: /root/wan22_install/Wan2.2
-    checkpoint_dir: /root/wan22_install/Wan2.2/models
-    high_noise_model: wan2.2_i2v_high_noise_14B_fp16.safetensors
-    low_noise_model: wan2.2_i2v_low_noise_14B_fp16.safetensors
-    high_noise_lora: wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors
-    low_noise_lora: wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors
-    clip_name: umt5_xxl_fp8_e4m3fn_scaled.safetensors
-    vae_name: wan_2.1_vae.safetensors
+    checkpoint_dir: /root/wan22_install/Wan2.2/Wan2.2-I2V-A14B
+    high_noise_model: high_noise_model
+    low_noise_model: low_noise_model
+    t5_checkpoint: models_t5_umt5-xxl-enc-bf16.pth
+    t5_tokenizer: google/umt5-xxl
+    vae_checkpoint: Wan2.1_VAE.pth
     offload_model: false
     t5_cpu: false
     prompt_extension: false
