@@ -204,8 +204,8 @@ video:
     t5_checkpoint: models_t5_umt5-xxl-enc-bf16.pth
     t5_tokenizer: google/umt5-xxl
     vae_checkpoint: Wan2.1_VAE.pth
-    offload_model: false
-    t5_cpu: false
+    offload_model: true
+    t5_cpu: true
     prompt_extension: false
     negative_prompt: "blurry, warped elevator geometry, distorted doors, low quality, cartoon, CGI, flicker, unstable lighting"
 
