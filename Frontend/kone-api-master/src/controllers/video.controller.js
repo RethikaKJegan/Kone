@@ -784,7 +784,11 @@ const generateVideo = async (req, res) => {
         videoOptions,
       });
     } catch (logicError) {
-      if (videoOptions.motion === 'door-functionality' || videoOptions.mode === 'door_functionality') {
+      if (
+        videoOptions.engine === 'wan2.2'
+        || videoOptions.motion === 'door-functionality'
+        || videoOptions.mode === 'door_functionality'
+      ) {
         throw logicError;
       }
       await generateFallbackVideo(finalOutputPath, path.join(outputDir, 'elevator_animation.mp4'));
