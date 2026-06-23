@@ -156,7 +156,11 @@ export default function Step5Video() {
         })
       } catch (error) {
         setLoadFailed(true)
-        const message = error instanceof Error ? error.message : 'Video generation failed'
+        const responseMessage = typeof error === 'object' && error !== null && 'response' in error
+          ? (error as { response?: { data?: { message?: string; error?: string } } }).response?.data?.message
+            ?? (error as { response?: { data?: { message?: string; error?: string } } }).response?.data?.error
+          : null
+        const message = responseMessage || (error instanceof Error ? error.message : 'Video generation failed')
         setCurrentOffering({
           ...currentOffering,
           videoMotionStyle: motion,
