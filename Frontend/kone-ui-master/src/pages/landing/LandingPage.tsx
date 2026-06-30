@@ -1,6 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
-import { useAuthStore } from '../../store/authStore'
+import { Link } from 'react-router-dom'
 
 // ── Keyframes + interactive CSS ──────────────────────────────────────────────
 const STYLES = `
@@ -197,9 +196,6 @@ function useScrollReveal() {
 
 // ── Page ─────────────────────────────────────────────────────────────────────
 export default function LandingPage() {
-  const navigate        = useNavigate()
-  const continueAsGuest = useAuthStore((s) => s.continueAsGuest)
-  const handleGuest     = () => { continueAsGuest(); navigate('/projects') }
   const navRef          = useRef<HTMLElement>(null)
 
   useScrollReveal()
@@ -244,7 +240,7 @@ export default function LandingPage() {
             >
               Sign in
             </Link>
-            <Link to="/signup" className="snx-nav-btn"
+            <Link to="/signin" className="snx-nav-btn"
               style={{ fontWeight: 500, fontSize: 14, padding: '8px 20px', borderRadius: 6, background: '#0A0A0A', color: '#FFFFFF', textDecoration: 'none' }}
             >
               Get started
@@ -341,7 +337,7 @@ export default function LandingPage() {
               opacity: 0,
               display: 'flex', alignItems: 'center', gap: 16, marginTop: 56,
             }}>
-              <Link to="/signup" className="snx-cta-dark"
+              <Link to="/signin" className="snx-cta-dark"
                 style={{
                   fontWeight: 600, fontSize: 16, padding: '18px 40px', borderRadius: 12,
                   background: '#FFFFFF', color: '#0A0A0A', textDecoration: 'none', display: 'inline-block',
@@ -349,15 +345,6 @@ export default function LandingPage() {
               >
                 Start building
               </Link>
-              <button onClick={handleGuest} className="snx-cta-outline"
-                style={{
-                  fontWeight: 600, fontSize: 16, padding: '18px 40px', borderRadius: 12,
-                  background: 'rgba(255,255,255,0.05)', backdropFilter: 'blur(10px)', color: '#FFFFFF',
-                  border: '1px solid rgba(255,255,255,0.2)', cursor: 'pointer',
-                }}
-              >
-                View demo
-              </button>
             </div>
           </div>
 
@@ -506,7 +493,7 @@ export default function LandingPage() {
               Experience the future of elevator sales visualisation. No complex setups, just stunning results in seconds.
             </p>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 16 }}>
-              <Link to="/signup" className="snx-cta-dark"
+              <Link to="/signin" className="snx-cta-dark"
                 style={{
                   fontWeight: 600, fontSize: 16, padding: '18px 40px', borderRadius: 12,
                   background: '#FFFFFF', color: '#0A0A0A', textDecoration: 'none', display: 'inline-block',
@@ -514,16 +501,6 @@ export default function LandingPage() {
               >
                 Start building
               </Link>
-              <button onClick={handleGuest} className="snx-cta-outline"
-                style={{
-                  fontWeight: 600, fontSize: 16, padding: '18px 40px', borderRadius: 12,
-                  background: 'rgba(255,255,255,0.05)', color: '#FFFFFF',
-                  border: '1px solid rgba(255,255,255,0.2)', cursor: 'pointer',
-                  backdropFilter: 'blur(10px)'
-                }}
-              >
-                View live demo
-              </button>
             </div>
           </div>
         </section>

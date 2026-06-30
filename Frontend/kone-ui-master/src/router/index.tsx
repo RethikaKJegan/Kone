@@ -5,7 +5,6 @@ import { useAuthStore } from '../store/authStore'
 
 const LandingPage = lazy(() => import('../pages/landing/LandingPage'))
 const SignInPage = lazy(() => import('../pages/auth/SignInPage'))
-const SignUpPage = lazy(() => import('../pages/auth/SignUpPage'))
 const ProjectsPage = lazy(() => import('../pages/projects/ProjectsPage'))
 const ProjectDetailPage = lazy(() => import('../pages/projects/ProjectDetailPage'))
 const OfferingShell = lazy(() => import('../pages/offering/OfferingShell'))
@@ -49,7 +48,7 @@ const router = createBrowserRouter([
       },
       {
         path: '/signup',
-        element: <Suspense fallback={<FullPageLoader />}><SignUpPage /></Suspense>,
+        element: <Navigate to="/signin" replace />,
       },
     ],
   },

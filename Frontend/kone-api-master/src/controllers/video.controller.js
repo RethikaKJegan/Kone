@@ -237,7 +237,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const { promisify } = require('util');
 const Offering = require('../models/offering.model');
 const Project = require('../models/project.model');
@@ -246,6 +246,12 @@ const { projectService } = require('../services');
 const fsPromises = fs.promises;
 const execFileAsync = promisify(execFile);
 const LOGIC_URL = process.env.LOGIC_URL || 'http://localhost:8001';
+const COMFY_ROOT = process.env.COMFY_ROOT || '/root/vdotest';
+const COMFY_URL = process.env.COMFY_URL || 'http://127.0.0.1:8188';
+const COMFY_RUNNER = path.join(COMFY_ROOT, 'run_i2v_api.py');
+const COMFY_START_SCRIPT = path.join(COMFY_ROOT, 'start_comfy_logged.sh');
+const COMFY_PYTHON = process.env.COMFY_PYTHON || path.join(COMFY_ROOT, 'ComfyUI', '.venv', 'bin', 'python');
+let comfyStartPromise = null;
 
 // in-memory guest store
 const guestJobs = new Map();
@@ -279,6 +285,28 @@ const readJsonIfExists = async (filePath) => {
     return JSON.parse(await fsPromises.readFile(filePath, 'utf-8'));
   } catch {
     return {};
+  }
+};
+
+const isValidVideoFile = async (filePath) => {
+  if (!(await fileExists(filePath))) return false;
+  try {
+    const { stdout } = await execFileAsync(
+      'ffprobe',
+      [
+        '-v',
+        'error',
+        '-show_entries',
+        'format=duration',
+        '-of',
+        'default=noprint_wrappers=1:nokey=1',
+        filePath,
+      ],
+      { timeout: 30000 }
+    );
+    return Number(stdout.trim()) > 0;
+  } catch {
+    return false;
   }
 };
 
@@ -474,81 +502,229 @@ const getOrRecoverJob = async (imageId, userId) => {
   return recovered;
 };
 
-const normalizeVideoOptions = (videoOptions = {}) => {
-  const motion = videoOptions.motion || videoOptions.motionStyle;
-  if (motion === 'door-functionality') {
-    return {
-      engine: videoOptions.engine,
-      mode: 'door_functionality',
-      duration_seconds: videoOptions.duration_seconds || 8,
-      speed: videoOptions.speed,
-      quality: videoOptions.quality,
-    };
-  }
-  return {
-    engine: videoOptions.engine,
-    motion,
-    speed: videoOptions.speed,
-    quality: videoOptions.quality,
-  };
+const VIDEO_PROMPTS = {
+  'zoom-in': 'Ultra-photorealistic smartphone video generated from the exact input image. The ONLY motion is the CAMERA performing a smooth, continuous handheld push-in (forward dolly) toward the elevator over the entire clip. The camera physically moves forward approximately 1-2 meters while maintaining the elevator perfectly centered, making the elevator gradually become larger in frame from beginning to end. This is NOT a digital zoom—the camera itself moves closer with natural perspective change and realistic parallax.The operator stands still except for the slow forward camera movement. Natural handheld micro-shake, subtle breathing motion, slight vertical walking bob, realistic smartphone stabilization, tiny autofocus breathing, and smooth exposure adaptation. Camera movement is slow, steady, and cinematic with no sudden acceleration.The elevator doors remain COMPLETELY CLOSED throughout the entire video with absolutely zero opening, closing, vibration, or movement. Preserve the exact wall textures, marble panels, stainless-steel reflections, lighting, floor tiles, elevator button panel, ceiling lights, signage, and all architectural geometry exactly as in the input image.No people enter the frame. No moving objects. No added objects. No text overlays. No environmental changes. No camera rotation beyond tiny natural handheld sway. No panning, tilting, or orbiting. Only a straight forward dolly-in.Shot on a modern smartphone (iPhone 15 Pro / Google Pixel), 24 fps, realistic rolling shutter, authentic indoor lighting, physically accurate reflections, true-to-life colors, subtle sensor noise, realistic depth changes from forward camera motion, perfect temporal consistency, documentary realism, no CGI look, no warping, no morphing, no hallucinated objects, no flickering.',
+  'pan-lr': 'realistic handheld smartphone video of an elevator lobby, the camera starts from a straight front view of the elevator and slowly arcs to the left with a subtle push-in on the left wall, the LCI panel stays clearly visible and in focus throughout the video, the elevator remains visible in the background, smooth natural camera movement, realistic indoor lighting, glossy brown wall tiles, brushed stainless steel elevator doors, natural reflections, stable perspective, no zoom jump, no sudden camera shake, photorealistic, documentary style, as if recorded by a person on a phone',
+  'pan-rl':'realistic handheld smartphone video of an elevator lobby, the camera starts from a straight front view of the elevator and slowly arcs to the right with a subtle push-in on the right wall, the LCI panel stays clearly visible and in focus throughout the video, the elevator remains visible in the background, smooth natural camera movement, realistic indoor lighting, glossy brown wall tiles, brushed stainless steel elevator doors, natural reflections, stable perspective, no zoom jump, no sudden camera shake, photorealistic, documentary style, as if recorded by a person on a phone',
+  'door-functionality':'the elevator doors open smoothly from fully closed to fully open, realistic handheld smartphone video of an elevator door in an indoor building corridor, fixed camera position, natural indoor lighting, brushed stainless steel elevator doors moving smoothly, realistic reflections on metal, subtle real world camera noise, stable perspective'
 };
 
-const generateFallbackVideo = async (inputImagePath, outputVideoPath) => {
-  await execFileAsync('ffmpeg', [
-    '-y',
-    '-loop',
-    '1',
-    '-i',
-    inputImagePath,
-    '-t',
-    '4',
-    '-vf',
-    'scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p',
-    '-r',
-    '30',
-    '-c:v',
-    'libx264',
-    '-movflags',
-    '+faststart',
-    outputVideoPath,
-  ]);
+const VIDEO_NEGATIVE_PROMPT = [
+  'cartoon',
+  'animation',
+  'CGI',
+  '3d render',
+  'fake render',
+  'warped elevator',
+  'distorted doors',
+  'bending metal',
+  'changing wall panels',
+  'duplicated elevator doors',
+  'extra panels',
+  'flickering display',
+  'unreadable display',
+  'blurry',
+  'low quality',
+  'heavy camera shake',
+  'fast pan',
+  'jump cut',
+  'sudden zoom',
+  'sudden lighting change',
+  'people',
+  'watermark',
+  'logo',
+  'added text',
+].join(', ');
+
+const VIDEO_STATIC_DOOR_NEGATIVE_PROMPT = [
+  VIDEO_NEGATIVE_PROMPT,
+  'opening elevator doors',
+  'closing elevator doors',
+  'sliding elevator doors',
+  'elevator door motion',
+  'moving door panels',
+  'cabin reveal',
+  'changing elevator door state',
+].join(', ');
+
+const normalizeVideoMotion = (value) => {
+  const normalized = String(value || '').trim().toLowerCase().replace(/_/g, '-');
+  if (normalized === 'door-functionality') return 'door-functionality';
+  if (normalized === 'pan-l-r' || normalized === 'pan-left-right') return 'pan-lr';
+  if (normalized === 'pan-r-l' || normalized === 'pan-right-left') return 'pan-rl';
+  if (['zoom-in', 'pan-lr', 'pan-rl'].includes(normalized)) return normalized;
+  return null;
 };
 
-const generateLogicVideo = async ({ imageId, userId, inputPath, outputDir, videoOptions }) => {
-  const storageDir = getLogicStorageDir(userId, imageId);
-  const uploadsDir = path.join(storageDir, 'uploads');
-  const previewDir = path.join(storageDir, 'preview');
-  const pipelineDir = path.join(storageDir, 'pipeline');
-  const videoDir = path.join(storageDir, 'video');
+const videoMotionForOptions = (videoOptions = {}) => {
+  return normalizeVideoMotion(videoOptions.mode)
+    || normalizeVideoMotion(videoOptions.motion)
+    || normalizeVideoMotion(videoOptions.motionStyle)
+    || 'zoom-in';
+};
 
-  await Promise.all(
-    [uploadsDir, previewDir, pipelineDir, videoDir].map((dir) => fsPromises.mkdir(dir, { recursive: true }))
-  );
-  await fsPromises.copyFile(inputPath, path.join(uploadsDir, 'input.jpg'));
-  await fsPromises.copyFile(inputPath, path.join(previewDir, 'final_output.png'));
+const videoPromptForOptions = (videoOptions = {}) => {
+  const motion = videoMotionForOptions(videoOptions);
+  return VIDEO_PROMPTS[motion] || VIDEO_PROMPTS['zoom-in'];
+};
 
-  const { data } = await axios.post(
-    `${LOGIC_URL}/generate-video`,
-    {
-      session_id: `auth_${userId}`,
-      project_id: imageId,
-      project_name: imageId,
-      storage_dir: storageDir,
-      video_options: normalizeVideoOptions(videoOptions),
-    },
-    { timeout: 0 }
-  );
+const videoNegativePromptForOptions = (videoOptions = {}) => {
+  return videoMotionForOptions(videoOptions) === 'door-functionality'
+    ? VIDEO_NEGATIVE_PROMPT
+    : VIDEO_STATIC_DOOR_NEGATIVE_PROMPT;
+};
 
-  if (!data?.ok) {
-    throw new Error(data?.error || 'Logic video generation failed');
+const qualityDimensions = (quality) => {
+  switch (quality) {
+    case '360p':
+      return { width: 360, height: 640 };
+    case '480p':
+      return { width: 480, height: 640 };
+    case '720p':
+      return { width: 640, height: 854 };
+    case '1080p':
+    default:
+      return { width: 720, height: 960 };
+  }
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const isComfyAlive = async () => {
+  try {
+    await axios.get(`${COMFY_URL}/system_stats`, { timeout: 2500 });
+    return true;
+  } catch (_) {
+    return false;
+  }
+};
+
+const ensureComfyRunning = async () => {
+  if (await isComfyAlive()) return;
+  if (comfyStartPromise) return comfyStartPromise;
+
+  comfyStartPromise = (async () => {
+    if (!(await fileExists(COMFY_START_SCRIPT))) {
+      throw new Error(`ComfyUI start script not found at ${COMFY_START_SCRIPT}`);
+    }
+
+    const child = spawn('bash', [COMFY_START_SCRIPT], {
+      cwd: COMFY_ROOT,
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+
+    for (let attempt = 0; attempt < 90; attempt += 1) {
+      await sleep(2000);
+      if (await isComfyAlive()) return;
+    }
+
+    throw new Error('ComfyUI did not start on port 8188 within 3 minutes. Check /root/vdotest/logs.');
+  })().finally(() => {
+    comfyStartPromise = null;
+  });
+
+  return comfyStartPromise;
+};
+
+const generateComfyVideo = async ({ inputPath, outputDir, videoOptions }) => {
+  await ensureComfyRunning();
+
+  const pythonPath = (await fileExists(COMFY_PYTHON)) ? COMFY_PYTHON : 'python3';
+  const outputVideoPath = path.join(outputDir, 'elevator_animation.mp4');
+  const metadataPath = path.join(outputDir, 'elevator_animation.json');
+  const { width, height } = qualityDimensions(videoOptions.quality);
+  const prompt = videoPromptForOptions(videoOptions);
+  const negativePrompt = videoNegativePromptForOptions(videoOptions);
+  const motion = videoMotionForOptions(videoOptions);
+  const quality = videoOptions.quality || '1080p';
+  const workflow = 'wan_i2v';
+  const seed = Math.floor(Date.now() % 1000000000);
+  const existingMeta = await readJsonIfExists(metadataPath);
+
+  if (
+    (await isValidVideoFile(outputVideoPath)) &&
+    existingMeta.engine === 'comfy_wan' &&
+    existingMeta.motion === motion &&
+    existingMeta.quality === quality &&
+    existingMeta.workflow === workflow &&
+    existingMeta.prompt === prompt
+  ) {
+    return;
   }
 
-  await fsPromises.copyFile(path.join(previewDir, 'final_output.png'), path.join(outputDir, 'final_output.png'));
-  await fsPromises.copyFile(path.join(videoDir, 'elevator_animation.mp4'), path.join(outputDir, 'elevator_animation.mp4'));
-  const metadataPath = path.join(videoDir, 'elevator_animation.json');
-  if (await fileExists(metadataPath)) {
-    await fsPromises.copyFile(metadataPath, path.join(outputDir, 'elevator_animation.json'));
+  try {
+    await fsPromises.rm(outputVideoPath, { force: true });
+    await execFileAsync(
+      pythonPath,
+      [
+        COMFY_RUNNER,
+        '--image',
+        inputPath,
+        '--prompt',
+        prompt,
+        '--negative',
+        negativePrompt,
+        '--comfy-url',
+        COMFY_URL,
+        '--width',
+        String(width),
+        '--height',
+        String(height),
+        '--length',
+        String(81),
+        '--fps',
+        '16',
+        '--seed',
+        String(seed),
+        '--motion',
+        motion,
+        '--wait',
+        '--output',
+        outputVideoPath,
+      ],
+      {
+        cwd: COMFY_ROOT,
+        timeout: 0,
+        maxBuffer: 1024 * 1024 * 20,
+      }
+    );
+  } catch (error) {
+    const message = error.stderr || error.stdout || error.message || 'ComfyUI video generation failed';
+    throw new Error(message);
   }
+
+  if (!(await isValidVideoFile(outputVideoPath))) {
+    throw new Error('ComfyUI completed but did not produce a valid elevator_animation.mp4');
+  }
+
+  await fsPromises.writeFile(
+    metadataPath,
+    JSON.stringify(
+      {
+        engine: 'comfy_wan',
+        motion,
+        quality,
+        workflow,
+        raw_video_options: videoOptions,
+        selected_prompt_key: motion,
+        prompt,
+        negative_prompt: negativePrompt,
+        comfy: {
+          url: COMFY_URL,
+          width,
+          height,
+          length: 81,
+          fps: 16,
+          seed,
+        },
+        generatedAt: new Date().toISOString(),
+      },
+      null,
+      2
+    )
+  );
 };
 
 /* STEP 1 - Upload Image */
@@ -775,24 +951,11 @@ const generateVideo = async (req, res) => {
       await fsPromises.copyFile(inputPath, finalOutputPath);
     }
 
-    try {
-      await generateLogicVideo({
-        imageId,
-        userId: req.user.id,
-        inputPath: finalOutputPath,
-        outputDir,
-        videoOptions,
-      });
-    } catch (logicError) {
-      if (
-        videoOptions.engine === 'wan2.2'
-        || videoOptions.motion === 'door-functionality'
-        || videoOptions.mode === 'door_functionality'
-      ) {
-        throw logicError;
-      }
-      await generateFallbackVideo(finalOutputPath, path.join(outputDir, 'elevator_animation.mp4'));
-    }
+    await generateComfyVideo({
+      inputPath: finalOutputPath,
+      outputDir,
+      videoOptions,
+    });
 
     // Write manifest
     await fsPromises.writeFile(

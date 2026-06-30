@@ -171,6 +171,7 @@ video:
   engine: opencv
   motion_style: pan_l_r
   quality: 720p
+  quality_mode: best
   duration_seconds: 5
   action: auto              # auto, open, or close
   cycle: true               # true = animate to the opposite state and back
@@ -208,6 +209,26 @@ video:
     t5_cpu: true
     prompt_extension: false
     negative_prompt: "blurry, warped elevator geometry, distorted doors, low quality, cartoon, CGI, flicker, unstable lighting"
+  comfy:
+    url: http://127.0.0.1:8188
+    root_dir: /root/vdotest/ComfyUI
+    workflow_dir: /root/vdotest/workflows
+    input_dir: /root/vdotest/ComfyUI/input
+    output_dir: /root/vdotest/ComfyUI/output
+    i2v_workflow: wan22_14b_i2v.json
+    flf2v_workflow: wan22_14b_flf2v.json
+    quality_mode: best
+    min_size_bytes: 1000000
+    width: 720
+    height: 960
+    length: 81
+    fps: 16
+    high_noise_model: wan2.2_i2v_high_noise_14B_fp16.safetensors
+    low_noise_model: wan2.2_i2v_low_noise_14B_fp16.safetensors
+    high_noise_lora: wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors
+    low_noise_lora: wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors
+    clip_name: umt5_xxl_fp8_e4m3fn_scaled.safetensors
+    vae_name: wan_2.1_vae.safetensors
 
 monitoring:
   interval_s: 1.0

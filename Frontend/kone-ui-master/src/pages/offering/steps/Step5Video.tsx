@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Play } from 'lucide-react'
+import { Loader2, Play, RotateCcw } from 'lucide-react'
 import apiClient from '../../../api/client'
 import { getGuestSessionId, isGuestSession } from '../../../api/guestWorkflow'
 import { useOfferingStore } from '../../../store/offeringStore'
@@ -11,6 +11,13 @@ import type { Offering } from '../../../types'
 
 type MotionStyle = Offering['videoMotionStyle']
 type Quality = Offering['videoQuality']
+
+const ESTIMATED_VIDEO_SECONDS: Record<Quality, number> = {
+  '360p': 480,
+  '480p': 600,
+  '720p': 780,
+  '1080p': 900,
+}
 
 function availableMotionStyle(value: MotionStyle | undefined): MotionStyle {
   return value ?? 'zoom-in'
@@ -25,6 +32,13 @@ function imageIdFromOffering(offering: Offering | null) {
   return fromOutput?.[1] ?? null
 }
 
+function formatDuration(seconds: number) {
+  const safeSeconds = Math.max(0, Math.round(seconds))
+  const minutes = Math.floor(safeSeconds / 60)
+  const remainingSeconds = safeSeconds % 60
+  return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`
+}
+
 export default function Step5Video() {
   const { projectId, offeringId } = useParams()
   const navigate = useNavigate()
@@ -34,8 +48,13 @@ export default function Step5Video() {
   const [quality, setQuality] = useState<Quality>(currentOffering?.videoQuality ?? '1080p')
   const [playing, setPlaying] = useState(false)
   const [generating, setGenerating] = useState(false)
+  const [generationStartedAt, setGenerationStartedAt] = useState<number | null>(null)
+  const [progressNow, setProgressNow] = useState(Date.now())
   const [loadFailed, setLoadFailed] = useState(false)
+  const selectedVideoMatchesOffering = currentOffering?.videoMotionStyle === motion
+    && currentOffering?.videoQuality === quality
   const videoReady = !!currentOffering?.outputVideoUrl
+    && selectedVideoMatchesOffering
     && !loadFailed
 
   const selectMotion = (value: MotionStyle) => {
@@ -57,6 +76,29 @@ export default function Step5Video() {
   const isDoorFunctionality = motion === 'door-functionality'
   const videoStyles = VIDEO_MOTION_STYLES
   const effectiveImageId = imageIdFromOffering(currentOffering)
+  const estimatedSeconds = useMemo(() => {
+    const qualityEstimate = ESTIMATED_VIDEO_SECONDS[quality] ?? ESTIMATED_VIDEO_SECONDS['1080p']
+    return isDoorFunctionality ? Math.max(qualityEstimate, 900) : qualityEstimate
+  }, [isDoorFunctionality, quality])
+  const elapsedSeconds = generationStartedAt ? (progressNow - generationStartedAt) / 1000 : 0
+  const progressPercent = generating
+    ? Math.min(96, Math.max(3, Math.round((elapsedSeconds / estimatedSeconds) * 100)))
+    : 0
+  const remainingSeconds = generating
+    ? Math.max(0, estimatedSeconds - elapsedSeconds)
+    : 0
+
+  useEffect(() => {
+    if (!generating) return undefined
+    const interval = window.setInterval(() => setProgressNow(Date.now()), 1000)
+    return () => window.clearInterval(interval)
+  }, [generating])
+
+  const startGenerationTimer = () => {
+    const now = Date.now()
+    setGenerationStartedAt(now)
+    setProgressNow(now)
+  }
 
   const handleGeneratePreview = async () => {
     const videoOptions = isDoorFunctionality
@@ -65,6 +107,7 @@ export default function Step5Video() {
 
     if (isGuestSession() && projectId && currentOffering) {
       setGenerating(true)
+      startGenerationTimer()
       setLoadFailed(false)
       try {
         const sessionId = await getGuestSessionId()
@@ -103,6 +146,7 @@ export default function Step5Video() {
         toast(error instanceof Error ? error.message : 'Video generation failed', 'destructive')
       } finally {
         setGenerating(false)
+        setGenerationStartedAt(null)
       }
       return
     }
@@ -118,6 +162,7 @@ export default function Step5Video() {
       }
 
       setGenerating(true)
+      startGenerationTimer()
       setLoadFailed(false)
       setCurrentOffering({
         ...currentOffering,
@@ -175,6 +220,7 @@ export default function Step5Video() {
         toast(message, 'destructive')
       } finally {
         setGenerating(false)
+        setGenerationStartedAt(null)
       }
       return
     }
@@ -243,6 +289,44 @@ export default function Step5Video() {
               <div className="absolute inset-0 flex items-center justify-center">
                 <div className="flex items-center justify-center rounded-full bg-white/20 transition-colors duration-[120ms] hover:bg-white/30" style={{ width: 48, height: 48 }}>
                   <Play className="ml-0.5 text-white" style={{ width: 18, height: 18 }} />
+                </div>
+              </div>
+            )}
+            {generating && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/55 px-8 text-white backdrop-blur-[1px]">
+                <div className="w-full max-w-sm">
+                  <div className="mb-4 flex items-center justify-between gap-4">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <Loader2 className="shrink-0 animate-spin text-white" style={{ width: 18, height: 18 }} />
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold">Generating video</p>
+                        <p className="text-xs text-white/70">{formatDuration(elapsedSeconds)} elapsed</p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      title="Refresh estimate"
+                      aria-label="Refresh estimate"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        startGenerationTimer()
+                      }}
+                      className="flex shrink-0 items-center justify-center rounded-full border border-white/20 bg-white/10 text-white transition-colors duration-[120ms] hover:bg-white/20"
+                      style={{ width: 34, height: 34 }}
+                    >
+                      <RotateCcw style={{ width: 15, height: 15 }} />
+                    </button>
+                  </div>
+                  <div className="mb-2 h-2 overflow-hidden rounded-full bg-white/20">
+                    <div
+                      className="h-full rounded-full bg-[#1450F5] transition-[width] duration-1000 ease-linear"
+                      style={{ width: `${progressPercent}%` }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-xs text-white/80">
+                    <span>{progressPercent}%</span>
+                    <span>About {formatDuration(remainingSeconds)} left</span>
+                  </div>
                 </div>
               </div>
             )}

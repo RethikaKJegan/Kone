@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -16,7 +16,7 @@ type FormData = z.infer<typeof schema>
 
 export default function SignInPage() {
   const [showPw, setShowPw] = useState(false)
-  const { signIn, continueAsGuest } = useAuthStore()
+  const { signIn } = useAuthStore()
   const navigate = useNavigate()
 
   const {
@@ -37,11 +37,6 @@ export default function SignInPage() {
         setError('password', { message: 'Something went wrong. Try again.' })
       }
     }
-  }
-
-  const handleGuest = () => {
-    continueAsGuest()
-    navigate('/projects')
   }
 
   return (
@@ -119,31 +114,7 @@ export default function SignInPage() {
           </button>
         </form>
 
-        <div className="relative my-6">
-          <div className="absolute inset-0 flex items-center">
-            <div className="w-full border-t border-[#F0F0F0]" />
-          </div>
-          <div className="relative flex justify-center">
-            <span className="bg-white px-3 text-[11px] font-medium text-[#C4C9D4]">or</span>
-          </div>
-        </div>
-
-        <button
-          onClick={handleGuest}
-          className="flex w-full items-center justify-center rounded-lg border border-[#E4E4E4] bg-white text-[13px] font-semibold text-[#374151] transition-all duration-[150ms] hover:border-[#D1D5DB] hover:bg-[#F9FAFB]"
-          style={{ height: 42 }}
-        >
-          Continue as guest
-        </button>
-
-        <p className="mt-6 text-center text-[12px] text-[#9CA3AF]">
-          Don't have an account?{' '}
-          <Link to="/signup" className="font-semibold text-[#1450F5] transition-colors duration-[120ms] hover:text-[#1040D0]">
-            Sign up
-          </Link>
-        </p>
-
-        <p className="mt-2 text-center text-[11px] text-[#D1D5DB]">
+        <p className="mt-6 text-center text-[11px] text-[#D1D5DB]">
           Single sign-on available for enterprise accounts
         </p>
       </div>

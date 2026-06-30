@@ -205,26 +205,67 @@ def generate_video(payload: ProjectPayload):
         video_options = payload.video_options or {}
         motion = video_options.get("motion") or video_options.get("motion_style")
         video_cfg = cfg.get("video", {})
+        requested_engine = str(video_options.get("engine", video_cfg.get("engine", "opencv"))).strip().lower()
+        wan_engines = {"wan", "wan2.2", "wan22"}
+        comfy_engines = {"comfy", "comfy_wan", "comfy_i2v", "comfy_flf2v", "wan_comfy"}
+        effective_engine = (
+            requested_engine
+            if requested_engine in comfy_engines
+            else "wan2.2"
+            if requested_engine in wan_engines
+            else "opencv"
+        )
         cfg["video"] = {
             **video_cfg,
             "enabled": True,
-            "engine": video_options.get("engine", "opencv"),
+            "engine": effective_engine,
+            "requested_engine": requested_engine,
             "quality": video_options.get("quality", video_cfg.get("quality", "720p")),
             "duration_seconds": video_options.get("duration_seconds", video_options.get("duration", 9.0)),
             "preserve_source_aspect": True,
             "ffmpeg_pan_overscan": 0.20,
             "ffmpeg_zoom_amount": 0.35,
         }
-        if cfg["video"].get("engine") == "wan2.2":
-            cfg["video"].setdefault("wan", {})
-            cfg["video"]["wan"]["enabled"] = True
         if video_options.get("mode") == "door_functionality":
             cfg["video"].update({"mode": "door_functionality"})
             cfg["video"].pop("motion_style", None)
         elif motion:
             cfg["video"].update({"motion_style": motion, "mode": "motion"})
-        elif cfg["video"].get("engine") == "wan2.2":
+        elif requested_engine in {"wan", "wan2.2", "wan22", "comfy", "comfy_wan", "comfy_i2v", "wan_comfy"}:
             cfg["video"].setdefault("motion_style", "zoom_in")
+        if cfg["video"].get("engine") in comfy_engines:
+            cfg["video"].setdefault("fps", 16)
+            cfg["video"].setdefault("duration_seconds", 5)
+            cfg["video"].setdefault("quality_mode", video_options.get("quality_mode", "best"))
+            cfg["video"]["comfy"] = {
+                **cfg["video"].get("comfy", {}),
+                **video_options.get("comfy", {}),
+                "quality_mode": video_options.get("quality_mode", cfg["video"].get("quality_mode", "best")),
+            }
+        if cfg["video"].get("engine") == "wan2.2":
+            cfg["video"].setdefault("fps", 16)
+            cfg["video"].setdefault("duration_seconds", 5)
+            wan_defaults = {
+                "model_key": "wan22_14b_i2v",
+                "task": "i2v-14B",
+                "size": "832*480",
+                "frame_num": 81,
+                "sample_steps": 40,
+                "sample_shift": 3.0,
+                "sample_guide_scale": None,
+                "repo_dir": "/root/wan22_install/Wan2.2",
+                "checkpoint_dir": "/root/wan22_install/Wan2.2/Wan2.2-I2V-A14B",
+                "offload_model": False,
+                "t5_cpu": False,
+                "convert_model_dtype": True,
+                "min_size_bytes": 1_000_000,
+            }
+            cfg["video"]["wan"] = {
+                **cfg["video"].get("wan", {}),
+                **wan_defaults,
+                **video_options.get("wan", {}),
+                "enabled": True,
+            }
         detections = json.loads(detections_path.read_text(encoding="utf-8")) if detections_path.exists() else {}
         geometry = json.loads(geometry_path.read_text(encoding="utf-8")) if geometry_path.exists() else {}
         render_video(

@@ -1,0 +1,14 @@
+{
+  "imageId": "bceb26d0-2dd7-42cb-8411-9f61a44a8728",
+  "generatedAt": "2026-06-28T11:01:58.467Z",
+  "environment": "lobby",
+  "components": [
+    "door",
+    "lci"
+  ],
+  "files": [
+    "01_original.jpg",
+    "final_output.png",
+    "elevator_animation.mp4"
+  ]
+}
