@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react'
+import { lazy, Suspense, useEffect } from 'react'
 import { createBrowserRouter, RouterProvider, Navigate, Outlet } from 'react-router-dom'
 import { AppShell } from '../components/layout/AppShell'
 import { useAuthStore } from '../store/authStore'
@@ -20,6 +20,16 @@ function PublicOnlyGuard() {
   const { isAuthenticated } = useAuthStore()
   if (isAuthenticated) return <Navigate to="/projects" replace />
   return <Outlet />
+}
+
+function GuestRedirect() {
+  const continueAsGuest = useAuthStore(s => s.continueAsGuest)
+
+  useEffect(() => {
+    continueAsGuest()
+  }, [continueAsGuest])
+
+  return <Navigate to="/projects" replace />
 }
 
 function FullPageLoader() {
@@ -45,6 +55,10 @@ const router = createBrowserRouter([
       {
         path: '/signin',
         element: <Suspense fallback={<FullPageLoader />}><SignInPage /></Suspense>,
+      },
+      {
+        path: '/guest',
+        element: <GuestRedirect />,
       },
       {
         path: '/signup',

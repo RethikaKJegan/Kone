@@ -29,8 +29,9 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       port: 3000,
+      host: true,
       open: true,
-      allowedHosts: ['.trycloudflare.com'],
+      allowedHosts: ['sales-nxt.app', '.sales-nxt.app', '.trycloudflare.com'],
       proxy: {
         ...(enableMockApi
           ? {}
