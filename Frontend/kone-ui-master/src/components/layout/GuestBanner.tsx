@@ -14,10 +14,10 @@ export function GuestBanner() {
       </p>
       <div className="flex items-center gap-3 shrink-0">
         <Link
-          to="/signup"
+          to="/signin"
           className="rounded-[5px] bg-white px-3 py-1 text-xs font-medium text-[#0A0A0A] transition-colors duration-[120ms] hover:bg-white/90"
         >
-          Sign up to save permanently
+          Sign in to save permanently
         </Link>
         <Link
           to="/signin"

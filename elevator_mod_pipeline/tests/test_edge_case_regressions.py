@@ -33,7 +33,7 @@ from src.perspective_mod_placement import (
     run_perspective_mod_placement,
 )
 from src.pipeline import component_config, elevator_present_for_video, replacement_configs
-from src.video import normalize_video_mode_request, pan_metadata, render_motion_style_frame
+from src.video import fallback_door_cycle_actions, normalize_video_mode_request, pan_metadata, render_motion_style_frame, select_state_images
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1041,6 +1041,62 @@ def test_door_functionality_wins_over_motion_style() -> None:
     assert request["requested_door_functionality"] == "open"
     assert request["normalized_video_mode"] == "door_open"
     assert request["video_mode_conflict_resolution"] == "door_functionality_preferred"
+
+
+def test_unselected_closed_elevator_opens_with_default_interior_and_closes_original(monkeypatch: pytest.MonkeyPatch) -> None:
+    final_img = np.full((12, 12, 3), 20, dtype=np.uint8)
+    box = [3, 2, 9, 10]
+    final_img[box[1] : box[3], box[0] : box[2]] = (40, 50, 60)
+    default_open = np.full((8, 6, 3), (100, 110, 120), dtype=np.uint8)
+
+    monkeypatch.setattr("src.video.load_default_door_open_interior", lambda cfg, shape: default_open)
+
+    open_state, closed_state, policy = select_state_images(final_img, {}, "closed", box)
+
+    assert np.array_equal(open_state[box[1] : box[3], box[0] : box[2]], default_open)
+    assert np.array_equal(closed_state, final_img)
+    assert policy["open_state_image"] == "default_door_open_interior_fitted_to_original_closed_door_box"
+    assert policy["closed_state_image"] == "final_image"
+    assert [action for action, _ in fallback_door_cycle_actions("closed")] == ["open", "close", "open", "close"]
+
+
+def test_unselected_open_elevator_closes_with_default_door_and_reopens_original(monkeypatch: pytest.MonkeyPatch) -> None:
+    final_img = np.full((12, 12, 3), 70, dtype=np.uint8)
+    box = [3, 2, 9, 10]
+    final_img[box[1] : box[3], box[0] : box[2]] = (10, 90, 130)
+    default_door = np.full((8, 6, 3), (180, 190, 200), dtype=np.uint8)
+
+    monkeypatch.setattr("src.video.load_default_door_image", lambda cfg, shape: default_door)
+
+    open_state, closed_state, policy = select_state_images(final_img, {}, "open", box)
+
+    assert np.array_equal(open_state, final_img)
+    assert np.array_equal(closed_state[box[1] : box[3], box[0] : box[2]], default_door)
+    assert policy["open_state_image"] == "final_image"
+    assert policy["closed_state_image"] == "default_door_fitted_to_original_open_interior_box"
+    assert [action for action, _ in fallback_door_cycle_actions("open")] == ["close", "open", "close", "open"]
+
+
+def test_selected_door_and_interior_state_image_behavior_stays_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    final_img = np.full((12, 12, 3), 30, dtype=np.uint8)
+    box = [3, 2, 9, 10]
+    default_open = np.full((8, 6, 3), (100, 110, 120), dtype=np.uint8)
+    default_door = np.full((8, 6, 3), (180, 190, 200), dtype=np.uint8)
+
+    monkeypatch.setattr("src.video.load_default_door_open_interior", lambda cfg, shape: default_open)
+    monkeypatch.setattr("src.video.load_default_door_image", lambda cfg, shape: default_door)
+
+    door_open_state, door_closed_state, door_policy = select_state_images(final_img, {}, "closed", box, replaced_door=True)
+    cabin_open_state, cabin_closed_state, cabin_policy = select_state_images(final_img, {}, "open", box, replaced_cabin=True)
+
+    assert np.array_equal(door_open_state[box[1] : box[3], box[0] : box[2]], default_open)
+    assert np.array_equal(door_closed_state, final_img)
+    assert door_policy["open_state_image"] == "default_door_open_interior_fitted_to_replaced_door_box"
+    assert door_policy["closed_state_image"] == "final_replaced_door_image"
+    assert np.array_equal(cabin_open_state, final_img)
+    assert np.array_equal(cabin_closed_state[box[1] : box[3], box[0] : box[2]], default_door)
+    assert cabin_policy["open_state_image"] == "final_replaced_cabin_image"
+    assert cabin_policy["closed_state_image"] == "default_door_fitted_to_replaced_cabin_box"
 
 
 def test_zoom_in_starts_with_full_centered_image_and_changes() -> None:

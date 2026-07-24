@@ -1,17 +1,19 @@
 import { useEffect, useState, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Layers, Plus, X, Check } from 'lucide-react'
+import { Layers, Plus, X, Check, MoreVertical } from 'lucide-react'
 import { useProjectStore } from '../../store/projectStore'
 import { StatusBadge } from '../../components/shared/StatusBadge'
 import { Skeleton } from '../../components/ui/skeleton'
 import { TopBar } from '../../components/layout/TopBar'
+import { ActionPopup } from '../../components/shared/ActionPopup'
 import { toast } from '../../hooks/useToast'
 import { formatDate } from '../../lib/utils'
 
 export default function ProjectsPage() {
   const navigate = useNavigate()
-  const { projects, isLoading, fetchProjects, createProject } = useProjectStore()
+  const { projects, isLoading, fetchProjects, createProject, updateProject, deleteProject } = useProjectStore()
   const [creating, setCreating] = useState(false)
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null)
   const [newName, setNewName] = useState('')
   const [nameError, setNameError] = useState('')
   const [saving, setSaving] = useState(false)
@@ -128,16 +130,41 @@ export default function ProjectsPage() {
         ) : (
           <div className="grid gap-5" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(420px, 1fr))' }}>
             {projects.map(project => (
-              <button
+              <div
                 key={project.id}
                 onClick={() => navigate(`/projects/${project.id}`)}
+                role="button"
+                tabIndex={0}
                 className="group relative rounded-xl border bg-white text-left transition-all duration-200 hover:shadow-lg hover:shadow-[#1450F5]/[0.08]"
                 style={{ padding: '28px 28px 24px', borderColor: '#E8EAED' }}
                 onMouseEnter={e => (e.currentTarget.style.borderColor = 'rgba(20,80,245,0.3)')}
                 onMouseLeave={e => (e.currentTarget.style.borderColor = '#E8EAED')}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') navigate(`/projects/${project.id}`)
+                }}
               >
-                <div className="absolute right-5 top-5">
+                <div className="absolute right-5 top-5 flex items-center gap-2">
                   <StatusBadge status={project.status} />
+                  <button
+                    type="button"
+                    onClick={e => {
+                      e.stopPropagation()
+                      setOpenMenuId(openMenuId === project.id ? null : project.id)
+                    }}
+                    className="flex h-7 w-7 items-center justify-center rounded-md text-[#6B7280] transition-colors hover:bg-[#F3F4F6] hover:text-[#111827]"
+                    aria-label="Project menu"
+                  >
+                    <MoreVertical style={{ width: 15, height: 15 }} />
+                  </button>
+                  {openMenuId === project.id && (
+                    <ActionPopup
+                      entityLabel="project"
+                      entityName={project.name}
+                      onClose={() => setOpenMenuId(null)}
+                      onRename={name => updateProject(project.id, name).then(() => undefined)}
+                      onDelete={() => deleteProject(project.id)}
+                    />
+                  )}
                 </div>
                 {/* Icon */}
                 <div className="mb-5 flex items-center justify-center rounded-lg" style={{ width: 44, height: 44, background: 'rgba(20,80,245,0.08)' }}>
@@ -159,7 +186,7 @@ export default function ProjectsPage() {
                   style={{ color: '#1450F5' }}>
                   {project.offeringCount > 0 ? 'View offerings →' : 'Start creating →'}
                 </p>
-              </button>
+              </div>
             ))}
           </div>
         )}

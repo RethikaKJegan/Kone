@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Play } from 'lucide-react'
+import { Loader2, Play, RotateCcw } from 'lucide-react'
 import apiClient from '../../../api/client'
 import { getGuestSessionId, isGuestSession } from '../../../api/guestWorkflow'
 import { useOfferingStore } from '../../../store/offeringStore'
@@ -12,36 +12,59 @@ import type { Offering } from '../../../types'
 type MotionStyle = Offering['videoMotionStyle']
 type Quality = Offering['videoQuality']
 
+const ESTIMATED_VIDEO_SECONDS: Record<Quality, number> = {
+  '360p': 480,
+  '480p': 600,
+  '720p': 780,
+  '1080p': 900,
+}
+
 function availableMotionStyle(value: MotionStyle | undefined): MotionStyle {
-  return value === 'door-functionality' || !value ? 'zoom-in' : value
+  return value ?? 'zoom-in'
+}
+
+function imageIdFromOffering(offering: Offering | null) {
+  if (!offering) return null
+  if (offering.imageId) return offering.imageId
+  const fromInput = offering.inputImagePath?.match(/\/uploads\/([^/]+)\/input\.jpg(?:\?.*)?$/)
+  if (fromInput?.[1]) return fromInput[1]
+  const fromOutput = (offering.outputImageUrl || offering.uploadedFileUrl || '').match(/\/output\/([^/?]+)\/final_output\.png(?:\?.*)?$/)
+  return fromOutput?.[1] ?? null
+}
+
+function formatDuration(seconds: number) {
+  const safeSeconds = Math.max(0, Math.round(seconds))
+  const minutes = Math.floor(safeSeconds / 60)
+  const remainingSeconds = safeSeconds % 60
+  return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`
 }
 
 export default function Step5Video() {
   const { projectId, offeringId } = useParams()
   const navigate = useNavigate()
-  const { currentOffering, setVideoSettings, setCurrentOffering, goToStep } = useOfferingStore()
+  const { currentOffering, setCurrentOffering, goToStep } = useOfferingStore()
 
   const [motion, setMotion] = useState<MotionStyle>(availableMotionStyle(currentOffering?.videoMotionStyle))
   const [quality, setQuality] = useState<Quality>(currentOffering?.videoQuality ?? '1080p')
   const [playing, setPlaying] = useState(false)
   const [generating, setGenerating] = useState(false)
+  const [generationStartedAt, setGenerationStartedAt] = useState<number | null>(null)
+  const [progressNow, setProgressNow] = useState(Date.now())
   const [loadFailed, setLoadFailed] = useState(false)
+  const selectedVideoMatchesOffering = currentOffering?.videoMotionStyle === motion
+    && currentOffering?.videoQuality === quality
   const videoReady = !!currentOffering?.outputVideoUrl
-    && currentOffering.videoMotionStyle === motion
-    && currentOffering.videoQuality === quality
+    && selectedVideoMatchesOffering
     && !loadFailed
 
   const selectMotion = (value: MotionStyle) => {
-    if (value === 'door-functionality') return
     setMotion(value)
     setLoadFailed(false)
-    setVideoSettings({ videoMotionStyle: value, videoQuality: quality })
   }
 
   const selectQuality = (value: Quality) => {
     setQuality(value)
     setLoadFailed(false)
-    setVideoSettings({ videoMotionStyle: motion, videoQuality: value })
   }
 
   const handlePlay = () => {
@@ -51,14 +74,41 @@ export default function Step5Video() {
 
   const motionLabel = VIDEO_MOTION_STYLES.find(m => m.value === motion)?.label ?? ''
   const isDoorFunctionality = motion === 'door-functionality'
-  const videoStyles = VIDEO_MOTION_STYLES.filter(s => s.value !== 'door-functionality')
+  const videoStyles = VIDEO_MOTION_STYLES
+  const effectiveImageId = imageIdFromOffering(currentOffering)
+  const estimatedSeconds = useMemo(() => {
+    const qualityEstimate = ESTIMATED_VIDEO_SECONDS[quality] ?? ESTIMATED_VIDEO_SECONDS['1080p']
+    return isDoorFunctionality ? Math.max(qualityEstimate, 900) : qualityEstimate
+  }, [isDoorFunctionality, quality])
+  const elapsedSeconds = generationStartedAt ? (progressNow - generationStartedAt) / 1000 : 0
+  const progressPercent = generating
+    ? Math.min(96, Math.max(3, Math.round((elapsedSeconds / estimatedSeconds) * 100)))
+    : 0
+  const remainingSeconds = generating
+    ? Math.max(0, estimatedSeconds - elapsedSeconds)
+    : 0
 
-  const handleContinue = async () => {
-    setVideoSettings({ videoMotionStyle: motion, videoQuality: quality })
-    if (isGuestSession() && projectId && currentOffering && !videoReady) {
+  useEffect(() => {
+    if (!generating) return undefined
+    const interval = window.setInterval(() => setProgressNow(Date.now()), 1000)
+    return () => window.clearInterval(interval)
+  }, [generating])
+
+  const startGenerationTimer = () => {
+    const now = Date.now()
+    setGenerationStartedAt(now)
+    setProgressNow(now)
+  }
+
+  const handleGeneratePreview = async () => {
+    const videoOptions = isDoorFunctionality
+      ? { engine: 'wan2.2', mode: 'door_functionality', duration_seconds: 8, speed: currentOffering?.videoSpeed, quality }
+      : { engine: 'wan2.2', motion, speed: currentOffering?.videoSpeed, quality }
+
+    if (isGuestSession() && projectId && currentOffering) {
       setGenerating(true)
+      startGenerationTimer()
       setLoadFailed(false)
-      setCurrentOffering({ ...currentOffering, outputVideoUrl: null })
       try {
         const sessionId = await getGuestSessionId()
         await apiClient.post('/guest/video', {
@@ -66,9 +116,7 @@ export default function Step5Video() {
           session_id: sessionId,
           project_id: projectId,
           project_name: currentOffering.name,
-          video_options: isDoorFunctionality
-            ? { mode: 'door_functionality', duration_seconds: 8, speed: currentOffering.videoSpeed, quality }
-            : { motion, speed: currentOffering.videoSpeed, quality },
+          video_options: videoOptions,
         })
 
         for (let attempt = 0; attempt < 120; attempt += 1) {
@@ -84,7 +132,6 @@ export default function Step5Video() {
 
           if (data.status === 'failed') {
             setLoadFailed(true)
-            setCurrentOffering({ ...currentOffering, outputVideoUrl: null })
             toast(data.error || 'Video generation failed', 'destructive')
             return
           }
@@ -93,17 +140,93 @@ export default function Step5Video() {
         }
 
         setLoadFailed(true)
-        setCurrentOffering({ ...currentOffering, outputVideoUrl: null })
         toast('Video generation timed out. Check the API and logic terminals.', 'destructive')
       } catch (error) {
         setLoadFailed(true)
-        setCurrentOffering({ ...currentOffering, outputVideoUrl: null })
         toast(error instanceof Error ? error.message : 'Video generation failed', 'destructive')
       } finally {
         setGenerating(false)
+        setGenerationStartedAt(null)
       }
       return
     }
+
+    if (!isGuestSession() && currentOffering) {
+      if (!effectiveImageId) {
+        toast('Upload an image before generating the video preview.', 'destructive')
+        return
+      }
+      if (!currentOffering.outputImageUrl) {
+        toast('Generate the image preview before generating the video.', 'destructive')
+        return
+      }
+
+      setGenerating(true)
+      startGenerationTimer()
+      setLoadFailed(false)
+      setCurrentOffering({
+        ...currentOffering,
+        videoMotionStyle: motion,
+        videoQuality: quality,
+        pipelineStatus: 'processing',
+      })
+
+      try {
+        await apiClient.patch(`/offerings/${currentOffering.id}`, {
+          videoMotionStyle: motion,
+          videoQuality: quality,
+          pipelineStatus: 'processing',
+          lastError: null,
+        })
+
+        await apiClient.post('/video/generate', {
+          imageId: effectiveImageId,
+          sourceImageUrl: currentOffering.outputImageUrl,
+          videoOptions,
+        }, { timeout: 0 })
+
+        const { data } = await apiClient.post<Offering>(`/offerings/${currentOffering.id}/render`)
+        if (!data.outputVideoUrl) {
+          throw new Error('Video file was not generated. Check the API and Python logic terminals.')
+        }
+
+        setLoadFailed(false)
+        setCurrentOffering({
+          ...data,
+          videoMotionStyle: motion,
+          videoQuality: quality,
+          outputVideoUrl: `${data.outputVideoUrl}${data.outputVideoUrl.includes('?') ? '&' : '?'}v=${Date.now()}`,
+          videoGenerated: true,
+          pipelineStatus: 'video_ready',
+        })
+      } catch (error) {
+        setLoadFailed(true)
+        const responseMessage = typeof error === 'object' && error !== null && 'response' in error
+          ? (error as { response?: { data?: { message?: string; error?: string } } }).response?.data?.message
+            ?? (error as { response?: { data?: { message?: string; error?: string } } }).response?.data?.error
+          : null
+        const message = summarizeVideoError(responseMessage || (error instanceof Error ? error.message : 'Video generation failed'))
+        setCurrentOffering({
+          ...currentOffering,
+          videoMotionStyle: motion,
+          videoQuality: quality,
+          pipelineStatus: 'failed',
+          lastError: message,
+        })
+        await apiClient.patch(`/offerings/${currentOffering.id}`, {
+          pipelineStatus: 'failed',
+          lastError: message,
+        }).catch(() => {})
+        toast(message, 'destructive')
+      } finally {
+        setGenerating(false)
+        setGenerationStartedAt(null)
+      }
+      return
+    }
+  }
+
+  const handleContinue = () => {
     if (!videoReady) {
       toast('Generate the video preview before opening Downloads.', 'destructive')
       return
@@ -143,6 +266,7 @@ export default function Step5Video() {
           >
             {videoReady ? (
               <video
+                key={currentOffering.outputVideoUrl}
                 src={currentOffering.outputVideoUrl ?? ''}
                 controls
                 className="h-full w-full object-contain"
@@ -152,11 +276,6 @@ export default function Step5Video() {
                   if (!generating) toast('Video preview failed to load. Generate it again.', 'destructive')
                 }}
               />
-            ) : generating ? (
-              <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-[#1A1A1A] text-white">
-                <div className="h-7 w-7 animate-spin rounded-full border-2 border-white/20 border-t-white" />
-                <p className="text-sm font-medium">Generating video preview...</p>
-              </div>
             ) : (currentOffering?.outputImageUrl ?? currentOffering?.uploadedFileUrl) ? (
               <img
                 src={currentOffering.outputImageUrl ?? currentOffering.uploadedFileUrl ?? ''}
@@ -166,10 +285,48 @@ export default function Step5Video() {
             ) : (
               <div className="h-full w-full bg-[#1A1A1A]" />
             )}
-            {!videoReady && !playing && (
+            {!videoReady && !playing && !generating && (
               <div className="absolute inset-0 flex items-center justify-center">
                 <div className="flex items-center justify-center rounded-full bg-white/20 transition-colors duration-[120ms] hover:bg-white/30" style={{ width: 48, height: 48 }}>
                   <Play className="ml-0.5 text-white" style={{ width: 18, height: 18 }} />
+                </div>
+              </div>
+            )}
+            {generating && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/55 px-8 text-white backdrop-blur-[1px]">
+                <div className="w-full max-w-sm">
+                  <div className="mb-4 flex items-center justify-between gap-4">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <Loader2 className="shrink-0 animate-spin text-white" style={{ width: 18, height: 18 }} />
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold">Generating video</p>
+                        <p className="text-xs text-white/70">{formatDuration(elapsedSeconds)} elapsed</p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      title="Refresh estimate"
+                      aria-label="Refresh estimate"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        startGenerationTimer()
+                      }}
+                      className="flex shrink-0 items-center justify-center rounded-full border border-white/20 bg-white/10 text-white transition-colors duration-[120ms] hover:bg-white/20"
+                      style={{ width: 34, height: 34 }}
+                    >
+                      <RotateCcw style={{ width: 15, height: 15 }} />
+                    </button>
+                  </div>
+                  <div className="mb-2 h-2 overflow-hidden rounded-full bg-white/20">
+                    <div
+                      className="h-full rounded-full bg-[#1450F5] transition-[width] duration-1000 ease-linear"
+                      style={{ width: `${progressPercent}%` }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-xs text-white/80">
+                    <span>{progressPercent}%</span>
+                    <span>About {formatDuration(remainingSeconds)} left</span>
+                  </div>
                 </div>
               </div>
             )}
@@ -217,14 +374,22 @@ export default function Step5Video() {
         </div>
       </div>
 
-      <div className="mt-8 flex justify-end">
+      <div className="mt-8 flex justify-end gap-3">
         <button
-          onClick={handleContinue}
+          onClick={handleGeneratePreview}
           disabled={generating}
           className="rounded-lg bg-[#1450F5] px-6 text-[13px] font-semibold text-white transition-all duration-[150ms] hover:bg-[#1040D0] hover:shadow-md hover:shadow-[#1450F5]/20 disabled:cursor-not-allowed disabled:opacity-40"
           style={{ height: 38 }}
         >
-          {generating ? 'Generating...' : videoReady ? 'Continue' : 'Generate Preview'}
+          {generating ? 'Generating...' : 'Generate Preview'}
+        </button>
+        <button
+          onClick={handleContinue}
+          disabled={!videoReady || generating}
+          className="rounded-lg bg-[#0A0A0A] px-6 text-[13px] font-semibold text-white transition-all duration-[150ms] hover:bg-[#262626] disabled:cursor-not-allowed disabled:opacity-40"
+          style={{ height: 38 }}
+        >
+          Continue
         </button>
       </div>
 
@@ -235,4 +400,16 @@ export default function Step5Video() {
       `}</style>
     </div>
   )
+}
+
+function summarizeVideoError(message: string) {
+  if (message.includes('No CUDA GPUs are available') || message.includes('sees no GPU')) {
+    return 'Wan2.2 needs CUDA, but the Wan Python environment cannot see a GPU. Check the Python logic terminal.'
+  }
+  const missingModule = message.match(/No module named ['"]([^'"]+)['"]/)
+  if (missingModule?.[1]) {
+    return `Wan2.2 is missing Python dependency: ${missingModule[1]}`
+  }
+  const firstLine = message.split('\n').find(line => line.trim())?.trim() || message
+  return firstLine.length > 240 ? `${firstLine.slice(0, 237)}...` : firstLine
 }

@@ -1,11 +1,10 @@
-import { lazy, Suspense } from 'react'
+import { lazy, Suspense, useEffect } from 'react'
 import { createBrowserRouter, RouterProvider, Navigate, Outlet } from 'react-router-dom'
 import { AppShell } from '../components/layout/AppShell'
 import { useAuthStore } from '../store/authStore'
 
 const LandingPage = lazy(() => import('../pages/landing/LandingPage'))
 const SignInPage = lazy(() => import('../pages/auth/SignInPage'))
-const SignUpPage = lazy(() => import('../pages/auth/SignUpPage'))
 const ProjectsPage = lazy(() => import('../pages/projects/ProjectsPage'))
 const ProjectDetailPage = lazy(() => import('../pages/projects/ProjectDetailPage'))
 const OfferingShell = lazy(() => import('../pages/offering/OfferingShell'))
@@ -21,6 +20,16 @@ function PublicOnlyGuard() {
   const { isAuthenticated } = useAuthStore()
   if (isAuthenticated) return <Navigate to="/projects" replace />
   return <Outlet />
+}
+
+function GuestRedirect() {
+  const continueAsGuest = useAuthStore(s => s.continueAsGuest)
+
+  useEffect(() => {
+    continueAsGuest()
+  }, [continueAsGuest])
+
+  return <Navigate to="/projects" replace />
 }
 
 function FullPageLoader() {
@@ -48,8 +57,12 @@ const router = createBrowserRouter([
         element: <Suspense fallback={<FullPageLoader />}><SignInPage /></Suspense>,
       },
       {
+        path: '/guest',
+        element: <GuestRedirect />,
+      },
+      {
         path: '/signup',
-        element: <Suspense fallback={<FullPageLoader />}><SignUpPage /></Suspense>,
+        element: <Navigate to="/signin" replace />,
       },
     ],
   },

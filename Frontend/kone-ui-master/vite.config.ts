@@ -29,7 +29,9 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       port: 3000,
+      host: true,
       open: true,
+      allowedHosts: ['sales-nxt.app', '.sales-nxt.app', '.trycloudflare.com'],
       proxy: {
         ...(enableMockApi
           ? {}
@@ -44,6 +46,10 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
         },
         '/storage': {
+          target: env.VITE_API_BASE_URL?.replace('/api/v1', '') || 'http://localhost:4000',
+          changeOrigin: true,
+        },
+        '/uploads': {
           target: env.VITE_API_BASE_URL?.replace('/api/v1', '') || 'http://localhost:4000',
           changeOrigin: true,
         },

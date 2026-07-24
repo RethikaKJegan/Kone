@@ -53,7 +53,7 @@ detection:
   min_box_area_ratio: 0.00005
   max_box_area_ratio: 0.90
   labels:
-    - tall stainless steel elevator operating panel with round buttons
+    - car operating panel
     - elevator call button panel
     - wheelchair button
     - floor_indicator_display
@@ -89,12 +89,12 @@ removal:
   # These detections become the LaMa mask. Tune this list per job.
   target_keywords:
     - elevator panel
-    - tall stainless steel elevator operating panel with round buttons
+    - car operating panel
     - elevator call button panel
     - call button
     - speaker
   mask_padding_px: 10
-  box_mask_padding_px: 2
+  box_mask_padding_px: 3
   mask_dilate_iterations: 2
   cleanup_engine: auto       # auto, lama, wall_patch, or opencv
   wall_sample_margin_px: 55
@@ -118,28 +118,30 @@ insertion:
   placement: detection
   target_keywords:
     - elevator panel
-    - tall stainless steel elevator operating panel with round buttons
+    - car operating panel
     - elevator call button panel
     - call button
     - speaker
   manual_box_xyxy: null     # Example: [95, 415, 140, 560]
   fallback_box_ratio_xyxy: [0.145, 0.39, 0.255, 0.61]
-  adjacent_wall_min_margin_ratio: 0.055
-  size_mode: fit_box         # fit_box, preserve_asset, or fixed_height
+  adjacent_wall_side: right
+  adjacent_wall_min_margin_ratio: 0.075
+  size_mode: fit_box
   fixed_height_px: null
   allow_upscale: false
   native_reference_width_px: 600
   native_reference_height_px: 800
-  target_height_multiplier: 1.55
+  target_height_multiplier: 1.0
   scale_multiplier: 1.0
-  top_shrink: 0.015
-  side_skew: 0.008
+  top_shrink: 0.0
+  side_skew: 0.0
   large_edge_feather_px: 5
   large_edge_protect_px: 14
   large_component_area_ratio: 0.18
   shadow_strength: 0.12
   texture_strength: 0.04
   max_shadow_radius_px: 18
+  homography_max_local_shear: 0.03
 
 perspective_mod_placement:
   # Runs after normal MOD insertion. In auto mode, wall-plane corners and the
@@ -166,17 +168,67 @@ refinement:
 
 video:
   enabled: true
+  engine: opencv
+  motion_style: pan_l_r
+  quality: 720p
+  quality_mode: best
+  duration_seconds: 5
   action: auto              # auto, open, or close
   cycle: true               # true = animate to the opposite state and back
   open_reference_image: null   # optional: image showing the elevator interior/cabin when doors are open
+  door_open_interior_image: tests/images/default_door_open_interior.png
+  default_door_image: tests/images/default_door.png
   closed_reference_image: null # optional: image showing the closed elevator doors/exterior
-  fps: 30
+  fps: 24
+  seed: 42
   bitrate: 10000k
   no_audio: false
   refine_elevator_roi: true
   rectify_tilted_elevator: true
   max_wall_fraction_in_roi: 0.15
   preserve_static_wall_outside_roi: true
+  wan:
+    enabled: false
+    model_key: wan22_14b_i2v
+    task: i2v-14B
+    mode: image_to_video
+    size: "1280*720"
+    sample_steps: 4
+    sample_shift: 5
+    sample_guide_scale: null
+    fps: 24
+    duration_seconds: 5
+    repo_dir: /root/wan22_install/Wan2.2
+    checkpoint_dir: /root/wan22_install/Wan2.2/Wan2.2-I2V-A14B
+    high_noise_model: high_noise_model
+    low_noise_model: low_noise_model
+    t5_checkpoint: models_t5_umt5-xxl-enc-bf16.pth
+    t5_tokenizer: google/umt5-xxl
+    vae_checkpoint: Wan2.1_VAE.pth
+    offload_model: true
+    t5_cpu: true
+    prompt_extension: false
+    negative_prompt: "blurry, warped elevator geometry, distorted doors, low quality, cartoon, CGI, flicker, unstable lighting"
+  comfy:
+    url: http://127.0.0.1:8188
+    root_dir: /root/vdotest/ComfyUI
+    workflow_dir: /root/vdotest/workflows
+    input_dir: /root/vdotest/ComfyUI/input
+    output_dir: /root/vdotest/ComfyUI/output
+    i2v_workflow: wan22_14b_i2v.json
+    flf2v_workflow: wan22_14b_flf2v.json
+    quality_mode: best
+    min_size_bytes: 1000000
+    width: 720
+    height: 960
+    length: 81
+    fps: 16
+    high_noise_model: wan2.2_i2v_high_noise_14B_fp16.safetensors
+    low_noise_model: wan2.2_i2v_low_noise_14B_fp16.safetensors
+    high_noise_lora: wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors
+    low_noise_lora: wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors
+    clip_name: umt5_xxl_fp8_e4m3fn_scaled.safetensors
+    vae_name: wan_2.1_vae.safetensors
 
 monitoring:
   interval_s: 1.0

@@ -1,0 +1,7 @@
+{
+  "engine": "camera_motion",
+  "motion": "zoom-in",
+  "quality": "1080p",
+  "prompt": "Deterministic camera motion generated from the final preview image; elevator doors and scene pixels remain unchanged.",
+  "generatedAt": "2026-06-26T15:51:52.083Z"
+}

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -31,7 +31,7 @@ export default function SignInPage() {
       await signIn(data.email, data.password)
       navigate('/projects')
     } catch (err) {
-      if (axios.isAxiosError(err) && err.response?.status === 400) {
+      if (axios.isAxiosError(err) && [400, 401, 403].includes(err.response?.status ?? 0)) {
         setError('password', { message: 'Incorrect email or password' })
       } else {
         setError('password', { message: 'Something went wrong. Try again.' })
@@ -129,21 +129,15 @@ export default function SignInPage() {
         </div>
 
         <button
+          type="button"
           onClick={handleGuest}
           className="flex w-full items-center justify-center rounded-lg border border-[#E4E4E4] bg-white text-[13px] font-semibold text-[#374151] transition-all duration-[150ms] hover:border-[#D1D5DB] hover:bg-[#F9FAFB]"
           style={{ height: 42 }}
         >
-          Continue as guest
+          Sign in as guest
         </button>
 
-        <p className="mt-6 text-center text-[12px] text-[#9CA3AF]">
-          Don't have an account?{' '}
-          <Link to="/signup" className="font-semibold text-[#1450F5] transition-colors duration-[120ms] hover:text-[#1040D0]">
-            Sign up
-          </Link>
-        </p>
-
-        <p className="mt-2 text-center text-[11px] text-[#D1D5DB]">
+        <p className="mt-6 text-center text-[11px] text-[#D1D5DB]">
           Single sign-on available for enterprise accounts
         </p>
       </div>

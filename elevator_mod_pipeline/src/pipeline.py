@@ -20,7 +20,7 @@ from .preprocess import run_preprocessing
 from .refine import maybe_refine
 from .resource_monitor import ResourceMonitor
 from .utils import load_config, load_image_rgb, load_json, save_json, save_rgb
-from .video import render_elevator_video
+from .video_router import render_video
 from .visualize import save_detection_visuals
 
 
@@ -282,7 +282,9 @@ def run(config_path: str | Path) -> None:
                 save_json(run_dir / "video_skip_debug.json", video_debug)
                 status("video_skip", "[VIDEO] Skipping video generation: no elevator door detected")
             else:
-                render_elevator_video(final_path, detections, geometry, cfg, video_path, depth_path)
+                if cfg.get("video", {}).get("engine") == "wan2.2":
+                    cfg["video"] = _wan22_video_config()
+                render_video(final_path, detections, geometry, cfg, video_path, depth_path)
                 video_debug = _load_optional_json(video_path.with_suffix(".json"))
                 video_debug["elevator_present"] = True
                 video_debug["video_generated"] = True
@@ -397,6 +399,31 @@ def component_config(cfg: dict[str, Any], replacement: dict[str, Any]) -> dict[s
         component_cfg["_requested_component_type"] = replacement["component_type"]
     component_cfg["_replacement_id"] = replacement["id"]
     return component_cfg
+
+
+def _wan22_video_config() -> dict[str, Any]:
+    return {
+        "engine": "wan2.2",
+        "mode": "motion",
+        "motion_style": "pan_l_r",
+        "fps": 16,
+        "duration_seconds": 5,
+        "wan": {
+            "enabled": True,
+            "model_key": "wan22_14b_i2v",
+            "task": "i2v-14B",
+            "size": "832*480",
+            "frame_num": 81,
+            "sample_steps": 40,
+            "sample_shift": 3.0,
+            "sample_guide_scale": None,
+            "repo_dir": "/root/wan22_install/Wan2.2",
+            "checkpoint_dir": "/root/wan22_install/Wan2.2/Wan2.2-I2V-A14B",
+            "offload_model": False,
+            "t5_cpu": False,
+            "convert_model_dtype": True,
+        },
+    }
 
 
 def write_pipeline_manifest(path: Path, detections: dict, run_dir: Path, status_entries: list[dict[str, str]]) -> None:

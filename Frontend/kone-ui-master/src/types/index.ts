@@ -38,7 +38,44 @@ export interface ComponentPin {
   aiPlaced: boolean
 }
 
-export type OfferingStatus = 'draft' | 'complete'
+export interface PerspectivePoint {
+  x: number
+  y: number
+}
+
+export type RepinFeedbackOption =
+  | 'wrong_placement'
+  | 'wrong_component'
+  | 'bad_perspective'
+  | 'bad_lighting_shadow'
+  | 'poor_blending_unrealistic'
+
+export interface RepinTransform {
+  componentKey: ComponentKey
+  componentType: ComponentKey
+  sourceVersion: number
+  targetVersion: number
+  x: number
+  y: number
+  width: number
+  height: number
+  rotation: number
+  skewX: number
+  skewY: number
+  perspective: PerspectivePoint[]
+  feedbackOption?: RepinFeedbackOption | null
+}
+
+export interface PreviewVersion {
+  version: number
+  url: string
+  createdAt?: string
+  sourceVersion?: number
+  transform?: RepinTransform
+  feedbackOption?: RepinFeedbackOption | null
+}
+
+export type OfferingStatus = 'draft' | 'active' | 'complete'
 
 export interface Offering {
   id: string
@@ -47,6 +84,10 @@ export interface Offering {
   status: OfferingStatus
   createdAt: string
   imageId: string | null
+  inputImagePath?: string | null
+  previewImagePath?: string | null
+  outputImagePath?: string | null
+  outputVideoPath?: string | null
   uploadedFileUrl: string | null
   uploadedFileName: string | null
   uploadedFileType: 'image' | 'video' | null
@@ -59,10 +100,14 @@ export interface Offering {
   videoSpeed: 0.5 | 1 | 1.5
   videoQuality: '360p' | '480p' | '720p' | '1080p'
   renderComplete: boolean
+  pipelineStatus?: 'idle' | 'uploaded' | 'processing' | 'preview_ready' | 'video_ready' | 'ready_for_download' | 'failed'
   outputImageUrl: string | null
   outputVideoUrl: string | null
+  lastError?: string | null
   savedStep?: OfferingStep
   previewRequestKey?: string | null
+  previewVersions?: PreviewVersion[]
+  repinPass?: number
   videoGenerated?: boolean
   downloadUrl?: string | null
 }

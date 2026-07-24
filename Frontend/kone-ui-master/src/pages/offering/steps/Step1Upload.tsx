@@ -1,20 +1,47 @@
 import { useState } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import axios from 'axios'
 import apiClient from '../../../api/client'
 import { getGuestSessionId, isGuestSession } from '../../../api/guestWorkflow'
 import { useOfferingStore } from '../../../store/offeringStore'
 import { UploadZone } from '../../../components/shared/UploadZone'
 import { toast } from '../../../hooks/useToast'
+import type { Offering } from '../../../types'
+
+type RestoreState = {
+  restoreToDefault?: boolean
+  projectId?: string
+  offeringId?: string
+}
+
+function inputImageUrl(offering: Offering | null) {
+  if (!offering) return null
+  if (offering.inputImagePath) return offering.inputImagePath
+  if (offering.imageId) return `/uploads/${offering.imageId}/input.jpg`
+  return offering.uploadedFileUrl ?? null
+}
 
 export default function Step1Upload() {
   const { projectId, offeringId } = useParams()
   const navigate = useNavigate()
+  const location = useLocation()
   const { currentOffering, setUpload, goToStep } = useOfferingStore()
-  const [checkStatus, setCheckStatus] = useState<'idle' | 'checking' | 'passed' | 'failed'>('idle')
+  const uploadedImageUrl = inputImageUrl(currentOffering)
+  const restoreState = location.state as RestoreState | null
+  const isScopedRestore = Boolean(
+    restoreState?.restoreToDefault &&
+    restoreState.projectId === projectId &&
+    restoreState.offeringId === offeringId &&
+    currentOffering?.projectId === projectId &&
+    currentOffering?.id === offeringId &&
+    uploadedImageUrl
+  )
+  const [checkStatus, setCheckStatus] = useState<'idle' | 'checking' | 'passed' | 'failed'>(
+    isScopedRestore ? 'passed' : 'idle'
+  )
   const [precheckReason, setPrecheckReason] = useState<string | null>(null)
 
-  const hasFile = !!currentOffering?.uploadedFileName
+  const hasFile = Boolean(currentOffering?.uploadedFileName || uploadedImageUrl)
 
   const handleFile = async (file: File) => {
     const isImage = file.type.match(/^image\/(jpeg|png)$/) || /\.(jpe?g|png)$/i.test(file.name)
@@ -34,7 +61,30 @@ export default function Step1Upload() {
   const handleCheck = async () => {
     if (!projectId || !currentOffering) return
     if (!isGuestSession()) {
-      setCheckStatus('passed')
+      if (!offeringId || currentOffering.id !== offeringId || currentOffering.projectId !== projectId) {
+        toast('Visualization state is not ready. Please reopen this visualization.', 'destructive')
+        return
+      }
+      if (!currentOffering.imageId) {
+        setCheckStatus('failed')
+        setPrecheckReason('Uploaded image is not saved correctly. Please upload it again.')
+        return
+      }
+      setCheckStatus('checking')
+      setPrecheckReason(null)
+      try {
+        const { data } = await apiClient.post('/video/precheck', {
+          imageId: currentOffering.imageId,
+        }, { timeout: 20000 })
+        setCheckStatus(data.ok ? 'passed' : 'failed')
+        setPrecheckReason(data.ok ? null : data.reason ?? data.message ?? 'Invalid image. Please upload a valid elevator image.')
+      } catch (error) {
+        const reason = axios.isAxiosError(error) && error.code === 'ECONNABORTED'
+          ? 'Image validation timed out. Please upload a clear elevator image and try again.'
+          : 'Invalid image. Please upload a valid elevator image.'
+        setCheckStatus('failed')
+        setPrecheckReason(reason)
+      }
       return
     }
     setCheckStatus('checking')
@@ -59,6 +109,10 @@ export default function Step1Upload() {
   }
 
   const handleContinue = () => {
+    if (checkStatus !== 'passed') {
+      toast('Validate the input image before continuing.', 'destructive')
+      return
+    }
     goToStep(2)
     navigate(`/projects/${projectId}/offerings/${offeringId}/step/2`)
   }
@@ -69,7 +123,7 @@ export default function Step1Upload() {
         1 &nbsp; Upload picture / video
       </h2>
 
-      {hasFile && currentOffering?.uploadedFileUrl ? (
+      {hasFile && uploadedImageUrl ? (
         <div className="space-y-3">
           <div
             className="relative cursor-pointer overflow-hidden rounded-xl bg-[#F5F6F8] ring-2 ring-transparent transition-all duration-200 hover:ring-[#1450F5]/30"
@@ -89,13 +143,13 @@ export default function Step1Upload() {
             aria-label="Click to replace uploaded file"
           >
             <img
-              src={currentOffering.uploadedFileUrl}
-              alt={currentOffering.uploadedFileName ?? 'Uploaded image'}
+              src={uploadedImageUrl}
+              alt={currentOffering?.uploadedFileName ?? 'Uploaded image'}
               className="h-full w-full object-cover transition-transform duration-300 hover:scale-[1.01]"
             />
           </div>
           <div className="flex items-center justify-between">
-            <p className="text-[13px] font-medium text-[#374151]">{currentOffering.uploadedFileName}</p>
+            <p className="text-[13px] font-medium text-[#374151]">{currentOffering?.uploadedFileName ?? 'Uploaded image'}</p>
             <p className="text-[12px] text-[#9CA3AF]">Click image to replace</p>
           </div>
         </div>

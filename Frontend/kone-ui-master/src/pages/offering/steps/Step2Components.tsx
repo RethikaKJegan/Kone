@@ -4,6 +4,7 @@ import { Check } from 'lucide-react'
 import { useOfferingStore } from '../../../store/offeringStore'
 import { KONE_COMPONENTS, ENVIRONMENTS } from '../../../lib/constants'
 import { cn } from '../../../lib/utils'
+import { toast } from '../../../hooks/useToast'
 import type { Environment, ComponentKey } from '../../../types'
 
 const ENV_COMPONENTS: Record<Environment, ComponentKey[]> = {
@@ -54,7 +55,7 @@ export default function Step2Components() {
     const newComps = withoutDoorCeilingConflict(comps.filter(c => newAvailable.includes(c)))
     setEnvs(newEnvs)
     setComps(newComps)
-    void setComponents(newEnvs, newComps)
+    //void setComponents(newEnvs, newComps)
   }
 
   const toggleComp = (k: ComponentKey) => {
@@ -70,12 +71,23 @@ export default function Step2Components() {
       return [...next, k]
     })()
     setComps(nextComps)
-    void setComponents(envs, nextComps)
+    //void setComponents(envs, nextComps)
   }
 
   const canContinue = envs.length > 0 && comps.length > 0
 
   const handleContinue = async () => {
+    const hasInputImage = Boolean(currentOffering?.imageId || currentOffering?.inputImagePath || currentOffering?.uploadedFileUrl)
+    if (!currentOffering || currentOffering.id !== offeringId || currentOffering.projectId !== projectId) {
+      toast('Visualization state is not ready. Please reopen this visualization.', 'destructive')
+      return
+    }
+    if (!hasInputImage) {
+      toast('Upload and validate an input image before selecting components.', 'destructive')
+      navigate(`/projects/${projectId}/offerings/${offeringId}/step/1`)
+      goToStep(1)
+      return
+    }
     await setComponents(envs, comps)
     goToStep(3)
     navigate(`/projects/${projectId}/offerings/${offeringId}/step/3`)

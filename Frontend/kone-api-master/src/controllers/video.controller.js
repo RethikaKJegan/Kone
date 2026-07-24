@@ -236,12 +236,601 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const generateDummyVideo = require('../utils/dummyGenerator');
+const axios = require('axios');
+const { execFile, spawn } = require('child_process');
+const { promisify } = require('util');
+const Offering = require('../models/offering.model');
+const Project = require('../models/project.model');
+const { projectService } = require('../services');
 
 const fsPromises = fs.promises;
+const execFileAsync = promisify(execFile);
+const LOGIC_URL = process.env.LOGIC_URL || 'http://localhost:8001';
+const COMFY_ROOT = process.env.COMFY_ROOT || '/root/Kone/vdotest';
+const COMFY_URL = process.env.COMFY_URL || 'http://127.0.0.1:8188';
+const COMFY_RUNNER = process.env.COMFY_RUNNER || path.join(COMFY_ROOT, 'run_i2v_api.py');
+const COMFY_START_SCRIPT = process.env.COMFY_START_SCRIPT || path.join(COMFY_ROOT, 'scripts', 'start_comfy_logged.sh');
+const COMFY_PYTHON = process.env.COMFY_PYTHON || '/usr/bin/python3';
+let comfyStartPromise = null;
 
 // in-memory guest store
 const guestJobs = new Map();
+const componentRuns = new Map();
+const repinRuns = new Map();
+
+const getUploadInputPath = (imageId) => path.join(__dirname, '..', '..', 'uploads', imageId, 'input.jpg');
+const getOutputDir = (imageId) => path.join(__dirname, '..', '..', 'output', imageId);
+const getLogicStorageDir = (userId, imageId) => path.join(__dirname, '..', '..', 'storage', 'auth', String(userId), imageId);
+
+const localOutputPathFromUrl = (url) => {
+  if (!url || typeof url !== 'string') return null;
+  const [pathname] = url.split('?');
+  if (!pathname.startsWith('/output/')) return null;
+  const outputRoot = path.resolve(__dirname, '..', '..', 'output');
+  const localPath = path.resolve(outputRoot, pathname.replace('/output/', ''));
+  return localPath.startsWith(outputRoot) ? localPath : null;
+};
+
+const fileExists = async (filePath) => {
+  try {
+    await fsPromises.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const readJsonIfExists = async (filePath) => {
+  if (!(await fileExists(filePath))) return {};
+  try {
+    return JSON.parse(await fsPromises.readFile(filePath, 'utf-8'));
+  } catch {
+    return {};
+  }
+};
+
+const isValidVideoFile = async (filePath) => {
+  if (!(await fileExists(filePath))) return false;
+  try {
+    const { stdout } = await execFileAsync(
+      'ffprobe',
+      [
+        '-v',
+        'error',
+        '-show_entries',
+        'format=duration',
+        '-of',
+        'default=noprint_wrappers=1:nokey=1',
+        filePath,
+      ],
+      { timeout: 30000 }
+    );
+    return Number(stdout.trim()) > 0;
+  } catch {
+    return false;
+  }
+};
+
+const componentPinsFromPlacement = async (storageDir) => {
+  const placements = await readJsonIfExists(path.join(storageDir, 'pipeline', 'component_placements.json'));
+  if (!Array.isArray(placements)) return [];
+  const detections = await readJsonIfExists(path.join(storageDir, 'pipeline', 'elevator_detections.json'));
+  const width = Number(detections.metadata?.image_width) || 0;
+  const height = Number(detections.metadata?.image_height) || 0;
+  if (!width || !height) return [];
+
+  const supported = new Set(['lci', 'cop', 'door', 'ceiling']);
+  return placements
+    .map((placement) => {
+      const componentKey = String(placement.id || '').toLowerCase();
+      if (!supported.has(componentKey)) return null;
+      const bbox = placement.final_insertion_bbox || placement.final_component_placement?.bbox || placement.inpaint_bbox;
+      if (!Array.isArray(bbox) || bbox.length !== 4) return null;
+      const [x1, y1, x2, y2] = bbox.map(Number);
+      if (![x1, y1, x2, y2].every(Number.isFinite)) return null;
+      return {
+        componentKey,
+        x: Math.round(((x1 + x2) / 2 / width) * 100),
+        y: Math.round(((y1 + y2) / 2 / height) * 100),
+        aiPlaced: true,
+      };
+    })
+    .filter(Boolean);
+};
+
+const runLogicComponents = async ({
+  imageId,
+  userId,
+  inputPath,
+  components,
+  componentAssets,
+  environments,
+  previewRequestKey,
+}) => {
+  const storageDir = getLogicStorageDir(userId, imageId);
+  const uploadsDir = path.join(storageDir, 'uploads');
+  const previewDir = path.join(storageDir, 'preview');
+  const pipelineDir = path.join(storageDir, 'pipeline');
+  const outputDir = getOutputDir(imageId);
+
+  await Promise.all(
+    [uploadsDir, previewDir, pipelineDir, outputDir].map((dir) => fsPromises.mkdir(dir, { recursive: true }))
+  );
+  await fsPromises.rm(pipelineDir, { recursive: true, force: true });
+  await fsPromises.rm(previewDir, { recursive: true, force: true });
+  await Promise.all([pipelineDir, previewDir].map((dir) => fsPromises.mkdir(dir, { recursive: true })));
+  await fsPromises.copyFile(inputPath, path.join(uploadsDir, 'input.jpg'));
+
+  const { data } = await axios.post(
+    `${LOGIC_URL}/run-components`,
+    {
+      session_id: `auth_${userId}`,
+      project_id: imageId,
+      project_name: imageId,
+      storage_dir: storageDir,
+      selected_components: components,
+      component_assets: componentAssets,
+      environments,
+      preview_request_key: previewRequestKey,
+    },
+    { timeout: 0 }
+  );
+
+  if (!data?.ok) {
+    throw new Error(data?.error || 'Logic component placement failed');
+  }
+
+  await fsPromises.copyFile(path.join(previewDir, 'final_output.png'), path.join(outputDir, 'final_output.png'));
+  const pins = await componentPinsFromPlacement(storageDir);
+  return {
+    storageDir,
+    previewUrl: `/output/${imageId}/final_output.png`,
+    pins,
+  };
+};
+
+
+const normalizePreviewVersions = (offering, fallbackUrl) => {
+  const existing = Array.isArray(offering.previewVersions) ? offering.previewVersions : [];
+  if (existing.length) return existing.map((version) => typeof version.toObject === 'function' ? version.toObject() : version);
+  return fallbackUrl ? [{ version: 1, url: fallbackUrl, createdAt: new Date() }] : [];
+};
+
+const runLogicRepin = async ({ imageId, userId, transform, componentAssets, environments, previewRequestKey }) => {
+  const storageDir = getLogicStorageDir(userId, imageId);
+  const uploadsDir = path.join(storageDir, 'uploads');
+  const previewDir = path.join(storageDir, 'preview');
+  const pipelineDir = path.join(storageDir, 'pipeline');
+  const outputDir = getOutputDir(imageId);
+  await Promise.all([uploadsDir, previewDir, pipelineDir, outputDir].map((dir) => fsPromises.mkdir(dir, { recursive: true })));
+
+  const sourcePath = transform.sourceVersion > 1
+    ? path.join(outputDir, `final_output_v${transform.sourceVersion}.png`)
+    : path.join(outputDir, 'final_output.png');
+  const fallbackInput = getUploadInputPath(imageId);
+  const sourceImage = (await fileExists(sourcePath)) ? sourcePath : ((await fileExists(path.join(outputDir, 'final_output.png'))) ? path.join(outputDir, 'final_output.png') : fallbackInput);
+  await fsPromises.copyFile(sourceImage, path.join(uploadsDir, `repin_source_v${transform.sourceVersion}.png`));
+
+  const { data } = await axios.post(
+    `${LOGIC_URL}/repin-components`,
+    {
+      session_id: `auth_${userId}`,
+      project_id: imageId,
+      project_name: imageId,
+      storage_dir: storageDir,
+      selected_components: [transform.componentKey],
+      component_assets: componentAssets,
+      environments,
+      preview_request_key: previewRequestKey,
+      transform,
+    },
+    { timeout: 0 }
+  );
+
+  if (!data?.ok) throw new Error(data?.error || 'Logic repin placement failed');
+
+  const versionFile = `final_output_v${transform.targetVersion}.png`;
+  await fsPromises.copyFile(path.join(previewDir, versionFile), path.join(outputDir, versionFile));
+  await fsPromises.copyFile(path.join(previewDir, 'final_output.png'), path.join(outputDir, 'final_output.png'));
+  return {
+    storageDir,
+    previewUrl: `/output/${imageId}/${versionFile}`,
+    currentPreviewUrl: `/output/${imageId}/final_output.png`,
+    pins: await componentPinsFromPlacement(storageDir),
+  };
+};
+
+const startRepinRun = ({ offeringId, imageId, userId, transform, componentAssets, environments, previewRequestKey }) => {
+  const runKey = `${offeringId}:${previewRequestKey || `repin-v${transform.targetVersion}`}`;
+  if (repinRuns.has(runKey)) return;
+
+  const run = (async () => {
+    try {
+      const offering = await getOwnedOffering(offeringId, userId);
+      if (!offering) throw new Error('Invalid offeringId');
+      if (Number(transform.targetVersion) > 5) throw new Error('Version limit reached. Choose the best saved version to continue.');
+      const placement = await runLogicRepin({ imageId, userId, transform, componentAssets, environments, previewRequestKey });
+      const versionUrl = `${placement.previewUrl}?v=${Date.now()}`;
+      const versions = normalizePreviewVersions(offering, offering.outputImagePath || offering.outputImageUrl);
+      const nextVersion = {
+        version: Number(transform.targetVersion),
+        url: versionUrl,
+        sourceVersion: Number(transform.sourceVersion),
+        transform,
+        feedbackOption: transform.feedbackOption || null,
+        createdAt: new Date(),
+      };
+      const withoutTarget = versions.filter((version) => Number(version.version) !== Number(transform.targetVersion));
+      withoutTarget.push(nextVersion);
+      withoutTarget.sort((a, b) => Number(a.version) - Number(b.version));
+      await Offering.findByIdAndUpdate(offeringId, {
+        componentPins: placement.pins,
+        outputImageUrl: versionUrl,
+        outputImagePath: placement.currentPreviewUrl,
+        previewImagePath: placement.currentPreviewUrl,
+        previewVersions: withoutTarget,
+        repinPass: Number(transform.targetVersion),
+        outputVideoUrl: null,
+        outputVideoPath: null,
+        downloadUrl: null,
+        pipelineStatus: 'preview_ready',
+        savedStep: 4,
+        status: 'active',
+        lastError: null,
+        previewRequestKey,
+      });
+    } catch (error) {
+      await Offering.findByIdAndUpdate(offeringId, {
+        pipelineStatus: 'failed',
+        lastError: error.message,
+        previewRequestKey,
+      });
+    } finally {
+      repinRuns.delete(runKey);
+    }
+  })();
+
+  repinRuns.set(runKey, run);
+};
+
+const getOwnedOffering = async (offeringId, userId) => {
+  if (!offeringId) return null;
+  const offering = await Offering.findById(offeringId);
+  if (!offering) return null;
+  const project = await Project.findById(offering.projectId);
+  if (!project || project.userId.toString() !== userId) return null;
+  return offering;
+};
+
+const runUploadPrecheck = async (req, res) => {
+  try {
+    const { imageId } = req.body;
+    const inputPath = getUploadInputPath(imageId);
+    if (!(await fileExists(inputPath))) {
+      return res.status(404).json({
+        ok: false,
+        next_action: 'reupload',
+        reason: 'Uploaded image was not found. Please upload the image again.',
+      });
+    }
+
+    const storageDir = getLogicStorageDir(req.user.id, imageId);
+    const uploadsDir = path.join(storageDir, 'uploads');
+    await fsPromises.mkdir(uploadsDir, { recursive: true });
+    await fsPromises.copyFile(inputPath, path.join(uploadsDir, 'input.jpg'));
+
+    const { data } = await axios.post(
+      `${LOGIC_URL}/precheck`,
+      {
+        session_id: `auth_${req.user.id}`,
+        project_id: imageId,
+        project_name: imageId,
+        storage_dir: storageDir,
+      },
+      { timeout: 20000 }
+    );
+
+    return res.status(200).json(data);
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      next_action: 'reupload',
+      reason: error.message || 'Image validation failed. Please try again.',
+    });
+  }
+};
+
+const startComponentRun = ({ offeringId, imageId, userId, inputPath, components, componentAssets, environments, previewRequestKey }) => {
+  const runKey = `${offeringId}:${previewRequestKey || 'default'}`;
+  if (componentRuns.has(runKey)) return;
+
+  const run = (async () => {
+    try {
+      const placement = await runLogicComponents({
+        imageId,
+        userId,
+        inputPath,
+        components,
+        componentAssets,
+        environments,
+        previewRequestKey,
+      });
+      const previewUrl = `${placement.previewUrl}?v=${Date.now()}`;
+      await Offering.findByIdAndUpdate(offeringId, {
+        componentPins: placement.pins,
+        outputImageUrl: previewUrl,
+        outputImagePath: placement.previewUrl,
+        previewImagePath: placement.previewUrl,
+        outputVideoUrl: null,
+        outputVideoPath: null,
+        downloadUrl: null,
+        pipelineStatus: 'preview_ready',
+        savedStep: 3,
+        status: 'active',
+        lastError: null,
+        previewRequestKey,
+      });
+    } catch (error) {
+      await Offering.findByIdAndUpdate(offeringId, {
+        componentPins: [],
+        outputImageUrl: null,
+        outputImagePath: null,
+        outputVideoUrl: null,
+        outputVideoPath: null,
+        downloadUrl: null,
+        pipelineStatus: 'failed',
+        lastError: error.message,
+        previewRequestKey,
+      });
+    } finally {
+      componentRuns.delete(runKey);
+    }
+  })();
+
+  componentRuns.set(runKey, run);
+};
+
+const getOrRecoverJob = async (imageId, userId) => {
+  const existing = guestJobs.get(imageId);
+  if (existing) return existing;
+
+  const inputPath = getUploadInputPath(imageId);
+  if (!(await fileExists(inputPath))) return null;
+
+  const recovered = {
+    inputPath,
+    userId,
+    environment: null,
+    components: null,
+  };
+  guestJobs.set(imageId, recovered);
+  return recovered;
+};
+
+const VIDEO_PROMPTS = {
+  'zoom-in': 'Ultra-photorealistic smartphone video generated from the exact input image. The ONLY motion is the CAMERA performing a smooth, continuous handheld push-in (forward dolly) toward the elevator over the entire clip. The camera physically moves forward approximately 1-2 meters while maintaining the elevator perfectly centered, making the elevator gradually become larger in frame from beginning to end. This is NOT a digital zoom—the camera itself moves closer with natural perspective change and realistic parallax.The operator stands still except for the slow forward camera movement. Natural handheld micro-shake, subtle breathing motion, slight vertical walking bob, realistic smartphone stabilization, tiny autofocus breathing, and smooth exposure adaptation. Camera movement is slow, steady, and cinematic with no sudden acceleration.The elevator doors remain COMPLETELY CLOSED throughout the entire video with absolutely zero opening, closing, vibration, or movement. Preserve the exact wall textures, marble panels, stainless-steel reflections, lighting, floor tiles, elevator button panel, ceiling lights, signage, and all architectural geometry exactly as in the input image.No people enter the frame. No moving objects. No added objects. No text overlays. No environmental changes. No camera rotation beyond tiny natural handheld sway. No panning, tilting, or orbiting. Only a straight forward dolly-in.Shot on a modern smartphone (iPhone 15 Pro / Google Pixel), 24 fps, realistic rolling shutter, authentic indoor lighting, physically accurate reflections, true-to-life colors, subtle sensor noise, realistic depth changes from forward camera motion, perfect temporal consistency, documentary realism, no CGI look, no warping, no morphing, no hallucinated objects, no flickering.',
+  'pan-lr': 'realistic handheld smartphone video of an elevator lobby, the camera starts from a straight front view of the elevator and slowly arcs to the left with a subtle push-in on the left wall, the LCI panel stays clearly visible and in focus throughout the video, the elevator remains visible in the background, smooth natural camera movement, realistic indoor lighting, glossy brown wall tiles, brushed stainless steel elevator doors, natural reflections, stable perspective, no zoom jump, no sudden camera shake, photorealistic, documentary style, as if recorded by a person on a phone',
+  'pan-rl':'realistic handheld smartphone video of an elevator lobby, the camera starts from a straight front view of the elevator and slowly arcs to the right with a subtle push-in on the right wall, the LCI panel stays clearly visible and in focus throughout the video, the elevator remains visible in the background, smooth natural camera movement, realistic indoor lighting, glossy brown wall tiles, brushed stainless steel elevator doors, natural reflections, stable perspective, no zoom jump, no sudden camera shake, photorealistic, documentary style, as if recorded by a person on a phone',
+  'door-functionality':'the elevator doors open smoothly from fully closed to fully open, realistic handheld smartphone video of an elevator door in an indoor building corridor, fixed camera position, natural indoor lighting, brushed stainless steel elevator doors moving smoothly, realistic reflections on metal, subtle real world camera noise, stable perspective'
+};
+
+const VIDEO_NEGATIVE_PROMPT = [
+  'cartoon',
+  'animation',
+  'CGI',
+  '3d render',
+  'fake render',
+  'warped elevator',
+  'distorted doors',
+  'bending metal',
+  'changing wall panels',
+  'duplicated elevator doors',
+  'extra panels',
+  'flickering display',
+  'unreadable display',
+  'blurry',
+  'low quality',
+  'heavy camera shake',
+  'fast pan',
+  'jump cut',
+  'sudden zoom',
+  'sudden lighting change',
+  'people',
+  'watermark',
+  'logo',
+  'added text',
+].join(', ');
+
+const VIDEO_STATIC_DOOR_NEGATIVE_PROMPT = [
+  VIDEO_NEGATIVE_PROMPT,
+  'opening elevator doors',
+  'closing elevator doors',
+  'sliding elevator doors',
+  'elevator door motion',
+  'moving door panels',
+  'cabin reveal',
+  'changing elevator door state',
+].join(', ');
+
+const normalizeVideoMotion = (value) => {
+  const normalized = String(value || '').trim().toLowerCase().replace(/_/g, '-');
+  if (normalized === 'door-functionality') return 'door-functionality';
+  if (normalized === 'pan-l-r' || normalized === 'pan-left-right') return 'pan-lr';
+  if (normalized === 'pan-r-l' || normalized === 'pan-right-left') return 'pan-rl';
+  if (['zoom-in', 'pan-lr', 'pan-rl'].includes(normalized)) return normalized;
+  return null;
+};
+
+const videoMotionForOptions = (videoOptions = {}) => {
+  return normalizeVideoMotion(videoOptions.mode)
+    || normalizeVideoMotion(videoOptions.motion)
+    || normalizeVideoMotion(videoOptions.motionStyle)
+    || 'zoom-in';
+};
+
+const videoPromptForOptions = (videoOptions = {}) => {
+  const motion = videoMotionForOptions(videoOptions);
+  return VIDEO_PROMPTS[motion] || VIDEO_PROMPTS['zoom-in'];
+};
+
+const videoNegativePromptForOptions = (videoOptions = {}) => {
+  return videoMotionForOptions(videoOptions) === 'door-functionality'
+    ? VIDEO_NEGATIVE_PROMPT
+    : VIDEO_STATIC_DOOR_NEGATIVE_PROMPT;
+};
+
+const qualityDimensions = (quality) => {
+  switch (quality) {
+    case '360p':
+      return { width: 360, height: 640 };
+    case '480p':
+      return { width: 480, height: 640 };
+    case '720p':
+      return { width: 640, height: 854 };
+    case '1080p':
+    default:
+      return { width: 720, height: 960 };
+  }
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const isComfyAlive = async () => {
+  try {
+    await axios.get(`${COMFY_URL}/system_stats`, { timeout: 2500 });
+    return true;
+  } catch (_) {
+    return false;
+  }
+};
+
+const ensureComfyRunning = async () => {
+  if (await isComfyAlive()) return;
+  if (comfyStartPromise) return comfyStartPromise;
+
+  comfyStartPromise = (async () => {
+    if (!(await fileExists(COMFY_START_SCRIPT))) {
+      throw new Error(`ComfyUI start script not found at ${COMFY_START_SCRIPT}`);
+    }
+
+    const child = spawn('bash', [COMFY_START_SCRIPT], {
+      cwd: COMFY_ROOT,
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+
+    for (let attempt = 0; attempt < 90; attempt += 1) {
+      await sleep(2000);
+      if (await isComfyAlive()) return;
+    }
+
+    throw new Error('ComfyUI did not start on port 8188 within 3 minutes. Check /root/Kone/vdotest/logs.');
+  })().finally(() => {
+    comfyStartPromise = null;
+  });
+
+  return comfyStartPromise;
+};
+
+const generateComfyVideo = async ({ inputPath, outputDir, videoOptions }) => {
+  await ensureComfyRunning();
+
+  const pythonPath = (await fileExists(COMFY_PYTHON)) ? COMFY_PYTHON : '/usr/bin/python3';
+  const outputVideoPath = path.join(outputDir, 'elevator_animation.mp4');
+  const metadataPath = path.join(outputDir, 'elevator_animation.json');
+  const { width, height } = qualityDimensions(videoOptions.quality);
+  const prompt = videoPromptForOptions(videoOptions);
+  const negativePrompt = videoNegativePromptForOptions(videoOptions);
+  const motion = videoMotionForOptions(videoOptions);
+  const quality = videoOptions.quality || '1080p';
+  const workflow = 'wan_i2v';
+  const seed = Math.floor(Date.now() % 1000000000);
+  const existingMeta = await readJsonIfExists(metadataPath);
+
+  if (
+    (await isValidVideoFile(outputVideoPath)) &&
+    existingMeta.engine === 'comfy_wan' &&
+    existingMeta.motion === motion &&
+    existingMeta.quality === quality &&
+    existingMeta.workflow === workflow &&
+    existingMeta.prompt === prompt
+  ) {
+    return;
+  }
+
+  try {
+    await fsPromises.rm(outputVideoPath, { force: true });
+    await execFileAsync(
+      pythonPath,
+      [
+        COMFY_RUNNER,
+        '--image',
+        inputPath,
+        '--prompt',
+        prompt,
+        '--negative',
+        negativePrompt,
+        '--comfy-url',
+        COMFY_URL,
+        '--width',
+        String(width),
+        '--height',
+        String(height),
+        '--length',
+        String(81),
+        '--fps',
+        '16',
+        '--seed',
+        String(seed),
+        '--motion',
+        motion,
+        '--wait',
+        '--output',
+        outputVideoPath,
+      ],
+      {
+        cwd: COMFY_ROOT,
+        timeout: 0,
+        maxBuffer: 1024 * 1024 * 20,
+      }
+    );
+  } catch (error) {
+    const message = error.stderr || error.stdout || error.message || 'ComfyUI video generation failed';
+    throw new Error(message);
+  }
+
+  if (!(await isValidVideoFile(outputVideoPath))) {
+    throw new Error('ComfyUI completed but did not produce a valid elevator_animation.mp4');
+  }
+
+  await fsPromises.writeFile(
+    metadataPath,
+    JSON.stringify(
+      {
+        engine: 'comfy_wan',
+        motion,
+        quality,
+        workflow,
+        raw_video_options: videoOptions,
+        selected_prompt_key: motion,
+        prompt,
+        negative_prompt: negativePrompt,
+        comfy: {
+          url: COMFY_URL,
+          width,
+          height,
+          length: 81,
+          fps: 16,
+          seed,
+        },
+        generatedAt: new Date().toISOString(),
+      },
+      null,
+      2
+    )
+  );
+};
 
 /* STEP 1 - Upload Image */
 const uploadImage = async (req, res) => {
@@ -288,7 +877,7 @@ const selectEnvironment = async (req, res) => {
   try {
     const { imageId, environment } = req.body;
 
-    const job = guestJobs.get(imageId);
+    const job = await getOrRecoverJob(imageId, req.user.id);
 
     if (!job) {
       return res.status(404).json({
@@ -321,9 +910,16 @@ const selectEnvironment = async (req, res) => {
 /* STEP 3 - Select Components */
 const selectComponents = async (req, res) => {
   try {
-    const { imageId, components } = req.body;
+    const {
+      imageId,
+      offeringId,
+      components,
+      environments = [],
+      component_assets: componentAssets = {},
+      preview_request_key: previewRequestKey = null,
+    } = req.body;
 
-    const job = guestJobs.get(imageId);
+    const job = await getOrRecoverJob(imageId, req.user.id);
 
     if (!job) {
       return res.status(404).json({
@@ -338,12 +934,68 @@ const selectComponents = async (req, res) => {
       });
     }
 
+    const offering = await getOwnedOffering(offeringId, req.user.id);
+    if (!offering) {
+      return res.status(404).json({
+        success: false,
+        message: 'Invalid offeringId',
+      });
+    }
+
+    const effectiveEnvironments = environments.length ? environments : job.environment ? [job.environment] : [];
+
+    if (
+      offering.previewRequestKey === previewRequestKey &&
+      offering.pipelineStatus === 'preview_ready' &&
+      offering.outputImageUrl
+    ) {
+      return res.status(200).json({
+        success: true,
+        status: 'preview_ready',
+        selectedComponents: components,
+        preview_url: offering.outputImageUrl,
+        component_pins: offering.componentPins,
+        preview_request_key: previewRequestKey,
+      });
+    }
+
     job.components = components;
     guestJobs.set(imageId, job);
 
+    await Offering.findByIdAndUpdate(offeringId, {
+      environments: effectiveEnvironments,
+      selectedComponents: components,
+      componentPins: [],
+      activeAnnotationFilters: components,
+      outputImageUrl: null,
+      outputImagePath: null,
+      outputVideoUrl: null,
+      outputVideoPath: null,
+      downloadUrl: null,
+      pipelineStatus: 'processing',
+      lastError: null,
+      savedStep: 3,
+      status: 'active',
+      previewRequestKey,
+    });
+    await projectService.refreshProjectStatus(offering.projectId);
+
+    startComponentRun({
+      offeringId,
+      imageId,
+      userId: req.user.id,
+      inputPath: job.inputPath,
+      components,
+      componentAssets,
+      environments: effectiveEnvironments,
+      previewRequestKey,
+    });
+
     return res.status(200).json({
       success: true,
+      status: 'processing',
       selectedComponents: components,
+      preview_request_key: previewRequestKey,
     });
   } catch (error) {
     return res.status(500).json({
@@ -353,18 +1005,93 @@ const selectComponents = async (req, res) => {
   }
 };
 
+
+const repinPreview = async (req, res) => {
+  try {
+    const {
+      imageId,
+      offeringId,
+      components = [],
+      environments = [],
+      component_assets: componentAssets = {},
+      preview_request_key: previewRequestKey = null,
+      transform,
+    } = req.body;
+
+    if (!transform || !transform.componentKey) {
+      return res.status(400).json({ success: false, message: 'Repin transform is required' });
+    }
+    const job = await getOrRecoverJob(imageId, req.user.id);
+    if (!job) {
+      return res.status(404).json({ success: false, message: 'Invalid imageId' });
+    }
+    if (job.userId !== req.user.id) {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+    const offering = await getOwnedOffering(offeringId, req.user.id);
+    if (!offering) {
+      return res.status(404).json({ success: false, message: 'Invalid offeringId' });
+    }
+    if (Number(transform.targetVersion) > 5) {
+      return res.status(400).json({ success: false, message: 'Version limit reached. Choose the best saved version to continue.' });
+    }
+
+    await Offering.findByIdAndUpdate(offeringId, {
+      selectedComponents: components.length ? components : offering.selectedComponents,
+      environments: environments.length ? environments : offering.environments,
+      outputVideoUrl: null,
+      outputVideoPath: null,
+      downloadUrl: null,
+      pipelineStatus: 'processing',
+      lastError: null,
+      savedStep: 4,
+      status: 'active',
+      previewRequestKey,
+    });
+
+    startRepinRun({
+      offeringId,
+      imageId,
+      userId: req.user.id,
+      transform,
+      componentAssets,
+      environments: environments.length ? environments : offering.environments,
+      previewRequestKey,
+    });
+
+    return res.status(200).json({ success: true, status: 'processing', preview_request_key: previewRequestKey });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 /* STEP 4 - Generate Video */
 const generateVideo = async (req, res) => {
   try {
     const { imageId } = req.body;
 
-    const job = guestJobs.get(imageId);
+    const { sourceImageUrl, videoOptions = {} } = req.body;
+    let job = await getOrRecoverJob(imageId, req.user.id);
+    const outputDir = getOutputDir(imageId);
 
     if (!job) {
-      return res.status(404).json({
-        success: false,
-        message: 'Invalid imageId',
-      });
+      const sourceImagePath = localOutputPathFromUrl(sourceImageUrl);
+      const fallbackInputPath = sourceImagePath && (await fileExists(sourceImagePath))
+        ? sourceImagePath
+        : path.join(outputDir, 'final_output.png');
+      if (await fileExists(fallbackInputPath)) {
+        job = {
+          inputPath: fallbackInputPath,
+          userId: req.user.id,
+          environment: null,
+          components: null,
+        };
+      } else {
+        return res.status(404).json({
+          success: false,
+          message: 'Uploaded image is no longer available. Please re-upload the image and try again.',
+        });
+      }
     }
     if (job.userId !== req.user.id) {
       return res.status(403).json({
@@ -373,21 +1100,27 @@ const generateVideo = async (req, res) => {
       });
     }
 
-    const uploadsDir = path.join(__dirname, '..', '..', 'uploads', imageId);
-    const outputDir = path.join(__dirname, '..', '..', 'output', imageId);
-
     await fsPromises.mkdir(outputDir, { recursive: true });
 
-    const { inputPath } = job;
+    const requestedSourcePath = localOutputPathFromUrl(sourceImageUrl);
+    const inputPath = requestedSourcePath && (await fileExists(requestedSourcePath))
+      ? requestedSourcePath
+      : job.inputPath;
 
-    // Save original image
-    await fsPromises.copyFile(inputPath, path.join(outputDir, '01_original.jpg'));
-    // Stub final output — copy of input until real pipeline runs
-    await fsPromises.copyFile(inputPath, path.join(outputDir, 'final_output.png'));
+    const originalOutputPath = path.join(outputDir, '01_original.jpg');
+    const finalOutputPath = path.join(outputDir, 'final_output.png');
+    if (path.resolve(inputPath) !== path.resolve(originalOutputPath)) {
+      await fsPromises.copyFile(inputPath, originalOutputPath);
+    }
+    if (path.resolve(inputPath) !== path.resolve(finalOutputPath)) {
+      await fsPromises.copyFile(inputPath, finalOutputPath);
+    }
 
-    // Generate dummy video
-    const video = await generateDummyVideo();
-    await fsPromises.writeFile(path.join(outputDir, 'elevator_animation.mp4'), video.videoBuffer);
+    await generateComfyVideo({
+      inputPath: finalOutputPath,
+      outputDir,
+      videoOptions,
+    });
 
     // Write manifest
     await fsPromises.writeFile(
@@ -404,9 +1137,6 @@ const generateVideo = async (req, res) => {
         2
       )
     );
-
-    // Clean up only the uploads folder for this imageId
-    await fsPromises.rm(uploadsDir, { recursive: true, force: true });
 
     // Clear memory
     guestJobs.delete(imageId);
@@ -426,7 +1156,9 @@ const generateVideo = async (req, res) => {
 
 module.exports = {
   uploadImage,
+  runUploadPrecheck,
   selectEnvironment,
   selectComponents,
+  repinPreview,
   generateVideo,
 };

@@ -44,7 +44,7 @@ export function ImageCanvas({ imageUrl, pins, selectedComponent, labels, onPinMo
           <div className="w-full h-full bg-[#1A1A1A]" />
         )}
 
-        {pins.map(pin => {
+        {showAnnotations && pins.map(pin => {
           const isSelected = pin.componentKey === selectedComponent
           return (
             <div
@@ -54,12 +54,10 @@ export function ImageCanvas({ imageUrl, pins, selectedComponent, labels, onPinMo
               aria-label={`${labels[pin.componentKey]} pin at ${pin.x}% ${pin.y}%`}
             >
               <div className="relative -translate-x-1/2 -translate-y-full">
-                {showAnnotations && (
-                  <div className="mb-1 flex items-center gap-1 rounded-[4px] bg-[rgba(10,10,10,0.88)] px-2 py-0.5 text-[11px] font-medium text-white whitespace-nowrap shadow-lg">
-                    {pin.aiPlaced && <span className="text-[#1450F5]">✦</span>}
-                    {labels[pin.componentKey]}
-                  </div>
-                )}
+                <div className="mb-1 flex items-center gap-1 rounded-[4px] bg-[rgba(10,10,10,0.88)] px-2 py-0.5 text-[11px] font-medium text-white whitespace-nowrap shadow-lg">
+                  {pin.aiPlaced && <span className="text-[#1450F5]">✦</span>}
+                  {labels[pin.componentKey]}
+                </div>
               </div>
               <div
                 className={cn(

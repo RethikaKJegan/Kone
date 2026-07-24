@@ -1549,7 +1549,7 @@ def estimate_local_wall_orientation(image_rgb: np.ndarray | None, box: list[int]
 
     vertical_slopes: list[float] = []
     horizontal_slopes: list[float] = []
-    for line in lines[:, 0]:
+    for line in np.asarray(lines).reshape(-1, 4):
         lx1, ly1, lx2, ly2 = [float(v) for v in line]
         dx, dy = lx2 - lx1, ly2 - ly1
         length = float(np.hypot(dx, dy))

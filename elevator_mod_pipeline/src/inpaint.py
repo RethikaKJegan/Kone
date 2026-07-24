@@ -401,8 +401,7 @@ def _run_lama(image: np.ndarray, mask: np.ndarray, cfg: dict[str, Any]) -> np.nd
         blend_feather=int(cfg["inpainting"].get("blend_feather", 24)),
     )
 
-    with main2.autocast_for(device):
-        return main2.inpaint_image(image, mask, model_dir, device, args)
+    return main2.inpaint_image(image, mask, model_dir, device, args)
 
 
 def _resolve_existing_path(config_value: str | None, fallback: Path) -> Path:

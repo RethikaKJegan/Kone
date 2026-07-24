@@ -7,7 +7,7 @@ interface Props {
 
 const map: Record<string, string> = {
   draft: 'bg-[#F5F5F5] text-[#525252] border border-[#E4E4E4]',
-  active: 'bg-[#F5F5F5] text-[#0A0A0A] border border-[#E4E4E4]',
+  active: 'bg-[#EFF6FF] text-[#1450F5] border border-[#BFDBFE]',
   complete: 'bg-[#F0FDF4] text-[#16A34A] border border-[#DCFCE7]',
 }
 

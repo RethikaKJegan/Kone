@@ -36,8 +36,13 @@ const updateBrochure = async (offeringId, contentUpdates) => {
   return brochure;
 };
 
+const deleteBrochureByOfferingId = async (offeringId) => {
+  return Brochure.deleteMany({ offeringId });
+};
+
 module.exports = {
   getBrochureByOfferingId,
   createBrochure,
   updateBrochure,
+  deleteBrochureByOfferingId,
 };

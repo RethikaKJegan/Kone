@@ -13,7 +13,31 @@ const projectId = {
   }),
 };
 
+const updateProject = {
+  params: projectId.params,
+  body: Joi.object().keys({
+    name: Joi.string().min(2).max(80).required(),
+  }),
+};
+
+const visualizationId = {
+  params: Joi.object().keys({
+    projectId: Joi.string().custom(objectId).required(),
+    visualizationId: Joi.string().custom(objectId).required(),
+  }),
+};
+
+const updateVisualization = {
+  params: visualizationId.params,
+  body: Joi.object().keys({
+    name: Joi.string().min(2).max(80).required(),
+  }),
+};
+
 module.exports = {
   createProject,
   projectId,
+  updateProject,
+  visualizationId,
+  updateVisualization,
 };

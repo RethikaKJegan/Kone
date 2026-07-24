@@ -1,0 +1,8 @@
+{
+  "engine": "comfy_wan",
+  "motion": "pan-lr",
+  "quality": "1080p",
+  "prompt": "Photorealistic premium commercial video of the exact same elevator scene. Camera motion only: a slow controlled pan from left to right across the elevator entrance. The elevator doors stay fully closed and fixed for the entire clip; no opening, no closing, no sliding door motion, no cabin reveal. Preserve exact geometry, materials, reflections, lighting, wall panels, and product placement. Smooth lateral camera movement, no people, no added text.",
+  "negative_prompt": "cartoon, animation, CGI, 3d render, fake render, warped elevator, distorted doors, bending metal, changing wall panels, duplicated elevator doors, extra panels, flickering display, unreadable display, blurry, low quality, heavy camera shake, fast pan, jump cut, sudden zoom, sudden lighting change, people, watermark, logo, added text, opening elevator doors, closing elevator doors, sliding elevator doors, elevator door motion, moving door panels, cabin reveal, changing elevator door state",
+  "generatedAt": "2026-06-26T16:07:39.221Z"
+}

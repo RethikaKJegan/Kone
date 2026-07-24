@@ -1,10 +1,13 @@
-import { useEffect, Suspense, lazy } from 'react'
+import { useEffect, Suspense, lazy, useState } from 'react'
 import { Home } from 'lucide-react'
 import { useParams, Routes, Route, Navigate, Link, useLocation, useNavigate } from 'react-router-dom'
+import apiClient from '../../api/client'
 import { useOfferingStore } from '../../store/offeringStore'
 import { useProjectStore } from '../../store/projectStore'
 import { TopBar } from '../../components/layout/TopBar'
 import { Skeleton } from '../../components/ui/skeleton'
+import { toast } from '../../hooks/useToast'
+import type { Offering } from '../../types'
 
 const Step1 = lazy(() => import('./steps/Step1Upload'))
 const Step2 = lazy(() => import('./steps/Step2Components'))
@@ -19,9 +22,13 @@ export default function OfferingShell() {
   const navigate = useNavigate()
   const { offerings, currentOffering, currentStep, fetchOfferings, setCurrentOffering, goToStep } = useOfferingStore()
   const { projects } = useProjectStore()
+  const [loadingOffering, setLoadingOffering] = useState(false)
 
   const project = projects.find(p => p.id === projectId)
   const projectOfferings = projectId ? (offerings[projectId] ?? []) : []
+  const activeOffering = currentOffering && currentOffering.id === offeringId && currentOffering.projectId === projectId
+    ? currentOffering
+    : null
 
   useEffect(() => {
     if (projectId && projectOfferings.length === 0) {
@@ -30,16 +37,47 @@ export default function OfferingShell() {
   }, [projectId, projectOfferings.length, fetchOfferings])
 
   useEffect(() => {
-    if (!currentOffering && offeringId) {
+    let cancelled = false
+    async function loadOffering() {
+      if (!projectId || !offeringId) return
+      if (currentOffering?.id === offeringId && currentOffering.projectId === projectId) return
+
       const found = projectOfferings.find(o => o.id === offeringId)
-      if (found) setCurrentOffering(found)
+      if (found) {
+        setCurrentOffering(found)
+        return
+      }
+
+      setLoadingOffering(true)
+      try {
+        const { data } = await apiClient.get<Offering>(`/offerings/${offeringId}`)
+        if (cancelled) return
+        if (data.projectId !== projectId) {
+          toast('This visualization does not belong to the selected project.', 'destructive')
+          navigate(`/projects/${projectId}`, { replace: true })
+          return
+        }
+        setCurrentOffering(data)
+      } catch {
+        if (!cancelled) {
+          toast('Visualization not found.', 'destructive')
+          navigate(`/projects/${projectId}`, { replace: true })
+        }
+      } finally {
+        if (!cancelled) setLoadingOffering(false)
+      }
     }
-  }, [currentOffering, offeringId, projectOfferings, setCurrentOffering])
+    loadOffering()
+    return () => {
+      cancelled = true
+    }
+  }, [currentOffering?.id, currentOffering?.projectId, offeringId, projectId, projectOfferings, setCurrentOffering, navigate])
 
   useEffect(() => {
     const match = location.pathname.match(/\/step\/([1-6])$/)
     const step = match ? Number(match[1]) : null
-    const savedStep = currentOffering?.savedStep
+    if (!activeOffering) return
+    const savedStep = activeOffering.savedStep
     if (step === 1 && savedStep && savedStep > 1 && currentStep === savedStep) {
       navigate(`/projects/${projectId}/offerings/${offeringId}/step/${savedStep}`, { replace: true })
       return
@@ -47,13 +85,24 @@ export default function OfferingShell() {
     if (step && step !== currentStep) {
       goToStep(step as 1 | 2 | 3 | 4 | 5 | 6)
     }
-  }, [currentOffering?.savedStep, currentStep, goToStep, location.pathname, navigate, offeringId, projectId])
+  }, [activeOffering, currentStep, goToStep, location.pathname, navigate, offeringId, projectId])
 
   const crumbs = [
     { label: 'All Projects', to: '/projects' },
     { label: project?.name ?? 'Project', to: `/projects/${projectId}` },
-    { label: currentOffering?.name ?? 'New Visualization' },
+    { label: activeOffering?.name ?? 'New Visualization' },
   ]
+
+  if (!activeOffering || loadingOffering) {
+    return (
+      <div className="flex flex-col min-h-full">
+        <TopBar crumbs={crumbs} />
+        <div className="mx-auto max-w-4xl w-full px-6 pb-8 pt-6">
+          <Skeleton className="h-80 rounded-lg" />
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="flex flex-col min-h-full">
@@ -78,7 +127,7 @@ export default function OfferingShell() {
             <Route path="step/4" element={<Step4 />} />
             <Route path="step/5" element={<Step5 />} />
             <Route path="step/6" element={<Step6 />} />
-            <Route index element={<Navigate to={`step/${currentOffering?.savedStep ?? currentStep ?? 1}`} replace />} />
+            <Route index element={<Navigate to={`step/${activeOffering.savedStep ?? currentStep ?? 1}`} replace />} />
           </Routes>
         </Suspense>
       </div>

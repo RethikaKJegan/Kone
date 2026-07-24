@@ -11,6 +11,18 @@ const componentPinSchema = mongoose.Schema(
   { _id: false }
 );
 
+const previewVersionSchema = mongoose.Schema(
+  {
+    version: { type: Number, required: true },
+    url: { type: String, required: true },
+    createdAt: { type: Date, default: Date.now },
+    sourceVersion: { type: Number, default: null },
+    transform: { type: mongoose.Schema.Types.Mixed, default: null },
+    feedbackOption: { type: String, default: null },
+  },
+  { _id: false }
+);
+
 const offeringSchema = mongoose.Schema(
   {
     projectId: {
@@ -26,16 +38,14 @@ const offeringSchema = mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['draft', 'complete'],
+      enum: ['draft', 'active', 'complete'],
       default: 'draft',
     },
-    imageId: {
-      type: String,
-      default: null,
-    },
-    uploadedFileUrl: {
-      type: String,
-      default: null,
+    savedStep: {
+      type: Number,
+      min: 1,
+      max: 6,
+      default: 1,
     },
     uploadedFileName: {
       type: String,
@@ -43,7 +53,31 @@ const offeringSchema = mongoose.Schema(
     },
     uploadedFileType: {
       type: String,
-      enum: ['image', 'video'],
+      enum: ['image', 'video', null],
+      default: null,
+    },
+    imageId: {
+      type: String,
+      default: null,
+    },
+    inputImagePath: {
+      type: String,
+      default: null,
+    },
+    previewImagePath: {
+      type: String,
+      default: null,
+    },
+    outputImagePath: {
+      type: String,
+      default: null,
+    },
+    outputVideoPath: {
+      type: String,
+      default: null,
+    },
+    downloadZipPath: {
+      type: String,
       default: null,
     },
     environments: {
@@ -68,7 +102,7 @@ const offeringSchema = mongoose.Schema(
     },
     videoMotionStyle: {
       type: String,
-      enum: ['zoom-in', 'pan-lr', 'pan-rl'],
+      enum: ['zoom-in', 'pan-lr', 'pan-rl', 'door-functionality'],
       default: 'zoom-in',
     },
     videoSpeed: {
@@ -78,18 +112,38 @@ const offeringSchema = mongoose.Schema(
     },
     videoQuality: {
       type: String,
-      enum: ['360p', '480p', '720p', '1080p'],
       default: '1080p',
     },
-    renderComplete: {
-      type: Boolean,
-      default: false,
+    pipelineStatus: {
+      type: String,
+      enum: ['idle', 'uploaded', 'processing', 'preview_ready', 'video_ready', 'ready_for_download', 'failed'],
+      default: 'idle',
+    },
+    previewRequestKey: {
+      type: String,
+      default: null,
+    },
+    previewVersions: {
+      type: [previewVersionSchema],
+      default: [],
+    },
+    repinPass: {
+      type: Number,
+      default: 0,
     },
     outputImageUrl: {
       type: String,
       default: null,
     },
     outputVideoUrl: {
+      type: String,
+      default: null,
+    },
+    downloadUrl: {
+      type: String,
+      default: null,
+    },
+    lastError: {
       type: String,
       default: null,
     },

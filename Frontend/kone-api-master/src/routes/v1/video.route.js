@@ -24,6 +24,7 @@ const { videoController } = require('../../controllers');
 
 // STEP 1
 router.post('/upload-image', auth(), limiter, upload.single('image'), videoController.uploadImage);
+router.post('/precheck', auth(), limiter, validate(videoValidation.imageIdBody), videoController.runUploadPrecheck);
 
 // STEP 2
 router.post(
@@ -42,6 +43,8 @@ router.post(
   validate(videoValidation.selectComponents),
   videoController.selectComponents
 );
+
+router.post('/repin', auth(), limiter, validate(videoValidation.repinPreview), videoController.repinPreview);
 
 // STEP 4
 router.post('/generate', auth(), limiter, validate(videoValidation.imageIdBody), videoController.generateVideo);

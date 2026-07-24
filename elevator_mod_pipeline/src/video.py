@@ -89,7 +89,25 @@ def render_elevator_video(
     roi_debug: dict[str, Any] = {}
     LOGGER.info("[ROI] Scoring elevator candidates")
     box = detect_door_box(img, detections, geometry, depth, cfg, roi_debug)
+    replaced_door_box = load_replaced_door_box(cfg, img.shape[:2])
+    replaced_cabin_box = load_replaced_cabin_box(cfg, img.shape[:2])
+    if replaced_door_box is not None:
+        box = replaced_door_box
+        roi_debug["selected_elevator_roi"] = box
+        roi_debug["selected_source"] = "replaced_door_component_bbox"
+    elif replaced_cabin_box is not None:
+        box = replaced_cabin_box
+        roi_debug["selected_elevator_roi"] = box
+        roi_debug["selected_source"] = "replaced_cabin_component_bbox"
     state, state_debug = classify_elevator_state(detections, depth, box, img)
+    original_detected_state = state
+    if replaced_door_box is not None:
+        state = "closed"
+        state_debug["original_detected_state"] = original_detected_state
+        state_debug["state_override_reason"] = "replaced_door_final_image_is_closed_state"
+    elif replaced_cabin_box is not None:
+        state = "open"
+        state_debug["state_override_reason"] = "replaced_cabin_final_image_is_open_state"
     LOGGER.info("[ROI] Selected elevator ROI: %s score=%s", box, roi_debug.get("selected_score"))
     for rejected in roi_debug.get("rejected_candidates", []):
         LOGGER.info("[ROI] Rejected candidate: %s reason=%s", rejected.get("box"), rejected.get("reason"))
@@ -109,7 +127,40 @@ def render_elevator_video(
             second_action = "close" if first_action == "open" else "open"
             actions.append((second_action, ACTION_SECONDS[second_action]))
 
-    open_state_img, closed_state_img, source_policy = select_state_images(img, cfg, state, box)
+    replacement_door_hold_frames: list[int] | None = None
+    if replaced_door_box is not None and auto_door_functionality:
+        open_seconds, open_hold_seconds, close_seconds, closed_hold_seconds = replacement_door_open_close_timing(duration)
+        actions = [("open", open_seconds), ("close", close_seconds)]
+        first_action = "open"
+        replacement_door_hold_frames = [
+            max(4, int(round(fps * open_hold_seconds))),
+            max(4, int(round(fps * closed_hold_seconds))),
+        ]
+        state_debug["replacement_door_sequence"] = "open_hold_close_closed_hold"
+        state_debug["replacement_door_source_policy"] = "ignore_original_open_or_closed_state_and_animate_replaced_mod_door"
+        state_debug["replacement_door_timing_seconds"] = {
+            "open": open_seconds,
+            "open_hold": open_hold_seconds,
+            "close": close_seconds,
+            "closed_hold": closed_hold_seconds,
+        }
+    elif replaced_cabin_box is not None and auto_door_functionality:
+        actions = [("close", ACTION_SECONDS["close"]), ("open", ACTION_SECONDS["open"])]
+        first_action = "close"
+        state_debug["replacement_cabin_sequence"] = "close_then_open_to_replaced_interior"
+    elif replaced_door_box is None and replaced_cabin_box is None:
+        actions = fallback_door_cycle_actions(state)
+        first_action = actions[0][0]
+        state_debug["fallback_door_sequence"] = "two_full_open_close_cycles"
+
+    open_state_img, closed_state_img, source_policy = select_state_images(
+        img,
+        cfg,
+        state,
+        box,
+        replaced_door_box is not None,
+        replaced_cabin_box is not None,
+    )
     source_policy.update(reference_usage_debug(source_policy))
     state_debug.update(detection_debug(best_detection, detections, geometry, img.shape[:2]))
     state_debug.update(
@@ -175,8 +226,17 @@ def render_elevator_video(
             frame_index += 1
 
         hold_progress = 1.0
-        hold_count = mid_hold_frames if segment_index == 0 else end_hold_frames
+        hold_count = (
+            replacement_door_hold_frames[segment_index]
+            if replacement_door_hold_frames is not None and segment_index < len(replacement_door_hold_frames)
+            else (mid_hold_frames if segment_index == 0 else end_hold_frames)
+        )
         for _ in range(hold_count):
+            if replacement_door_hold_frames is not None and segment_action == "close":
+                frames.append(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+                previous = hold_progress
+                frame_index += 1
+                continue
             frames.append(
                 render_frame(
                     img,
@@ -194,7 +254,7 @@ def render_elevator_video(
             previous = hold_progress
             frame_index += 1
 
-    if auto_door_functionality:
+    if auto_door_functionality and replacement_door_hold_frames is None:
         min_frames = max(len(frames), int(round(fps * max(duration, 8.0))))
         if frames and len(frames) < min_frames:
             frames.extend([frames[-1].copy() for _ in range(min_frames - len(frames))])
@@ -344,6 +404,30 @@ def normalize_video_mode_request(video_cfg: dict[str, Any]) -> dict[str, Any]:
         "normalized_video_mode": normalized,
         "video_mode_conflict_resolution": conflict_resolution,
     }
+
+
+def replacement_door_open_close_timing(duration: float) -> tuple[float, float, float, float]:
+    target = float(np.clip(duration if duration > 0 else 8.0, 5.0, 8.0))
+    open_seconds = ACTION_SECONDS["open"]
+    close_seconds = ACTION_SECONDS["close"]
+    closed_hold_seconds = min(2.0, max(1.0, target * 0.25))
+    open_hold_seconds = target - open_seconds - close_seconds - closed_hold_seconds
+    if open_hold_seconds < 1.5:
+        deficit = 1.5 - open_hold_seconds
+        open_seconds = max(0.9, open_seconds - deficit * 0.45)
+        close_seconds = max(1.1, close_seconds - deficit * 0.55)
+        open_hold_seconds = target - open_seconds - close_seconds - closed_hold_seconds
+    return (
+        float(open_seconds),
+        float(max(1.5, open_hold_seconds)),
+        float(close_seconds),
+        float(closed_hold_seconds),
+    )
+
+
+def fallback_door_cycle_actions(state: str) -> list[tuple[str, float]]:
+    sequence = ["close", "open", "close", "open"] if state == "open" else ["open", "close", "open", "close"]
+    return [(action, ACTION_SECONDS[action]) for action in sequence]
 
 
 def resize_frames_for_quality(frames: list[np.ndarray], quality: str, mode: str = "cover") -> list[np.ndarray]:
@@ -1079,33 +1163,153 @@ def load_reference_image(cfg: dict[str, Any], kind: str) -> np.ndarray | None:
     return ref
 
 
-def select_state_images(final_img: np.ndarray, cfg: dict[str, Any], state: str, box: list[int]) -> tuple[np.ndarray, np.ndarray, dict[str, str]]:
+def load_replaced_door_box(cfg: dict[str, Any], image_shape: tuple[int, int]) -> list[int] | None:
+    return load_replaced_component_box(cfg, image_shape, "door", "elevator_door")
+
+
+def load_replaced_cabin_box(cfg: dict[str, Any], image_shape: tuple[int, int]) -> list[int] | None:
+    return load_replaced_component_box(cfg, image_shape, None, "elevator_cabin")
+
+
+def load_replaced_component_box(cfg: dict[str, Any], image_shape: tuple[int, int], replacement_id: str | None, component_type: str) -> list[int] | None:
+    run_dir = cfg.get("run_dir")
+    if not run_dir:
+        return None
+    placements_path = Path(run_dir) / "component_placements.json"
+    if not placements_path.exists():
+        return None
+    try:
+        placements = json.loads(placements_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        LOGGER.warning("[VIDEO] Could not read component placements: %s", exc)
+        return None
+    if not isinstance(placements, list):
+        return None
+    height, width = image_shape
+    for placement in placements:
+        if replacement_id is not None and str(placement.get("id", "")).lower() != replacement_id:
+            continue
+        if placement.get("requested_component_type") != component_type and placement.get("selected_replacement_target_type") != component_type:
+            continue
+        box = placement.get("final_insertion_bbox") or placement.get("final_component_placement", {}).get("bbox") or placement.get("inpaint_bbox")
+        if not box or len(box) != 4:
+            continue
+        return clamp_box([int(round(float(value))) for value in box], width, height)
+    return None
+
+
+def select_state_images(
+    final_img: np.ndarray,
+    cfg: dict[str, Any],
+    state: str,
+    box: list[int],
+    replaced_door: bool = False,
+    replaced_cabin: bool = False,
+) -> tuple[np.ndarray, np.ndarray, dict[str, str]]:
+    if replaced_door:
+        open_ref = load_default_door_open_interior(cfg, final_img.shape[:2])
+        open_state = replace_box_with_reference(final_img, open_ref, box) if open_ref is not None else final_img
+        return (
+            open_state,
+            final_img,
+            {
+                "open_state_image": "default_door_open_interior_fitted_to_replaced_door_box" if open_ref is not None else "final_image_fallback",
+                "closed_state_image": "final_replaced_door_image",
+                "open_reference_image_used": "true" if open_ref is not None else "false",
+                "closed_reference_image_used": "false",
+                "replacement_door_animation": "true",
+                "replacement_door_open_state_policy": "default_interior_independent_of_original_input_state",
+            },
+        )
+
+    if replaced_cabin:
+        closed_ref = load_default_door_image(cfg, final_img.shape[:2])
+        closed_state = replace_box_with_reference(final_img, closed_ref, box) if closed_ref is not None else final_img
+        return (
+            final_img,
+            closed_state,
+            {
+                "open_state_image": "final_replaced_cabin_image",
+                "closed_state_image": "default_door_fitted_to_replaced_cabin_box" if closed_ref is not None else "final_image_fallback",
+                "open_reference_image_used": "false",
+                "closed_reference_image_used": "true" if closed_ref is not None else "false",
+                "replacement_cabin_animation": "true",
+            },
+        )
+
     if state == "open":
-        closed_ref = load_reference_image(cfg, "closed")
+        closed_ref = load_default_door_image(cfg, final_img.shape[:2])
         closed_state = replace_box_with_reference(final_img, closed_ref, box) if closed_ref is not None else final_img
         return (
             final_img,
             closed_state,
             {
                 "open_state_image": "final_image",
-                "closed_state_image": "closed_reference_image" if closed_ref is not None else "final_image_fallback",
+                "closed_state_image": "default_door_fitted_to_original_open_interior_box" if closed_ref is not None else "final_image_fallback",
                 "open_reference_image_used": "false",
                 "closed_reference_image_used": "true" if closed_ref is not None else "false",
+                "fallback_door_animation": "open_input_close_with_default_door_reopen_original_interior",
             },
         )
 
-    open_ref = load_reference_image(cfg, "open")
+    open_ref = load_default_door_open_interior(cfg, final_img.shape[:2])
     open_state = replace_box_with_reference(final_img, open_ref, box) if open_ref is not None else final_img
     return (
         open_state,
         final_img,
         {
-            "open_state_image": "open_reference_image_fitted_to_door_box" if open_ref is not None else "final_image_fallback",
+            "open_state_image": "default_door_open_interior_fitted_to_original_closed_door_box" if open_ref is not None else "final_image_fallback",
             "closed_state_image": "final_image",
             "open_reference_image_used": "true" if open_ref is not None else "false",
             "closed_reference_image_used": "false",
+            "fallback_door_animation": "closed_input_open_with_default_interior_close_original_door",
         },
     )
+
+
+def load_default_door_open_interior(cfg: dict[str, Any], output_shape: tuple[int, int]) -> np.ndarray | None:
+    video_cfg = cfg.get("video", {})
+    path = video_cfg.get("door_open_interior_image") or video_cfg.get("open_reference_image")
+    if not path:
+        path = Path(__file__).resolve().parents[1] / "tests" / "images" / "default_door_open_interior.png"
+    else:
+        path = Path(path)
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parents[1] / path
+    img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if img is None:
+        LOGGER.warning("[VIDEO] Could not load default door open interior: %s", path)
+        return load_original_upload_image(cfg, output_shape)
+    return img
+
+
+def load_default_door_image(cfg: dict[str, Any], output_shape: tuple[int, int]) -> np.ndarray | None:
+    video_cfg = cfg.get("video", {})
+    path = video_cfg.get("default_door_image")
+    if not path:
+        path = Path(__file__).resolve().parents[1] / "tests" / "images" / "default_door.png"
+    else:
+        path = Path(path)
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parents[1] / path
+    img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if img is None:
+        LOGGER.warning("[VIDEO] Could not load default door image: %s", path)
+        return load_reference_image(cfg, "closed")
+    return img
+
+
+def load_original_upload_image(cfg: dict[str, Any], output_shape: tuple[int, int]) -> np.ndarray | None:
+    path = cfg.get("input_image")
+    if not path:
+        return None
+    img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if img is None:
+        return None
+    out_h, out_w = output_shape
+    if img.shape[:2] != (out_h, out_w):
+        img = cv2.resize(img, (out_w, out_h), interpolation=cv2.INTER_AREA)
+    return img
 
 
 def replace_box_with_reference(final_img: np.ndarray, reference_img: np.ndarray, box: list[int]) -> np.ndarray:

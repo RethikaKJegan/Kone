@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const moment = require('moment');
 const httpStatus = require('http-status');
 const config = require('../config/config');
@@ -25,22 +26,22 @@ const generateToken = (userId, expires, type, secret = config.jwt.secret) => {
   return jwt.sign(payload, secret);
 };
 
+const hashToken = (token) => crypto.createHash('sha256').update(token).digest('hex');
+
 /**
  * Save a token
  * @param {string} token
  * @param {ObjectId} userId
  * @param {Moment} expires
  * @param {string} type
- * @param {boolean} [blacklisted]
  * @returns {Promise<Token>}
  */
-const saveToken = async (token, userId, expires, type, blacklisted = false) => {
+const saveToken = async (token, userId, expires, type) => {
   const tokenDoc = await Token.create({
-    token,
-    user: userId,
-    expires: expires.toDate(),
+    tokenHash: hashToken(token),
+    userId,
+    expiresAt: expires.toDate(),
     type,
-    blacklisted,
   });
   return tokenDoc;
 };
@@ -53,9 +54,17 @@ const saveToken = async (token, userId, expires, type, blacklisted = false) => {
  */
 const verifyToken = async (token, type) => {
   const payload = jwt.verify(token, config.jwt.secret);
-  const tokenDoc = await Token.findOne({ token, type, user: payload.sub, blacklisted: false });
+  const tokenDoc = await Token.findOne({
+    tokenHash: hashToken(token),
+    type,
+    userId: payload.sub,
+    revokedAt: null,
+  });
   if (!tokenDoc) {
     throw new Error('Token not found');
+  }
+  if (tokenDoc.expiresAt < new Date()) {
+    throw new Error('Token expired');
   }
   return tokenDoc;
 };
@@ -115,6 +124,7 @@ const generateVerifyEmailToken = async (user) => {
 
 module.exports = {
   generateToken,
+  hashToken,
   saveToken,
   verifyToken,
   generateAuthTokens,

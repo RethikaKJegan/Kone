@@ -1,0 +1,24 @@
+{
+  "engine": "comfy_wan",
+  "motion": "zoom-in",
+  "quality": "360p",
+  "workflow": "wan_i2v",
+  "raw_video_options": {
+    "engine": "wan2.2",
+    "motion": "zoom-in",
+    "speed": 1,
+    "quality": "360p"
+  },
+  "selected_prompt_key": "zoom-in",
+  "prompt": "Ultra-photorealistic smartphone video generated from the exact input image. The ONLY motion is the CAMERA performing a smooth, continuous handheld push-in (forward dolly) toward the elevator over the entire clip. The camera physically moves forward approximately 1-2 meters while maintaining the elevator perfectly centered, making the elevator gradually become larger in frame from beginning to end. This is NOT a digital zoom—the camera itself moves closer with natural perspective change and realistic parallax.The operator stands still except for the slow forward camera movement. Natural handheld micro-shake, subtle breathing motion, slight vertical walking bob, realistic smartphone stabilization, tiny autofocus breathing, and smooth exposure adaptation. Camera movement is slow, steady, and cinematic with no sudden acceleration.The elevator doors remain COMPLETELY CLOSED throughout the entire video with absolutely zero opening, closing, vibration, or movement. Preserve the exact wall textures, marble panels, stainless-steel reflections, lighting, floor tiles, elevator button panel, ceiling lights, signage, and all architectural geometry exactly as in the input image.No people enter the frame. No moving objects. No added objects. No text overlays. No environmental changes. No camera rotation beyond tiny natural handheld sway. No panning, tilting, or orbiting. Only a straight forward dolly-in.Shot on a modern smartphone (iPhone 15 Pro / Google Pixel), 24 fps, realistic rolling shutter, authentic indoor lighting, physically accurate reflections, true-to-life colors, subtle sensor noise, realistic depth changes from forward camera motion, perfect temporal consistency, documentary realism, no CGI look, no warping, no morphing, no hallucinated objects, no flickering.",
+  "negative_prompt": "cartoon, animation, CGI, 3d render, fake render, warped elevator, distorted doors, bending metal, changing wall panels, duplicated elevator doors, extra panels, flickering display, unreadable display, blurry, low quality, heavy camera shake, fast pan, jump cut, sudden zoom, sudden lighting change, people, watermark, logo, added text, opening elevator doors, closing elevator doors, sliding elevator doors, elevator door motion, moving door panels, cabin reveal, changing elevator door state",
+  "comfy": {
+    "url": "http://127.0.0.1:8188",
+    "width": 360,
+    "height": 640,
+    "length": 81,
+    "fps": 16,
+    "seed": 577879829
+  },
+  "generatedAt": "2026-06-27T16:34:11.381Z"
+}
