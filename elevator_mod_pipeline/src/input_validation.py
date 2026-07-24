@@ -188,7 +188,7 @@ def image_tilt_degrees(rgb: np.ndarray) -> dict[str, float] | None:
     deviations: list[float] = []
     absolute_deviations: list[float] = []
     lengths: list[float] = []
-    for line in lines[:, 0]:
+    for line in np.asarray(lines).reshape(-1, 4):
         x1, y1, x2, y2 = [int(v) for v in line]
         dx = x2 - x1
         dy = y2 - y1
@@ -278,7 +278,7 @@ def upload_line_stats(gray: np.ndarray) -> tuple[int, float]:
     if lines is None:
         return 0, 0.0
     vertical = 0
-    for line in lines[:, 0]:
+    for line in np.asarray(lines).reshape(-1, 4):
         x1, y1, x2, y2 = [int(v) for v in line]
         angle = abs(math.degrees(math.atan2(y2 - y1, x2 - x1)))
         angle = angle if angle <= 90 else 180 - angle
@@ -346,7 +346,7 @@ def perspective_score(rgb: np.ndarray, cfg: dict[str, Any]) -> tuple[float, list
     horizontal_devs: list[float] = []
     vertical_xs: list[float] = []
     vertical_lengths: list[float] = []
-    for l in lines[:, 0]:
+    for l in np.asarray(lines).reshape(-1, 4):
         x1, y1, x2, y2 = [int(v) for v in l]
         dx, dy = x2 - x1, y2 - y1
         length = math.sqrt(dx * dx + dy * dy)
@@ -570,7 +570,7 @@ def geometric_defects_score(rgb: np.ndarray) -> tuple[float, list[str]]:
         return 0.35, ["Geometric check found too few structural lines."]
     vertical_devs: list[float] = []
     horizontal_devs: list[float] = []
-    for line in lines[:, 0]:
+    for line in np.asarray(lines).reshape(-1, 4):
         x1, y1, x2, y2 = [int(v) for v in line]
         angle = abs(math.degrees(math.atan2(y2 - y1, x2 - x1)))
         angle = angle if angle <= 90 else 180 - angle

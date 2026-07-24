@@ -73,3 +73,8 @@ Thumbs.db
 .idea/
 
 .mongo/
+
+# Local runtime installs
+.local/
+vdotest/logs/
+Frontend/kone-api-master/output/

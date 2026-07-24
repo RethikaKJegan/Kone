@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Sparkles, Check, RotateCcw, Eye, EyeOff } from 'lucide-react'
+import { Sparkles, Check, RotateCcw, Eye, EyeOff, Move } from 'lucide-react'
 import apiClient from '../../../api/client'
 import { getGuestSessionId, isGuestSession } from '../../../api/guestWorkflow'
 import { useOfferingStore } from '../../../store/offeringStore'
@@ -128,8 +128,13 @@ export default function Step3Place() {
   const hasMissingPlacements = components.length > 0 && !allPlaced
 
   const handleContinue = () => {
-    goToStep(5)
-    navigate(`/projects/${projectId}/offerings/${offeringId}/step/5`)
+    goToStep(4)
+    navigate(`/projects/${projectId}/offerings/${offeringId}/step/4`)
+  }
+
+  const handleRepin = () => {
+    goToStep(4)
+    navigate(`/projects/${projectId}/offerings/${offeringId}/step/4`)
   }
 
   const handleBack = () => {
@@ -260,14 +265,21 @@ export default function Step3Place() {
       </div>
 
       <div className="flex items-center justify-between border-t border-[#E4E4E4] px-8 py-5">
-        <span />
+        <button
+          onClick={handleRepin}
+          className="flex items-center gap-1.5 rounded-[5px] border border-[#E4E4E4] px-4 text-sm font-medium text-[#525252] transition-colors duration-[120ms] hover:border-[#1450F5] hover:text-[#1450F5]"
+          style={{ height: 34 }}
+        >
+          <Move style={{ width: 14, height: 14 }} />
+          Repin
+        </button>
         <button
           onClick={handleContinue}
           disabled={!allPlaced}
           className="rounded-[5px] bg-[#0A0A0A] px-5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
           style={{ height: 34 }}
         >
-          Continue →
+          Continue to Repin →
         </button>
       </div>
     </div>

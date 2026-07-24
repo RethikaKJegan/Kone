@@ -114,7 +114,7 @@ def perspective_score(rgb: np.ndarray) -> tuple[float, list[str]]:
     if lines is None:
         return 0.55, ["Not enough structural lines found."]
     vertical_devs, horizontal_devs, vertical_xs, vertical_lengths = [], [], [], []
-    for x1, y1, x2, y2 in lines[:, 0]:
+    for x1, y1, x2, y2 in np.asarray(lines).reshape(-1, 4):
         dx, dy = x2 - x1, y2 - y1
         length = math.hypot(dx, dy)
         if length < min(h, w) * 0.06:
@@ -200,7 +200,7 @@ def dominant_roll_angle(rgb: np.ndarray) -> tuple[float, float]:
     if lines is None:
         return 0.0, 0.0
     angles, weights = [], []
-    for x1, y1, x2, y2 in lines[:, 0]:
+    for x1, y1, x2, y2 in np.asarray(lines).reshape(-1, 4):
         dx, dy = x2 - x1, y2 - y1
         length = math.hypot(dx, dy)
         if length < min(h, w) * 0.06:
@@ -225,7 +225,7 @@ def vertical_balance_offset(rgb: np.ndarray) -> float:
     if lines is None:
         return 0.0
     xs, weights = [], []
-    for x1, y1, x2, y2 in lines[:, 0]:
+    for x1, y1, x2, y2 in np.asarray(lines).reshape(-1, 4):
         dx, dy = x2 - x1, y2 - y1
         length = math.hypot(dx, dy)
         angle = abs(math.degrees(math.atan2(dy, dx)))

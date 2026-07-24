@@ -1,53 +1,177 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Check, RotateCcw } from 'lucide-react'
-import { isGuestSession } from '../../../api/guestWorkflow'
+import { RotateCcw, Wand2 } from 'lucide-react'
+import apiClient from '../../../api/client'
+import { getGuestSessionId, isGuestSession } from '../../../api/guestWorkflow'
 import { useOfferingStore } from '../../../store/offeringStore'
-import { ImageCanvas } from '../../../components/shared/ImageCanvas'
-import { AIBadge } from '../../../components/shared/AIBadge'
+import { RepinTransformCanvas, repinTransformFromPin } from '../../../components/shared/RepinTransformCanvas'
 import { KONE_COMPONENTS } from '../../../lib/constants'
 import { toast } from '../../../hooks/useToast'
 import { cn } from '../../../lib/utils'
-import type { ComponentKey, ComponentPin } from '../../../types'
+import type { ComponentKey, ComponentPin, PreviewVersion, RepinFeedbackOption, RepinTransform } from '../../../types'
 
 const COMP_LABELS = Object.fromEntries(KONE_COMPONENTS.map(c => [c.key, c.label])) as Record<ComponentKey, string>
+const COMPONENT_IMAGES = Object.fromEntries(KONE_COMPONENTS.map(c => [c.key, c.imageUrl])) as Record<ComponentKey, string | undefined>
+
+const FEEDBACK_OPTIONS: { value: RepinFeedbackOption; label: string }[] = [
+  { value: 'wrong_placement', label: 'Wrong placement' },
+  { value: 'wrong_component', label: 'Wrong component' },
+  { value: 'bad_perspective', label: 'Bad perspective' },
+  { value: 'bad_lighting_shadow', label: 'Bad lighting / shadow' },
+  { value: 'poor_blending_unrealistic', label: 'Poor blending / unrealistic' },
+]
+
+function versionUrl(version: PreviewVersion | undefined, fallback: string | null | undefined) {
+  return version?.url ?? fallback ?? null
+}
 
 export default function Step4Repin() {
   const { projectId, offeringId } = useParams()
   const navigate = useNavigate()
-  const { currentOffering, runAIPlacement, setPins, goToStep } = useOfferingStore()
-  const [selectedComp, setSelectedComp] = useState<ComponentKey | null>(null)
-
+  const { currentOffering, setCurrentOffering, submitRepinPreview, goToStep, isProcessing } = useOfferingStore()
   const offering = currentOffering
-  const components = offering?.selectedComponents ?? []
+  const selectedComponents = offering?.selectedComponents ?? []
+  const components = KONE_COMPONENTS.map(component => component.key)
   const pins = offering?.componentPins ?? []
+  const versions = offering?.previewVersions?.length
+    ? offering.previewVersions
+    : offering?.outputImageUrl
+      ? [{ version: 1, url: offering.outputImageUrl }]
+      : []
+  const latestVersion = versions.reduce((max, version) => Math.max(max, version.version), versions.length ? 1 : 0)
+  const sourceVersion = latestVersion || 1
+  const targetVersion = Math.min(sourceVersion + 1, 5)
+  const generationLimitReached = latestVersion >= 5
+  const [selectedComp, setSelectedComp] = useState<ComponentKey | null>(components[0] ?? null)
+  const selectedPin = pins.find((p: ComponentPin) => p.componentKey === selectedComp)
+  const [transform, setTransform] = useState<RepinTransform | null>(null)
+  const [feedbackOption, setFeedbackOption] = useState<RepinFeedbackOption>('wrong_placement')
 
-  if (isGuestSession() && !offering?.renderComplete) {
-    return (
-      <div className="rounded-xl border border-[#E9ECEF] bg-white p-8 shadow-sm">
-        <h2 className="text-heading text-[15px] font-semibold text-[#111827]">4 &nbsp; Adjust Placement</h2>
-        <p className="mt-4 text-sm text-[#6B7280]">Preview is still being generated.</p>
-      </div>
-    )
+  useEffect(() => {
+    const component = selectedComp ?? selectedComponents[0] ?? components[0]
+    if (!component) return
+    setSelectedComp(component)
+    setTransform(repinTransformFromPin(component, sourceVersion, targetVersion, pins.find((p: ComponentPin) => p.componentKey === component)))
+  }, [selectedComp, sourceVersion, targetVersion, selectedComponents.join('|')])
+
+  useEffect(() => {
+    let stopped = false
+    async function poll() {
+      if (!projectId || !offeringId || !offering?.previewRequestKey || offering.pipelineStatus !== 'processing') return
+      const guest = isGuestSession()
+      const sessionId = guest ? await getGuestSessionId() : null
+      while (!stopped) {
+        if (guest) {
+          const { data } = await apiClient.get('/guest/status', { params: { session_id: sessionId, project_id: projectId } })
+          if (data.preview_request_key && data.preview_request_key !== offering.previewRequestKey) {
+            await new Promise(resolve => setTimeout(resolve, 2000))
+            continue
+          }
+          if (data.status === 'preview_ready') {
+            useOfferingStore.setState({ isProcessing: false })
+            setCurrentOffering({
+              ...offering,
+              outputImageUrl: `${data.preview_url}?v=${Date.now()}`,
+              outputVideoUrl: null,
+              renderComplete: true,
+              pipelineStatus: 'preview_ready',
+              videoGenerated: false,
+              downloadUrl: null,
+              componentPins: data.component_pins ?? offering.componentPins,
+              previewVersions: data.preview_versions
+                ? [
+                    ...(offering.previewVersions ?? []).filter(existing => !data.preview_versions.some((next: PreviewVersion) => next.version === existing.version)),
+                    ...data.preview_versions,
+                  ].sort((a, b) => a.version - b.version)
+                : offering.previewVersions,
+              repinPass: data.repin_pass ?? offering.repinPass,
+            })
+            toast('New repin preview generated')
+            return
+          }
+          if (data.status === 'failed') {
+            useOfferingStore.setState({ isProcessing: false })
+            setCurrentOffering({ ...offering, pipelineStatus: 'failed', renderComplete: false, lastError: data.error })
+            toast(data.error || 'Repin preview failed', 'destructive')
+            return
+          }
+        } else {
+          const { data } = await apiClient.get(`/offerings/${offeringId}`)
+          if (data.previewRequestKey && data.previewRequestKey !== offering.previewRequestKey) {
+            await new Promise(resolve => setTimeout(resolve, 2000))
+            continue
+          }
+          if (data.pipelineStatus === 'preview_ready' || data.pipelineStatus === 'video_ready') {
+            useOfferingStore.setState({ isProcessing: false })
+            setCurrentOffering({
+              ...data,
+              renderComplete: true,
+              outputImageUrl: data.outputImageUrl ? `${data.outputImageUrl}${data.outputImageUrl.includes('?') ? '&' : '?'}v=${Date.now()}` : null,
+              outputVideoUrl: null,
+              videoGenerated: false,
+              downloadUrl: null,
+            })
+            toast('New repin preview generated')
+            return
+          }
+          if (data.pipelineStatus === 'failed') {
+            useOfferingStore.setState({ isProcessing: false })
+            setCurrentOffering({ ...data, renderComplete: false })
+            toast(data.lastError || 'Repin preview failed', 'destructive')
+            return
+          }
+        }
+        await new Promise(resolve => setTimeout(resolve, 2000))
+      }
+    }
+    poll()
+    return () => {
+      stopped = true
+    }
+  }, [projectId, offeringId, offering?.previewRequestKey, offering?.pipelineStatus])
+
+  const previewImageUrl = useMemo(() => versionUrl(versions.find(v => v.version === sourceVersion), offering?.outputImageUrl), [versions, sourceVersion, offering?.outputImageUrl])
+
+  const handleTransformChange = (next: RepinTransform) => {
+    setTransform(next)
   }
 
-  const handlePinMove = (componentKey: ComponentKey, x: number, y: number) => {
-    const newPins = pins.map(p =>
-      p.componentKey === componentKey ? { ...p, x, y, aiPlaced: false } : p
-    )
-    const exists = newPins.find(p => p.componentKey === componentKey)
-    if (!exists) newPins.push({ componentKey, x, y, aiPlaced: false })
-    setPins(newPins)
-    setSelectedComp(null)
+  const handleNumericChange = (field: keyof Pick<RepinTransform, 'x' | 'y' | 'width' | 'height' | 'rotation' | 'skewX' | 'skewY'>, value: number) => {
+    if (!transform) return
+    setTransform({ ...transform, [field]: value })
   }
 
-  const handleRestore = async () => {
-    setPins([])
-    await runAIPlacement()
-    toast('Components restored to AI placement')
+  const handleReset = () => {
+    if (!selectedComp) return
+    setTransform(repinTransformFromPin(selectedComp, sourceVersion, targetVersion, selectedPin))
   }
 
-  const handleContinue = () => {
+  const handleGenerate = async () => {
+    if (!transform || !selectedComp) return
+    if (generationLimitReached) {
+      toast('Version limit reached. Choose the best saved version to continue to video.', 'destructive')
+      return
+    }
+    const feedbackRequired = targetVersion >= 3
+    const payload = {
+      ...transform,
+      componentKey: selectedComp,
+      componentType: selectedComp,
+      sourceVersion,
+      targetVersion,
+      feedbackOption: feedbackRequired ? feedbackOption : null,
+    }
+    try {
+      await submitRepinPreview(payload)
+      toast('Generating repin preview with FireRed realism')
+    } catch (error) {
+      toast(error instanceof Error ? error.message : 'Could not start repin preview', 'destructive')
+    }
+  }
+
+  const handleUseVersion = (version: PreviewVersion) => {
+    if (!offering) return
+    setCurrentOffering({ ...offering, outputImageUrl: version.url, previewImagePath: version.url, outputVideoUrl: null, videoGenerated: false, downloadUrl: null })
     goToStep(5)
     navigate(`/projects/${projectId}/offerings/${offeringId}/step/5`)
   }
@@ -57,109 +181,119 @@ export default function Step4Repin() {
     goToStep(3)
   }
 
-  const handleSkip = () => {
-    goToStep(5)
-    navigate(`/projects/${projectId}/offerings/${offeringId}/step/5`)
+  if (!offering?.outputImageUrl) {
+    return (
+      <div className="rounded-xl border border-[#E9ECEF] bg-white p-8 shadow-sm">
+        <h2 className="text-heading text-[15px] font-semibold text-[#111827]">4 &nbsp; Repin</h2>
+        <p className="mt-4 text-sm text-[#6B7280]">Generate the preview before adjusting placement.</p>
+      </div>
+    )
   }
 
   return (
     <div className="overflow-hidden rounded-xl border border-[#E9ECEF] bg-white shadow-sm">
       <div className="flex items-start justify-between px-8 pb-2 pt-8">
         <div>
-          <h2 className="text-heading text-[15px] font-semibold text-[#111827]">4 &nbsp; Adjust Placement</h2>
-          <p className="mt-1 text-[12px] text-[#9CA3AF]">Optional — click a component then click the image to reposition its pin</p>
+          <h2 className="text-heading text-[15px] font-semibold text-[#111827]">4 &nbsp; Repin</h2>
+          <p className="mt-1 text-[12px] text-[#9CA3AF]">Adjust component geometry, then generate a realistic FireRed preview.</p>
         </div>
         <button onClick={handleBack} className="text-xs font-medium text-[#9CA3AF] transition-colors duration-[120ms] hover:text-[#6B7280]">Back</button>
       </div>
 
-      <div className="flex gap-0 border-t border-[#E9ECEF] mt-4">
-        {/* Canvas */}
+      <div className="mt-4 flex gap-0 border-t border-[#E9ECEF]">
         <div className="relative flex-[3] p-6 pr-3">
-          <ImageCanvas
-            imageUrl={offering?.outputImageUrl ?? offering?.uploadedFileUrl ?? null}
-            pins={pins}
-            selectedComponent={selectedComp}
-            labels={COMP_LABELS}
-            onPinMove={handlePinMove}
-          />
+          {transform && selectedComp ? (
+            <RepinTransformCanvas
+              imageUrl={previewImageUrl}
+              componentImageUrl={COMPONENT_IMAGES[selectedComp]}
+              transform={transform}
+              label={COMP_LABELS[selectedComp]}
+              onChange={handleTransformChange}
+            />
+          ) : (
+            <div className="flex min-h-[360px] items-center justify-center rounded-lg border border-[#E4E4E4] text-sm text-[#6B7280]">Select a component to repin.</div>
+          )}
         </div>
 
-        {/* Right panel */}
         <div className="flex flex-[2] flex-col border-l border-[#E9ECEF] p-6 pl-4">
-          <p className="label-caps mb-4">Component Placement</p>
-
-          <div className="flex-1 space-y-2">
-            {components.map(comp => {
-              const pin = pins.find((p: ComponentPin) => p.componentKey === comp)
-              const isActive = selectedComp === comp
-              return (
-                <div
-                  key={comp}
-                  className={cn(
-                    'rounded-lg border p-3 transition-colors duration-[120ms]',
-                    isActive ? 'border-[#0A0A0A] bg-[#FAFAFA]' : 'border-[#E4E4E4] bg-white'
-                  )}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex min-w-0 items-center gap-2">
-                      <div className="shrink-0 rounded bg-[#F5F5F5]" style={{ width: 28, height: 28 }} />
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-xs font-semibold text-[#0A0A0A]">{COMP_LABELS[comp]}</span>
-                          {pin?.aiPlaced && <AIBadge />}
-                        </div>
-                        {pin ? (
-                          <p className="truncate text-[11px] text-[#A3A3A3]">
-                            {pin.aiPlaced ? '✦ AI · ' : ''}X {pin.x} · Y {pin.y}
-                          </p>
-                        ) : (
-                          <p className="text-[11px] text-[#A3A3A3]">Not placed</p>
-                        )}
-                      </div>
-                    </div>
-                    <div className="flex shrink-0 items-center gap-2">
-                      {pin && <Check className="text-[#16A34A]" style={{ width: 14, height: 14 }} />}
-                      <button
-                        onClick={() => setSelectedComp(prev => prev === comp ? null : comp)}
-                        className={cn(
-                          'text-[11px] font-medium transition-colors duration-[120ms]',
-                          isActive ? 'text-[#0A0A0A]' : 'text-[#525252] hover:text-[#0A0A0A]'
-                        )}
-                        aria-label={`Repin ${COMP_LABELS[comp]}`}
-                      >
-                        {isActive ? 'Cancel' : 'Repin'}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )
-            })}
+          <div className="mb-4 flex items-center justify-between">
+            <p className="label-caps">Repin Controls</p>
+            <span className="text-[11px] text-[#9CA3AF]">Version {sourceVersion} to {targetVersion}</span>
           </div>
 
-          <button
-            onClick={handleRestore}
-            className="mt-3 flex items-center gap-1.5 text-xs text-[#A3A3A3] transition-colors duration-[120ms] hover:text-[#525252]"
-          >
-            <RotateCcw style={{ width: 13, height: 13 }} />
-            Restore to AI placement
-          </button>
-        </div>
-      </div>
+          <div className="mb-4 grid grid-cols-2 gap-2">
+            {components.map(comp => (
+              <button
+                key={comp}
+                onClick={() => setSelectedComp(comp)}
+                className={cn(
+                  'rounded-[5px] border px-3 py-2 text-left text-xs font-medium transition-colors duration-[120ms]',
+                  selectedComp === comp ? 'border-[#1450F5] bg-[#EFF6FF] text-[#1450F5]' : 'border-[#E4E4E4] text-[#525252] hover:border-[#BFDBFE]'
+                )}
+              >
+                {COMP_LABELS[comp]}
+              </button>
+            ))}
+          </div>
 
-      <div className="flex items-center justify-between border-t border-[#E4E4E4] px-8 py-5">
-        <button
-          onClick={handleSkip}
-          className="text-xs text-[#A3A3A3] transition-colors duration-[120ms] hover:text-[#525252]"
-        >
-          Skip this step
-        </button>
-        <button
-          onClick={handleContinue}
-          className="rounded-[5px] bg-[#0A0A0A] px-5 text-sm font-medium text-white transition-colors duration-[120ms] hover:bg-[#262626]"
-          style={{ height: 34 }}
-        >
-          Apply & Continue
-        </button>
+          {transform && (
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                ['x', 'X Position'], ['y', 'Y Position'], ['width', 'Width'], ['height', 'Height'], ['rotation', 'Rotation'], ['skewX', 'Skew X'], ['skewY', 'Skew Y'],
+              ].map(([field, label]) => (
+                <label key={field} className="text-[11px] font-medium text-[#6B7280]">
+                  {label}
+                  <input
+                    type="number"
+                    value={transform[field as keyof RepinTransform] as number}
+                    onChange={event => handleNumericChange(field as keyof Pick<RepinTransform, 'x' | 'y' | 'width' | 'height' | 'rotation' | 'skewX' | 'skewY'>, Number(event.target.value))}
+                    className="mt-1 h-8 w-full rounded-[4px] border border-[#E4E4E4] px-2 text-xs text-[#111827]"
+                  />
+                </label>
+              ))}
+              <div className="col-span-2 rounded-[5px] border border-[#E4E4E4] bg-[#FAFAFA] p-2 text-[11px] text-[#6B7280]">
+                Perspective: {transform.perspective.map(point => `${point.x},${point.y}`).join(' | ')}
+              </div>
+            </div>
+          )}
+
+          {targetVersion >= 3 && !generationLimitReached && (
+            <fieldset className="mt-4 space-y-2">
+              <legend className="text-[11px] font-semibold text-[#525252]">Feedback</legend>
+              {FEEDBACK_OPTIONS.map(option => (
+                <label key={option.value} className="flex items-center gap-2 text-xs text-[#525252]">
+                  <input type="radio" name="repin-feedback" checked={feedbackOption === option.value} onChange={() => setFeedbackOption(option.value)} />
+                  {option.label}
+                </label>
+              ))}
+            </fieldset>
+          )}
+
+          <div className="mt-5 flex items-center gap-2">
+            <button onClick={handleReset} className="flex h-9 items-center gap-1.5 rounded-[5px] border border-[#E4E4E4] px-3 text-xs font-medium text-[#525252] hover:border-[#A3A3A3]">
+              <RotateCcw style={{ width: 13, height: 13 }} /> Reset
+            </button>
+            <button
+              onClick={handleGenerate}
+              disabled={isProcessing || generationLimitReached || !transform}
+              className="flex h-9 items-center gap-1.5 rounded-[5px] bg-[#0A0A0A] px-4 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Wand2 style={{ width: 13, height: 13 }} /> {isProcessing ? 'Generating...' : 'Generate New Preview'}
+            </button>
+          </div>
+
+          {generationLimitReached && <p className="mt-3 text-xs font-medium text-[#B45309]">Version 5 reached. Choose a saved version to continue to video.</p>}
+
+          <div className="mt-5 space-y-2 border-t border-[#E4E4E4] pt-4">
+            <p className="label-caps">Saved Versions</p>
+            {versions.map(version => (
+              <button key={version.version} onClick={() => handleUseVersion(version)} className="flex w-full items-center justify-between rounded-[5px] border border-[#E4E4E4] px-3 py-2 text-xs text-[#525252] hover:border-[#1450F5] hover:text-[#1450F5]">
+                <span>Version {version.version}</span>
+                <span>Use for video</span>
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
     </div>
   )

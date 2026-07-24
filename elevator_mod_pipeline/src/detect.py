@@ -1149,7 +1149,7 @@ def _recover_elevator_door_header(image_rgb: np.ndarray, detections: list[dict[s
 	if lines is None:
 		return
 	candidates: list[tuple[float, float, int]] = []
-	for line in lines[:, 0]:
+	for line in np.asarray(lines).reshape(-1, 4):
 		lx1, ly1, lx2, ly2 = [int(v) for v in line]
 		span = abs(lx2 - lx1)
 		if span < min_span or abs(ly2 - ly1) > max(3, int(span * 0.04)):

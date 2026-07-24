@@ -44,6 +44,8 @@ router.post(
   videoController.selectComponents
 );
 
+router.post('/repin', auth(), limiter, validate(videoValidation.repinPreview), videoController.repinPreview);
+
 // STEP 4
 router.post('/generate', auth(), limiter, validate(videoValidation.imageIdBody), videoController.generateVideo);
 

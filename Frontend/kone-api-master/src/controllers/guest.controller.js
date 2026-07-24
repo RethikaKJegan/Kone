@@ -12,11 +12,11 @@ const API_ROOT = path.join(__dirname, '..', '..');
 const STORAGE_ROOT = path.join(API_ROOT, 'storage');
 const LOGIC_URL = process.env.LOGIC_URL || 'http://localhost:8001';
 const execFileAsync = promisify(execFile);
-const COMFY_ROOT = process.env.COMFY_ROOT || '/root/vdotest';
+const COMFY_ROOT = process.env.COMFY_ROOT || '/root/Kone/vdotest';
 const COMFY_URL = process.env.COMFY_URL || 'http://127.0.0.1:8188';
-const COMFY_RUNNER = path.join(COMFY_ROOT, 'run_i2v_api.py');
-const COMFY_START_SCRIPT = path.join(COMFY_ROOT, 'start_comfy_logged.sh');
-const COMFY_PYTHON = process.env.COMFY_PYTHON || path.join(COMFY_ROOT, 'ComfyUI', '.venv', 'bin', 'python');
+const COMFY_RUNNER = process.env.COMFY_RUNNER || path.join(COMFY_ROOT, 'run_i2v_api.py');
+const COMFY_START_SCRIPT = process.env.COMFY_START_SCRIPT || path.join(COMFY_ROOT, 'scripts', 'start_comfy_logged.sh');
+const COMFY_PYTHON = process.env.COMFY_PYTHON || '/usr/bin/python3';
 const componentRunQueues = new Map();
 const latestComponentRunKeys = new Map();
 let comfyStartPromise = null;
@@ -156,7 +156,7 @@ async function ensureComfyRunning() {
       if (await isComfyAlive()) return;
     }
 
-    throw new Error('ComfyUI did not start on port 8188 within 3 minutes. Check /root/vdotest/logs.');
+    throw new Error('ComfyUI did not start on port 8188 within 3 minutes. Check /root/Kone/vdotest/logs.');
   })().finally(() => {
     comfyStartPromise = null;
   });
@@ -167,7 +167,7 @@ async function ensureComfyRunning() {
 async function generateComfyVideo({ inputPath, outputVideoPath, metadataPath, videoOptions }) {
   await ensureComfyRunning();
 
-  const pythonPath = (await fileExists(COMFY_PYTHON)) ? COMFY_PYTHON : 'python3';
+  const pythonPath = (await fileExists(COMFY_PYTHON)) ? COMFY_PYTHON : '/usr/bin/python3';
   const { width, height } = qualityDimensions(videoOptions.quality);
   const prompt = videoPromptForOptions(videoOptions);
   const negativePrompt = videoNegativePromptForOptions(videoOptions);
@@ -402,16 +402,76 @@ const runComponents = catchAsync(async (req, res) => {
   res.send({ ok: true, status: 'processing' });
 });
 
+
+const runRepin = catchAsync(async (req, res) => {
+  const {
+    session_id: sessionId,
+    project_id: projectId,
+    project_name: projectName,
+    selected_components: selectedComponents,
+    component_assets: componentAssets,
+    environments,
+    preview_request_key: previewRequestKey,
+    transform,
+  } = req.body;
+  const root = projectDir(sessionId, projectId);
+  const queueKey = root;
+  const latestKey = previewRequestKey || null;
+  latestComponentRunKeys.set(queueKey, latestKey);
+  await writeStatus(root, { status: 'processing', preview_url: null, video_url: null, download_url: null, error: null, preview_request_key: latestKey });
+  const previousRun = componentRunQueues.get(queueKey) || Promise.resolve();
+  const queuedRun = previousRun
+    .catch(() => {})
+    .then(async () => {
+      if (latestComponentRunKeys.get(queueKey) !== latestKey) return;
+      try {
+        const { data } = await axios.post(`${LOGIC_URL}/repin-components`, {
+          session_id: sessionId,
+          project_id: projectId,
+          project_name: projectName,
+          storage_dir: root,
+          selected_components: selectedComponents,
+          component_assets: componentAssets,
+          environments,
+          preview_request_key: previewRequestKey,
+          transform,
+        }, { timeout: 0 });
+        if (!data?.ok) throw new Error(data?.error || 'Repin preview failed');
+        const current = await readStatus(root);
+        if (latestComponentRunKeys.get(queueKey) === latestKey) {
+          const existingVersions = Array.isArray(current.preview_versions) ? current.preview_versions : [];
+          await writeStatus(root, { ...current, preview_request_key: latestKey, preview_versions: existingVersions });
+        }
+      } catch (error) {
+        if (latestComponentRunKeys.get(queueKey) === latestKey) {
+          await writeStatus(root, { status: 'failed', preview_url: null, video_url: null, download_url: null, error: error.message, preview_request_key: latestKey });
+        }
+      }
+    })
+    .finally(() => {
+      if (componentRunQueues.get(queueKey) === queuedRun) {
+        componentRunQueues.delete(queueKey);
+        latestComponentRunKeys.delete(queueKey);
+      }
+    });
+  componentRunQueues.set(queueKey, queuedRun);
+  res.send({ ok: true, status: 'processing' });
+});
+
 const status = catchAsync(async (req, res) => {
   const { session_id: sessionId, project_id: projectId } = req.query;
   const root = projectDir(sessionId, projectId);
   const current = await readStatus(root);
   const componentPins = await componentPinsFromPlacement(root);
+  const previewVersions = Array.isArray(current.preview_versions)
+    ? current.preview_versions.map((version) => ({ ...version, url: publicStorageUrl(sessionId, projectId, version.url) }))
+    : undefined;
   res.send({
     ...current,
     preview_url: publicStorageUrl(sessionId, projectId, current.preview_url),
     video_url: publicStorageUrl(sessionId, projectId, current.video_url),
     component_pins: componentPins,
+    preview_versions: previewVersions,
     download_url: current.status === 'ready_for_download'
       ? `/api/v1/guest/download?session_id=${encodeURIComponent(sessionId)}&project_id=${encodeURIComponent(projectId)}`
       : null,
@@ -506,4 +566,4 @@ const download = catchAsync(async (req, res) => {
   archive.finalize();
 });
 
-module.exports = { createSession, uploadImage, precheck, runComponents, status, generateVideo, finalize, download };
+module.exports = { createSession, uploadImage, precheck, runComponents, runRepin, status, generateVideo, finalize, download };

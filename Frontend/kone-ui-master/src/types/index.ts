@@ -38,6 +38,43 @@ export interface ComponentPin {
   aiPlaced: boolean
 }
 
+export interface PerspectivePoint {
+  x: number
+  y: number
+}
+
+export type RepinFeedbackOption =
+  | 'wrong_placement'
+  | 'wrong_component'
+  | 'bad_perspective'
+  | 'bad_lighting_shadow'
+  | 'poor_blending_unrealistic'
+
+export interface RepinTransform {
+  componentKey: ComponentKey
+  componentType: ComponentKey
+  sourceVersion: number
+  targetVersion: number
+  x: number
+  y: number
+  width: number
+  height: number
+  rotation: number
+  skewX: number
+  skewY: number
+  perspective: PerspectivePoint[]
+  feedbackOption?: RepinFeedbackOption | null
+}
+
+export interface PreviewVersion {
+  version: number
+  url: string
+  createdAt?: string
+  sourceVersion?: number
+  transform?: RepinTransform
+  feedbackOption?: RepinFeedbackOption | null
+}
+
 export type OfferingStatus = 'draft' | 'active' | 'complete'
 
 export interface Offering {
@@ -69,6 +106,8 @@ export interface Offering {
   lastError?: string | null
   savedStep?: OfferingStep
   previewRequestKey?: string | null
+  previewVersions?: PreviewVersion[]
+  repinPass?: number
   videoGenerated?: boolean
   downloadUrl?: string | null
 }

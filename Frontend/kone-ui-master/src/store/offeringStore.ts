@@ -3,7 +3,7 @@ import apiClient from '../api/client'
 import { getGuestSessionId, isGuestSession } from '../api/guestWorkflow'
 import { KONE_COMPONENTS } from '../lib/constants'
 import { useProjectStore } from './projectStore'
-import type { Offering, OfferingStep, Environment, ComponentKey, ComponentPin } from '../types'
+import type { Offering, OfferingStep, Environment, ComponentKey, ComponentPin, RepinTransform } from '../types'
 
 function getGuestData<T>(key: string): T | null {
   try {
@@ -54,6 +54,8 @@ function makeGuestOffering(projectId: string): Offering {
     outputVideoUrl: null,
     savedStep: 1,
     previewRequestKey: null,
+    previewVersions: [],
+    repinPass: 0,
     videoGenerated: false,
     downloadUrl: null,
   }
@@ -72,6 +74,7 @@ interface OfferingState {
   setComponents: (environments: Environment[], components: ComponentKey[]) => Promise<void>
   setPins: (pins: ComponentPin[]) => void
   runAIPlacement: () => Promise<ComponentPin[]>
+  submitRepinPreview: (transform: RepinTransform) => Promise<void>
   setAnnotationState: (enabled: boolean, filters: ComponentKey[]) => void
   setVideoSettings: (
     settings: Partial<Pick<Offering, 'videoMotionStyle' | 'videoSpeed' | 'videoQuality'>>
@@ -100,6 +103,8 @@ function normalizeOffering(offering: Offering): Offering {
     savedStep: offering.savedStep ?? 1,
     videoGenerated: Boolean(offering.videoGenerated ?? outputVideoUrl),
     downloadUrl: offering.downloadUrl ?? null,
+    previewVersions: offering.previewVersions ?? (outputImageUrl ? [{ version: 1, url: outputImageUrl }] : []),
+    repinPass: offering.repinPass ?? (offering.previewVersions?.length || (outputImageUrl ? 1 : 0)),
   }
 }
 
@@ -296,6 +301,8 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
         previewRequestKey: null,
         videoGenerated: false,
         downloadUrl: null,
+        previewVersions: [],
+        repinPass: 0,
       })
       set(state => writeOfferingState(state, updated))
       return
@@ -333,6 +340,8 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       previewRequestKey: null,
       videoGenerated: false,
       downloadUrl: null,
+      previewVersions: [],
+      repinPass: 0,
       ...(imageId ? { imageId } : {}),
     }
     const updated = patchOffering(currentOffering, updates)
@@ -357,6 +366,8 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       previewRequestKey,
       videoGenerated: false,
       downloadUrl: null,
+      previewVersions: [],
+      repinPass: 0,
     }
     const updated = patchOffering(currentOffering, updates)
     set(state => writeOfferingState(state, updated))
@@ -390,6 +401,8 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
         outputImageUrl: null,
         outputVideoUrl: null,
         downloadUrl: null,
+        previewVersions: [],
+        repinPass: 0,
       })
       refreshProjects()
 
@@ -454,6 +467,69 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
     } catch {
       set({ isProcessing: false })
       return []
+    }
+  },
+
+
+
+  submitRepinPreview: async transform => {
+    const { currentOffering } = get()
+    if (!currentOffering) return
+    if (transform.targetVersion > 5) {
+      throw new Error('Version limit reached. Choose the best saved version to continue.')
+    }
+    set({ isProcessing: true })
+    try {
+      const previewRequestKey = `repin:${currentOffering.id}:${transform.componentKey}:v${transform.targetVersion}:${Date.now()}`
+      const selectedComponents = currentOffering.selectedComponents.length ? currentOffering.selectedComponents : [transform.componentKey]
+      const updated = patchOffering(currentOffering, {
+        pipelineStatus: 'processing',
+        previewRequestKey,
+        outputVideoUrl: null,
+        videoGenerated: false,
+        downloadUrl: null,
+      })
+      set(state => writeOfferingState(state, updated))
+
+      if (isGuestSession()) {
+        const sessionId = await getGuestSessionId()
+        const componentAssets = Object.fromEntries(
+          KONE_COMPONENTS
+            .filter(component => selectedComponents.includes(component.key))
+            .map(component => [component.key, component.imageUrl])
+        )
+        await apiClient.post('/guest/repin', {
+          is_guest: true,
+          session_id: sessionId,
+          project_id: currentOffering.projectId,
+          project_name: currentOffering.name,
+          selected_components: selectedComponents,
+          component_assets: componentAssets,
+          environments: currentOffering.environments,
+          preview_request_key: previewRequestKey,
+          transform,
+        })
+      } else {
+        const imageId = imageIdFromOffering(currentOffering)
+        if (!imageId) throw new Error('Uploaded image is not ready for repin')
+        const componentAssets = Object.fromEntries(
+          KONE_COMPONENTS
+            .filter(component => selectedComponents.includes(component.key))
+            .map(component => [component.key, component.imageUrl])
+        )
+        await apiClient.post('/video/repin', {
+          imageId,
+          offeringId: currentOffering.id,
+          components: selectedComponents,
+          environments: currentOffering.environments,
+          component_assets: componentAssets,
+          preview_request_key: previewRequestKey,
+          transform,
+        })
+      }
+    } catch (error) {
+      set({ isProcessing: false })
+      throw error
     }
   },
 

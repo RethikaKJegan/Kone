@@ -246,16 +246,17 @@ const { projectService } = require('../services');
 const fsPromises = fs.promises;
 const execFileAsync = promisify(execFile);
 const LOGIC_URL = process.env.LOGIC_URL || 'http://localhost:8001';
-const COMFY_ROOT = process.env.COMFY_ROOT || '/root/vdotest';
+const COMFY_ROOT = process.env.COMFY_ROOT || '/root/Kone/vdotest';
 const COMFY_URL = process.env.COMFY_URL || 'http://127.0.0.1:8188';
-const COMFY_RUNNER = path.join(COMFY_ROOT, 'run_i2v_api.py');
-const COMFY_START_SCRIPT = path.join(COMFY_ROOT, 'start_comfy_logged.sh');
-const COMFY_PYTHON = process.env.COMFY_PYTHON || path.join(COMFY_ROOT, 'ComfyUI', '.venv', 'bin', 'python');
+const COMFY_RUNNER = process.env.COMFY_RUNNER || path.join(COMFY_ROOT, 'run_i2v_api.py');
+const COMFY_START_SCRIPT = process.env.COMFY_START_SCRIPT || path.join(COMFY_ROOT, 'scripts', 'start_comfy_logged.sh');
+const COMFY_PYTHON = process.env.COMFY_PYTHON || '/usr/bin/python3';
 let comfyStartPromise = null;
 
 // in-memory guest store
 const guestJobs = new Map();
 const componentRuns = new Map();
+const repinRuns = new Map();
 
 const getUploadInputPath = (imageId) => path.join(__dirname, '..', '..', 'uploads', imageId, 'input.jpg');
 const getOutputDir = (imageId) => path.join(__dirname, '..', '..', 'output', imageId);
@@ -386,6 +387,110 @@ const runLogicComponents = async ({
     previewUrl: `/output/${imageId}/final_output.png`,
     pins,
   };
+};
+
+
+const normalizePreviewVersions = (offering, fallbackUrl) => {
+  const existing = Array.isArray(offering.previewVersions) ? offering.previewVersions : [];
+  if (existing.length) return existing.map((version) => typeof version.toObject === 'function' ? version.toObject() : version);
+  return fallbackUrl ? [{ version: 1, url: fallbackUrl, createdAt: new Date() }] : [];
+};
+
+const runLogicRepin = async ({ imageId, userId, transform, componentAssets, environments, previewRequestKey }) => {
+  const storageDir = getLogicStorageDir(userId, imageId);
+  const uploadsDir = path.join(storageDir, 'uploads');
+  const previewDir = path.join(storageDir, 'preview');
+  const pipelineDir = path.join(storageDir, 'pipeline');
+  const outputDir = getOutputDir(imageId);
+  await Promise.all([uploadsDir, previewDir, pipelineDir, outputDir].map((dir) => fsPromises.mkdir(dir, { recursive: true })));
+
+  const sourcePath = transform.sourceVersion > 1
+    ? path.join(outputDir, `final_output_v${transform.sourceVersion}.png`)
+    : path.join(outputDir, 'final_output.png');
+  const fallbackInput = getUploadInputPath(imageId);
+  const sourceImage = (await fileExists(sourcePath)) ? sourcePath : ((await fileExists(path.join(outputDir, 'final_output.png'))) ? path.join(outputDir, 'final_output.png') : fallbackInput);
+  await fsPromises.copyFile(sourceImage, path.join(uploadsDir, `repin_source_v${transform.sourceVersion}.png`));
+
+  const { data } = await axios.post(
+    `${LOGIC_URL}/repin-components`,
+    {
+      session_id: `auth_${userId}`,
+      project_id: imageId,
+      project_name: imageId,
+      storage_dir: storageDir,
+      selected_components: [transform.componentKey],
+      component_assets: componentAssets,
+      environments,
+      preview_request_key: previewRequestKey,
+      transform,
+    },
+    { timeout: 0 }
+  );
+
+  if (!data?.ok) throw new Error(data?.error || 'Logic repin placement failed');
+
+  const versionFile = `final_output_v${transform.targetVersion}.png`;
+  await fsPromises.copyFile(path.join(previewDir, versionFile), path.join(outputDir, versionFile));
+  await fsPromises.copyFile(path.join(previewDir, 'final_output.png'), path.join(outputDir, 'final_output.png'));
+  return {
+    storageDir,
+    previewUrl: `/output/${imageId}/${versionFile}`,
+    currentPreviewUrl: `/output/${imageId}/final_output.png`,
+    pins: await componentPinsFromPlacement(storageDir),
+  };
+};
+
+const startRepinRun = ({ offeringId, imageId, userId, transform, componentAssets, environments, previewRequestKey }) => {
+  const runKey = `${offeringId}:${previewRequestKey || `repin-v${transform.targetVersion}`}`;
+  if (repinRuns.has(runKey)) return;
+
+  const run = (async () => {
+    try {
+      const offering = await getOwnedOffering(offeringId, userId);
+      if (!offering) throw new Error('Invalid offeringId');
+      if (Number(transform.targetVersion) > 5) throw new Error('Version limit reached. Choose the best saved version to continue.');
+      const placement = await runLogicRepin({ imageId, userId, transform, componentAssets, environments, previewRequestKey });
+      const versionUrl = `${placement.previewUrl}?v=${Date.now()}`;
+      const versions = normalizePreviewVersions(offering, offering.outputImagePath || offering.outputImageUrl);
+      const nextVersion = {
+        version: Number(transform.targetVersion),
+        url: versionUrl,
+        sourceVersion: Number(transform.sourceVersion),
+        transform,
+        feedbackOption: transform.feedbackOption || null,
+        createdAt: new Date(),
+      };
+      const withoutTarget = versions.filter((version) => Number(version.version) !== Number(transform.targetVersion));
+      withoutTarget.push(nextVersion);
+      withoutTarget.sort((a, b) => Number(a.version) - Number(b.version));
+      await Offering.findByIdAndUpdate(offeringId, {
+        componentPins: placement.pins,
+        outputImageUrl: versionUrl,
+        outputImagePath: placement.currentPreviewUrl,
+        previewImagePath: placement.currentPreviewUrl,
+        previewVersions: withoutTarget,
+        repinPass: Number(transform.targetVersion),
+        outputVideoUrl: null,
+        outputVideoPath: null,
+        downloadUrl: null,
+        pipelineStatus: 'preview_ready',
+        savedStep: 4,
+        status: 'active',
+        lastError: null,
+        previewRequestKey,
+      });
+    } catch (error) {
+      await Offering.findByIdAndUpdate(offeringId, {
+        pipelineStatus: 'failed',
+        lastError: error.message,
+        previewRequestKey,
+      });
+    } finally {
+      repinRuns.delete(runKey);
+    }
+  })();
+
+  repinRuns.set(runKey, run);
 };
 
 const getOwnedOffering = async (offeringId, userId) => {
@@ -620,7 +725,7 @@ const ensureComfyRunning = async () => {
       if (await isComfyAlive()) return;
     }
 
-    throw new Error('ComfyUI did not start on port 8188 within 3 minutes. Check /root/vdotest/logs.');
+    throw new Error('ComfyUI did not start on port 8188 within 3 minutes. Check /root/Kone/vdotest/logs.');
   })().finally(() => {
     comfyStartPromise = null;
   });
@@ -631,7 +736,7 @@ const ensureComfyRunning = async () => {
 const generateComfyVideo = async ({ inputPath, outputDir, videoOptions }) => {
   await ensureComfyRunning();
 
-  const pythonPath = (await fileExists(COMFY_PYTHON)) ? COMFY_PYTHON : 'python3';
+  const pythonPath = (await fileExists(COMFY_PYTHON)) ? COMFY_PYTHON : '/usr/bin/python3';
   const outputVideoPath = path.join(outputDir, 'elevator_animation.mp4');
   const metadataPath = path.join(outputDir, 'elevator_animation.json');
   const { width, height } = qualityDimensions(videoOptions.quality);
@@ -900,6 +1005,66 @@ const selectComponents = async (req, res) => {
   }
 };
 
+
+const repinPreview = async (req, res) => {
+  try {
+    const {
+      imageId,
+      offeringId,
+      components = [],
+      environments = [],
+      component_assets: componentAssets = {},
+      preview_request_key: previewRequestKey = null,
+      transform,
+    } = req.body;
+
+    if (!transform || !transform.componentKey) {
+      return res.status(400).json({ success: false, message: 'Repin transform is required' });
+    }
+    const job = await getOrRecoverJob(imageId, req.user.id);
+    if (!job) {
+      return res.status(404).json({ success: false, message: 'Invalid imageId' });
+    }
+    if (job.userId !== req.user.id) {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+    const offering = await getOwnedOffering(offeringId, req.user.id);
+    if (!offering) {
+      return res.status(404).json({ success: false, message: 'Invalid offeringId' });
+    }
+    if (Number(transform.targetVersion) > 5) {
+      return res.status(400).json({ success: false, message: 'Version limit reached. Choose the best saved version to continue.' });
+    }
+
+    await Offering.findByIdAndUpdate(offeringId, {
+      selectedComponents: components.length ? components : offering.selectedComponents,
+      environments: environments.length ? environments : offering.environments,
+      outputVideoUrl: null,
+      outputVideoPath: null,
+      downloadUrl: null,
+      pipelineStatus: 'processing',
+      lastError: null,
+      savedStep: 4,
+      status: 'active',
+      previewRequestKey,
+    });
+
+    startRepinRun({
+      offeringId,
+      imageId,
+      userId: req.user.id,
+      transform,
+      componentAssets,
+      environments: environments.length ? environments : offering.environments,
+      previewRequestKey,
+    });
+
+    return res.status(200).json({ success: true, status: 'processing', preview_request_key: previewRequestKey });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 /* STEP 4 - Generate Video */
 const generateVideo = async (req, res) => {
   try {
@@ -994,5 +1159,6 @@ module.exports = {
   runUploadPrecheck,
   selectEnvironment,
   selectComponents,
+  repinPreview,
   generateVideo,
 };

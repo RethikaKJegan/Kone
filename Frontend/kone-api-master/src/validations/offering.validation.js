@@ -1,6 +1,40 @@
 const Joi = require('joi');
 const { objectId } = require('./custom.validation');
 
+const perspectivePoint = Joi.object().keys({
+  x: Joi.number().required(),
+  y: Joi.number().required(),
+});
+
+const repinTransform = Joi.object().keys({
+  componentKey: Joi.string().valid('ceiling', 'lci', 'door', 'cop').required(),
+  componentType: Joi.string().valid('ceiling', 'lci', 'door', 'cop').required(),
+  sourceVersion: Joi.number().integer().min(1).max(5).required(),
+  targetVersion: Joi.number().integer().min(2).max(5).required(),
+  x: Joi.number().required(),
+  y: Joi.number().required(),
+  width: Joi.number().positive().required(),
+  height: Joi.number().positive().required(),
+  rotation: Joi.number().required(),
+  skewX: Joi.number().required(),
+  skewY: Joi.number().required(),
+  perspective: Joi.array().items(perspectivePoint).length(4).default([]),
+  feedbackOption: Joi.string()
+    .valid('wrong_placement', 'wrong_component', 'bad_perspective', 'bad_lighting_shadow', 'poor_blending_unrealistic')
+    .allow(null),
+});
+
+const previewVersion = Joi.object().keys({
+  version: Joi.number().integer().min(1).max(5).required(),
+  url: Joi.string().required(),
+  createdAt: Joi.alternatives().try(Joi.string(), Joi.date()).allow(null),
+  sourceVersion: Joi.number().integer().min(1).max(5).allow(null),
+  transform: repinTransform.allow(null),
+  feedbackOption: Joi.string()
+    .valid('wrong_placement', 'wrong_component', 'bad_perspective', 'bad_lighting_shadow', 'poor_blending_unrealistic')
+    .allow(null),
+});
+
 const offeringId = {
   params: Joi.object().keys({
     offeringId: Joi.string().custom(objectId).required(),
@@ -48,6 +82,8 @@ const updateOffering = {
         'failed'
       ),
       previewRequestKey: Joi.string().allow(null, ''),
+      previewVersions: Joi.array().items(previewVersion),
+      repinPass: Joi.number().integer().min(0).max(5),
       outputImageUrl: Joi.string().allow(null),
       outputVideoUrl: Joi.string().allow(null),
       downloadUrl: Joi.string().allow(null),

@@ -5,6 +5,7 @@ import sys
 import types
 from pathlib import Path
 from typing import Any
+import contextlib
 
 import numpy as np
 import torch
@@ -116,7 +117,7 @@ class LamaInpainter:
     def __init__(self, model_dir: str | Path, device: str = "cpu") -> None:
         self.model_dir = Path(model_dir)
         self.device = torch.device(device)
-        self.generator = self._load_generator().to(self.device).eval()
+        self.generator = self._load_generator().float().to(self.device).eval()
 
     def _load_generator(self) -> torch.nn.Module:
         config_path = self.model_dir / "config.yaml"
@@ -163,10 +164,16 @@ class LamaInpainter:
         image_tensor, unpad_size = pad_to_modulo(image_tensor, 8)
         mask_tensor, _ = pad_to_modulo(mask_tensor, 8)
 
-        image_tensor = image_tensor.to(self.device)
-        mask_tensor = mask_tensor.to(self.device)
+        image_tensor = image_tensor.to(self.device, dtype=torch.float32)
+        mask_tensor = mask_tensor.to(self.device, dtype=torch.float32)
         masked_image = image_tensor * (1 - mask_tensor)
-        prediction = self.generator(torch.cat([masked_image, mask_tensor], dim=1))
+        autocast_guard = (
+            torch.autocast(device_type="cuda", enabled=False)
+            if self.device.type == "cuda"
+            else contextlib.nullcontext()
+        )
+        with autocast_guard:
+            prediction = self.generator(torch.cat([masked_image, mask_tensor], dim=1).float())
         inpainted = mask_tensor * prediction + (1 - mask_tensor) * image_tensor
         inpainted = inpainted[:, :, : unpad_size[0], : unpad_size[1]]
         result = inpainted[0].permute(1, 2, 0).detach().cpu().numpy()

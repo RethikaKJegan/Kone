@@ -11,6 +11,18 @@ const componentPinSchema = mongoose.Schema(
   { _id: false }
 );
 
+const previewVersionSchema = mongoose.Schema(
+  {
+    version: { type: Number, required: true },
+    url: { type: String, required: true },
+    createdAt: { type: Date, default: Date.now },
+    sourceVersion: { type: Number, default: null },
+    transform: { type: mongoose.Schema.Types.Mixed, default: null },
+    feedbackOption: { type: String, default: null },
+  },
+  { _id: false }
+);
+
 const offeringSchema = mongoose.Schema(
   {
     projectId: {
@@ -110,6 +122,14 @@ const offeringSchema = mongoose.Schema(
     previewRequestKey: {
       type: String,
       default: null,
+    },
+    previewVersions: {
+      type: [previewVersionSchema],
+      default: [],
+    },
+    repinPass: {
+      type: Number,
+      default: 0,
     },
     outputImageUrl: {
       type: String,

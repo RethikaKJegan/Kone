@@ -19,8 +19,8 @@ except ImportError:
 
 
 COMFY_ENGINES = {"comfy", "comfy_wan", "comfy_i2v", "comfy_flf2v", "wan_comfy"}
-DEFAULT_COMFY_ROOT = Path("/root/vdotest/ComfyUI")
-DEFAULT_WORKFLOW_DIR = Path("/root/vdotest/workflows")
+DEFAULT_COMFY_ROOT = Path("/root/Kone/vdotest/ComfyUI")
+DEFAULT_WORKFLOW_DIR = Path("/root/Kone/vdotest/workflows")
 DEFAULT_COMFY_URL = "http://127.0.0.1:8188"
 
 
@@ -137,7 +137,7 @@ def resolve_workflow_path(comfy_cfg: dict[str, Any], mode: str) -> Path:
     if not workflow.exists():
         raise FileNotFoundError(
             f"ComfyUI workflow not found for {mode}: {workflow}. "
-            "Mount or install the documented /root/vdotest workflows before using the Comfy engine."
+            "Mount or install the documented /root/Kone/vdotest workflows before using the Comfy engine."
         )
     return workflow
 
@@ -210,6 +210,31 @@ def patch_workflow(
     filename_prefix: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     patched = copy.deepcopy(workflow)
+    if is_ui_workflow(patched):
+        patch_ui_workflow(
+            patched,
+            mode=mode,
+            image_refs=image_refs,
+            positive_prompt=positive_prompt,
+            negative_prompt=negative_prompt,
+            preset=preset,
+            comfy_cfg=comfy_cfg,
+            filename_prefix=filename_prefix,
+        )
+        if has_subgraph_nodes(patched):
+            api_prompt = subgraph_workflow_to_api_prompt(
+                patched,
+                comfy_cfg=comfy_cfg,
+                image_refs=image_refs,
+                positive_prompt=positive_prompt,
+                negative_prompt=negative_prompt,
+                preset=preset,
+                filename_prefix=filename_prefix,
+            )
+            return api_prompt, {"patched_nodes": [], "converted_from_ui_workflow": True, "expanded_subgraph": True}
+        api_prompt = ui_workflow_to_api_prompt(patched, comfy_cfg)
+        return api_prompt, {"patched_nodes": [], "converted_from_ui_workflow": True}
+
     nodes = patched.get("nodes") if isinstance(patched.get("nodes"), list) else patched
     if not isinstance(nodes, dict) and not isinstance(nodes, list):
         raise ValueError("Unsupported ComfyUI workflow format: expected API prompt object or nodes list")
@@ -245,6 +270,290 @@ def patch_workflow(
     debug["text_nodes"] = text_index
     return patched, debug
 
+
+
+def is_ui_workflow(workflow: dict[str, Any]) -> bool:
+    return isinstance(workflow.get("nodes"), list) and isinstance(workflow.get("links"), list)
+
+
+def patch_ui_workflow(
+    workflow: dict[str, Any],
+    *,
+    mode: str,
+    image_refs: dict[str, str],
+    positive_prompt: str,
+    negative_prompt: str,
+    preset: dict[str, Any],
+    comfy_cfg: dict[str, Any],
+    filename_prefix: str,
+) -> None:
+    load_image_index = 0
+    text_index = 0
+    for node in workflow.get("nodes", []):
+        if not isinstance(node, dict) or node.get("mode") == 4:
+            continue
+        class_type = str(node.get("type") or "")
+        title = str(node.get("title") or "").lower()
+        widgets = node.get("widgets_values")
+        if not isinstance(widgets, list):
+            continue
+        if class_type == "LoadImage" and widgets:
+            widgets[0] = select_image_for_node(mode, image_refs, title, load_image_index)
+            load_image_index += 1
+        elif class_type == "CLIPTextEncode" and widgets:
+            widgets[0] = negative_prompt if is_negative_text_node(title, text_index) else positive_prompt
+            text_index += 1
+        elif class_type == "UNETLoader" and widgets:
+            if "high" in str(widgets[0]).lower():
+                widgets[0] = comfy_cfg.get("high_noise_model", "wan2.2_i2v_high_noise_14B_fp16.safetensors")
+            elif "low" in str(widgets[0]).lower():
+                widgets[0] = comfy_cfg.get("low_noise_model", "wan2.2_i2v_low_noise_14B_fp16.safetensors")
+        elif class_type == "LoraLoaderModelOnly" and widgets:
+            if "high" in str(widgets[0]).lower():
+                widgets[0] = comfy_cfg.get("high_noise_lora", "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors")
+            elif "low" in str(widgets[0]).lower():
+                widgets[0] = comfy_cfg.get("low_noise_lora", "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors")
+        elif class_type == "CLIPLoader" and widgets:
+            widgets[0] = comfy_cfg.get("clip_name", "umt5_xxl_fp8_e4m3fn_scaled.safetensors")
+        elif class_type == "VAELoader" and widgets:
+            widgets[0] = comfy_cfg.get("vae_name", "wan_2.1_vae.safetensors")
+        elif class_type == "WanFirstLastFrameToVideo" and len(widgets) >= 3:
+            widgets[0] = preset["width"]
+            widgets[1] = preset["height"]
+            widgets[2] = preset["length"]
+        elif class_type == "CreateVideo" and widgets:
+            widgets[0] = preset["fps"]
+        elif class_type == "KSamplerAdvanced" and len(widgets) >= 10 and preset.get("seed") is not None:
+            widgets[1] = preset["seed"]
+            widgets[2] = "fixed"
+        elif class_type == "SaveVideo" and widgets:
+            widgets[0] = filename_prefix
+
+
+def has_subgraph_nodes(workflow: dict[str, Any]) -> bool:
+    subgraph_ids = {str(item.get("id")) for item in ((workflow.get("definitions") or {}).get("subgraphs") or []) if isinstance(item, dict) and item.get("id")}
+    return bool(subgraph_ids) and any(isinstance(node, dict) and str(node.get("type")) in subgraph_ids for node in workflow.get("nodes", []))
+
+
+def ui_link_map(links: Any) -> dict[int, list[Any]]:
+    out: dict[int, list[Any]] = {}
+    for link in links or []:
+        if isinstance(link, list) and len(link) >= 5:
+            out[int(link[0])] = [str(link[1]), int(link[2])]
+        elif isinstance(link, dict) and link.get("id") is not None:
+            out[int(link["id"])] = [str(link["origin_id"]), int(link.get("origin_slot", 0))]
+    return out
+
+
+def subgraph_input_value(name: str, label: str, preset: dict[str, Any], comfy_cfg: dict[str, Any], positive_prompt: str) -> Any:
+    lowered = f"{name} {label}".lower()
+    fps = max(1, int(preset.get("fps") or 16))
+    length = max(1, int(preset.get("length") or 81))
+    if name == "text" or "prompt" in lowered:
+        return positive_prompt
+    if name == "width":
+        return int(preset.get("width") or 720)
+    if name == "height":
+        return int(preset.get("height") or 960)
+    if name in {"length", "frame_num"}:
+        return length
+    if name in {"value_1", "duration"} or "duration" in lowered:
+        return max(0.1, (length - 1) / float(fps))
+    if name in {"noise_seed", "seed"}:
+        return int(preset.get("seed") if preset.get("seed") is not None else time.time() * 1000) % 1000000000
+    if "low_noise" in lowered and "unet" in lowered:
+        return comfy_cfg.get("low_noise_model", "wan2.2_i2v_low_noise_14B_fp16.safetensors")
+    if "high_noise" in lowered and "unet" in lowered:
+        return comfy_cfg.get("high_noise_model", "wan2.2_i2v_high_noise_14B_fp16.safetensors")
+    if "low_noise" in lowered and "lora" in lowered:
+        return comfy_cfg.get("low_noise_lora", "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors")
+    if "high_noise" in lowered and "lora" in lowered:
+        return comfy_cfg.get("high_noise_lora", "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors")
+    if name == "unet_name":
+        return comfy_cfg.get("high_noise_model", "wan2.2_i2v_high_noise_14B_fp16.safetensors")
+    if name == "unet_name_1":
+        return comfy_cfg.get("low_noise_model", "wan2.2_i2v_low_noise_14B_fp16.safetensors")
+    if name == "lora_name":
+        return comfy_cfg.get("high_noise_lora", "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors")
+    if name == "lora_name_1":
+        return comfy_cfg.get("low_noise_lora", "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors")
+    if name == "clip_name":
+        return comfy_cfg.get("clip_name", "umt5_xxl_fp8_e4m3fn_scaled.safetensors")
+    if name == "vae_name":
+        return comfy_cfg.get("vae_name", "wan_2.1_vae.safetensors")
+    if name == "value" or "turbo" in lowered:
+        return bool(comfy_cfg.get("enable_turbo_mode", True))
+    return None
+
+
+def ui_node_to_api_inputs(node: dict[str, Any], object_info: dict[str, Any], link_map: dict[int, list[Any]], value_by_link: dict[int, Any]) -> dict[str, Any] | None:
+    class_type = str(node.get("type") or "")
+    info = object_info.get(class_type)
+    if not info:
+        return None
+    input_order = list((info.get("input") or {}).get("required", {}).keys())
+    input_order.extend((info.get("input") or {}).get("optional", {}).keys())
+    inputs: dict[str, Any] = {}
+    linked_names: set[str] = set()
+    for ui_input in node.get("inputs", []) or []:
+        if not isinstance(ui_input, dict):
+            continue
+        name = str(ui_input.get("name") or "")
+        if name not in input_order and not name.startswith("values."):
+            continue
+        link = ui_input.get("link")
+        if link is not None:
+            link_id = int(link)
+            if link_id in value_by_link:
+                value = value_by_link[link_id]
+                if value is not None:
+                    inputs[name] = value
+                    linked_names.add(name)
+            elif link_id in link_map:
+                inputs[name] = link_map[link_id]
+                linked_names.add(name)
+    widget_values = list(node.get("widgets_values") or [])
+    if class_type == "ComfyMathExpression":
+        for ui_input in node.get("inputs", []) or []:
+            if not isinstance(ui_input, dict):
+                continue
+            name = str(ui_input.get("name") or "")
+            if not name.startswith("values.") or ui_input.get("link") is None:
+                continue
+            link_id = int(ui_input["link"])
+            value = value_by_link.get(link_id) if link_id in value_by_link else link_map.get(link_id)
+            if value is not None:
+                inputs[name] = value
+        if widget_values:
+            inputs["expression"] = widget_values[0]
+        return {"class_type": class_type, "inputs": inputs}
+    if class_type == "KSamplerAdvanced" and len(widget_values) >= 10:
+        sampler_widgets = {"add_noise": widget_values[0], "noise_seed": widget_values[1], "steps": widget_values[3], "cfg": widget_values[4], "sampler_name": widget_values[5], "scheduler": widget_values[6], "start_at_step": widget_values[7], "end_at_step": widget_values[8], "return_with_leftover_noise": widget_values[9]}
+        for name, value in sampler_widgets.items():
+            if name not in linked_names and name in input_order:
+                inputs[name] = value
+    else:
+        widget_index = 0
+        for ui_input in node.get("inputs", []) or []:
+            if not isinstance(ui_input, dict) or not isinstance(ui_input.get("widget"), dict):
+                continue
+            name = str(ui_input.get("name") or "")
+            if widget_index >= len(widget_values):
+                break
+            if name in input_order and name not in inputs and name not in linked_names:
+                inputs[name] = widget_values[widget_index]
+            widget_index += 1
+        for name in input_order:
+            if name in linked_names or name in inputs:
+                continue
+            if widget_index >= len(widget_values):
+                continue
+            inputs[name] = widget_values[widget_index]
+            widget_index += 1
+    return {"class_type": class_type, "inputs": inputs}
+
+
+def fetch_object_info(base_url: str) -> dict[str, Any]:
+    try:
+        with urllib.request.urlopen(f"{base_url}/object_info", timeout=30) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Could not read ComfyUI object_info from {base_url}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"ComfyUI object_info returned unexpected data: {type(data).__name__}")
+    return data
+
+
+def ui_workflow_to_api_prompt(workflow: dict[str, Any], comfy_cfg: dict[str, Any]) -> dict[str, Any]:
+    object_info = fetch_object_info(str(comfy_cfg.get("url", DEFAULT_COMFY_URL)).rstrip("/"))
+    link_map = ui_link_map(workflow.get("links", []))
+    prompt: dict[str, Any] = {}
+    for node in workflow.get("nodes", []) or []:
+        if not isinstance(node, dict) or node.get("mode") == 4:
+            continue
+        api_node = ui_node_to_api_inputs(node, object_info, link_map, {})
+        if api_node is not None:
+            prompt[str(node["id"])] = api_node
+    if not prompt:
+        raise ValueError("Converted ComfyUI workflow produced an empty API prompt")
+    return prompt
+
+
+def subgraph_workflow_to_api_prompt(workflow: dict[str, Any], *, comfy_cfg: dict[str, Any], image_refs: dict[str, str], positive_prompt: str, negative_prompt: str, preset: dict[str, Any], filename_prefix: str) -> dict[str, Any]:
+    object_info = fetch_object_info(str(comfy_cfg.get("url", DEFAULT_COMFY_URL)).rstrip("/"))
+    subgraphs = {str(item.get("id")): item for item in ((workflow.get("definitions") or {}).get("subgraphs") or []) if isinstance(item, dict) and item.get("id")}
+    outer_link_map = ui_link_map(workflow.get("links", []))
+    subgraph_node = next((node for node in workflow.get("nodes", []) if isinstance(node, dict) and str(node.get("type")) in subgraphs), None)
+    if subgraph_node is None:
+        return ui_workflow_to_api_prompt(workflow, comfy_cfg)
+    subgraph = subgraphs[str(subgraph_node.get("type"))]
+    synthetic_input_id = "900001"
+    inner_link_map = ui_link_map(subgraph.get("links", []))
+    input_value_by_link: dict[int, Any] = {}
+    for spec in subgraph.get("inputs", []) or []:
+        if not isinstance(spec, dict):
+            continue
+        name = str(spec.get("name") or "")
+        label = str(spec.get("label") or name)
+        value = subgraph_input_value(name, label, preset, comfy_cfg, positive_prompt)
+        for link_id in spec.get("linkIds", []) or []:
+            input_value_by_link[int(link_id)] = value
+    for outer_input in subgraph_node.get("inputs", []) or []:
+        if not isinstance(outer_input, dict) or outer_input.get("link") is None or str(outer_input.get("name")) != "start_image":
+            continue
+        source = outer_link_map.get(int(outer_input["link"])) or [synthetic_input_id, 0]
+        for spec in subgraph.get("inputs", []) or []:
+            if isinstance(spec, dict) and str(spec.get("name")) == "start_image":
+                for link_id in spec.get("linkIds", []) or []:
+                    input_value_by_link[int(link_id)] = source
+    prompt: dict[str, Any] = {}
+    for node in workflow.get("nodes", []) or []:
+        if not isinstance(node, dict) or node.get("mode") == 4 or str(node.get("type")) in subgraphs:
+            continue
+        class_type = str(node.get("type") or "")
+        if class_type in {"MarkdownNote", "Note"}:
+            continue
+        api_node = ui_node_to_api_inputs(node, object_info, outer_link_map, {})
+        if api_node is not None:
+            prompt[str(node["id"])] = api_node
+    inner_output_link = None
+    outputs = subgraph.get("outputs", []) or []
+    if outputs and isinstance(outputs[0], dict) and outputs[0].get("linkIds"):
+        inner_output_link = int(outputs[0]["linkIds"][0])
+    inner_output_source = inner_link_map.get(inner_output_link) if inner_output_link is not None else None
+    prompt[synthetic_input_id] = {"class_type": "LoadImage", "inputs": {"image": image_refs.get("input") or image_refs.get("start")}}
+    if not any(value == [synthetic_input_id, 0] for value in input_value_by_link.values()):
+        for spec in subgraph.get("inputs", []) or []:
+            if isinstance(spec, dict) and str(spec.get("name")) == "start_image":
+                for link_id in spec.get("linkIds", []) or []:
+                    input_value_by_link[int(link_id)] = [synthetic_input_id, 0]
+
+    for node in subgraph.get("nodes", []) or []:
+        if not isinstance(node, dict) or node.get("mode") == 4:
+            continue
+        class_type = str(node.get("type") or "")
+        if class_type in {"MarkdownNote", "Note"}:
+            continue
+        api_node = ui_node_to_api_inputs(node, object_info, inner_link_map, input_value_by_link)
+        if api_node is not None:
+            title = str(node.get("title") or "").lower()
+            if api_node.get("class_type") == "CLIPTextEncode" and "negative" in title:
+                api_node.setdefault("inputs", {})["text"] = negative_prompt
+            prompt[str(node["id"])] = api_node
+    if inner_output_source:
+        save_nodes = [api_node for api_node in prompt.values() if api_node.get("class_type") == "SaveVideo" and isinstance(api_node.get("inputs"), dict)]
+        if save_nodes:
+            for api_node in save_nodes:
+                api_node["inputs"]["video"] = inner_output_source
+                api_node["inputs"]["filename_prefix"] = filename_prefix
+        else:
+            prompt["900002"] = {
+                "class_type": "SaveVideo",
+                "inputs": {"video": inner_output_source, "filename_prefix": filename_prefix, "format": "auto", "codec": "auto"},
+            }
+    if not prompt:
+        raise ValueError("Expanded ComfyUI subgraph workflow produced an empty API prompt")
+    return prompt
 
 def iter_nodes(nodes: Any):
     if isinstance(nodes, dict):
