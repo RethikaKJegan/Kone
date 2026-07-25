@@ -1,11 +1,6 @@
 const Joi = require('joi');
 const { objectId } = require('./custom.validation');
 
-const perspectivePoint = Joi.object().keys({
-  x: Joi.number().required(),
-  y: Joi.number().required(),
-});
-
 const repinTransform = Joi.object().keys({
   componentKey: Joi.string().valid('ceiling', 'lci', 'door', 'cop').required(),
   componentType: Joi.string().valid('ceiling', 'lci', 'door', 'cop').required(),
@@ -15,10 +10,17 @@ const repinTransform = Joi.object().keys({
   y: Joi.number().required(),
   width: Joi.number().positive().required(),
   height: Joi.number().positive().required(),
-  rotation: Joi.number().required(),
+  rotation: Joi.number().default(0),
   skewX: Joi.number().required(),
   skewY: Joi.number().required(),
-  perspective: Joi.array().items(perspectivePoint).length(4).default([]),
+  coordinateSpace: Joi.string().valid('pixels', 'percent').default('pixels'),
+  imageWidth: Joi.number().positive(),
+  imageHeight: Joi.number().positive(),
+  editableLayerUrl: Joi.string().allow(null, ''),
+  repinBackgroundUrl: Joi.string().allow(null, ''),
+  repinBackgroundDisplayUrl: Joi.string().allow(null, ''),
+  editableLayerPath: Joi.string().allow(null, ''),
+  repinBackgroundPath: Joi.string().allow(null, ''),
   feedbackOption: Joi.string()
     .valid('wrong_placement', 'wrong_component', 'bad_perspective', 'bad_lighting_shadow', 'poor_blending_unrealistic')
     .allow(null),
@@ -65,6 +67,12 @@ const updateOffering = {
           x: Joi.number().required(),
           y: Joi.number().required(),
           aiPlaced: Joi.boolean(),
+          bbox: Joi.array().items(Joi.number()).length(4),
+          imageWidth: Joi.number().positive(),
+          imageHeight: Joi.number().positive(),
+          editableLayerUrl: Joi.string().allow(null, ''),
+          repinBackgroundUrl: Joi.string().allow(null, ''),
+          repinBackgroundDisplayUrl: Joi.string().allow(null, ''),
         })
       ),
       annotationsEnabled: Joi.boolean(),
@@ -84,6 +92,7 @@ const updateOffering = {
       previewRequestKey: Joi.string().allow(null, ''),
       previewVersions: Joi.array().items(previewVersion),
       repinPass: Joi.number().integer().min(0).max(5),
+      repinTransforms: Joi.object().pattern(Joi.string().valid('ceiling', 'lci', 'door', 'cop'), repinTransform),
       outputImageUrl: Joi.string().allow(null),
       outputVideoUrl: Joi.string().allow(null),
       downloadUrl: Joi.string().allow(null),

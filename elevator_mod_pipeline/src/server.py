@@ -31,6 +31,7 @@ class ProjectPayload(BaseModel):
     environments: list[str] | None = None
     video_options: dict[str, Any] | None = None
     transform: dict[str, Any] | None = None
+    transforms: list[dict[str, Any]] | None = None
 
 
 def write_status(storage_dir: str, data: dict[str, Any]) -> None:
@@ -90,37 +91,32 @@ def _clamp_float(value: Any, default: float = 0.0) -> float:
 
 def _transform_box_px(transform: dict[str, Any], image_size: tuple[int, int]) -> tuple[int, int, int, int]:
     width, height = image_size
-    x1 = round(_clamp_float(transform.get("x")) / 100.0 * width)
-    y1 = round(_clamp_float(transform.get("y")) / 100.0 * height)
-    x2 = round((_clamp_float(transform.get("x")) + _clamp_float(transform.get("width"), 10.0)) / 100.0 * width)
-    y2 = round((_clamp_float(transform.get("y")) + _clamp_float(transform.get("height"), 10.0)) / 100.0 * height)
+    coordinate_space = str(transform.get("coordinateSpace") or "").lower()
+    if coordinate_space == "pixels" or transform.get("imageWidth") or transform.get("imageHeight"):
+        source_width = _clamp_float(transform.get("imageWidth"), width)
+        source_height = _clamp_float(transform.get("imageHeight"), height)
+        scale_x = width / max(1.0, source_width)
+        scale_y = height / max(1.0, source_height)
+        x1 = round(_clamp_float(transform.get("x")) * scale_x)
+        y1 = round(_clamp_float(transform.get("y")) * scale_y)
+        box_w = round(_clamp_float(transform.get("width"), 10.0) * scale_x)
+        box_h = round(_clamp_float(transform.get("height"), 10.0) * scale_y)
+        x2 = x1 + box_w
+        y2 = y1 + box_h
+    else:
+        x1 = round(_clamp_float(transform.get("x")) / 100.0 * width)
+        y1 = round(_clamp_float(transform.get("y")) / 100.0 * height)
+        x2 = round((_clamp_float(transform.get("x")) + _clamp_float(transform.get("width"), 10.0)) / 100.0 * width)
+        y2 = round((_clamp_float(transform.get("y")) + _clamp_float(transform.get("height"), 10.0)) / 100.0 * height)
     x1, y1 = max(0, min(width - 1, x1)), max(0, min(height - 1, y1))
     x2, y2 = max(x1 + 1, min(width, x2)), max(y1 + 1, min(height, y2))
     return x1, y1, x2, y2
 
 
-def _perspective_points_px(transform: dict[str, Any], image_size: tuple[int, int]) -> list[tuple[float, float]] | None:
-    points = transform.get("perspective")
-    if not isinstance(points, list) or len(points) != 4:
-        return None
-    width, height = image_size
-    result = []
-    for point in points:
-        if not isinstance(point, dict):
-            return None
-        result.append((_clamp_float(point.get("x")) / 100.0 * width, _clamp_float(point.get("y")) / 100.0 * height))
-    return result
-
-
-
-def _perspective_differs_from_box(transform: dict[str, Any], perspective: list[tuple[float, float]] | None, image_size: tuple[int, int]) -> bool:
-    if perspective is None:
-        return False
-    x1, y1, x2, y2 = _transform_box_px(transform, image_size)
-    default = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
-    return any(abs(px - dx) > 2 or abs(py - dy) > 2 for (px, py), (dx, dy) in zip(perspective, default))
-
-def _component_asset_for_transform(transform: dict[str, Any], component_assets: dict[str, str] | None) -> Path:
+def _component_image_for_transform(transform: dict[str, Any], component_assets: dict[str, str] | None) -> Path:
+    editable_layer = transform.get("editableLayerPath")
+    if editable_layer and Path(str(editable_layer)).exists():
+        return Path(str(editable_layer))
     component_key = str(transform.get("componentKey") or transform.get("componentType") or "").lower()
     assets = selected_component_asset_paths(component_assets)
     if component_key not in assets:
@@ -131,9 +127,7 @@ def _component_asset_for_transform(transform: dict[str, Any], component_assets: 
 def _warp_component(component: Image.Image, transform: dict[str, Any], image_size: tuple[int, int]) -> tuple[Image.Image, tuple[int, int, int, int]]:
     x1, y1, x2, y2 = _transform_box_px(transform, image_size)
     target_w, target_h = x2 - x1, y2 - y1
-    fitted = ImageOps.contain(component.convert("RGBA"), (target_w, target_h), method=Image.Resampling.LANCZOS)
-    slot = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
-    slot.paste(fitted, ((target_w - fitted.width) // 2, (target_h - fitted.height) // 2), fitted)
+    slot = component.convert("RGBA").resize((target_w, target_h), Image.Resampling.LANCZOS)
 
     skew_x = _clamp_float(transform.get("skewX"))
     skew_y = _clamp_float(transform.get("skewY"))
@@ -157,28 +151,8 @@ def _warp_component(component: Image.Image, transform: dict[str, Any], image_siz
     return slot, (x1, y1, x2, y2)
 
 
-def _place_manual_component(base_image: Image.Image, component_image: Image.Image, transform: dict[str, Any]) -> tuple[Image.Image, tuple[int, int, int, int], list[tuple[float, float]] | None]:
-    perspective = _perspective_points_px(transform, base_image.size)
+def _place_manual_component(base_image: Image.Image, component_image: Image.Image, transform: dict[str, Any]) -> tuple[Image.Image, tuple[int, int, int, int]]:
     result = base_image.convert("RGBA")
-    if _perspective_differs_from_box(transform, perspective, base_image.size):
-        src = np.array(component_image.convert("RGBA"))
-        src_h, src_w = src.shape[:2]
-        source_quad = np.array([[0, 0], [src_w - 1, 0], [src_w - 1, src_h - 1], [0, src_h - 1]], dtype=np.float32)
-        destination_quad = np.array(perspective, dtype=np.float32)
-        homography = cv2.getPerspectiveTransform(source_quad, destination_quad)
-        warped = cv2.warpPerspective(src, homography, base_image.size, flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_TRANSPARENT)
-        warped_image = Image.fromarray(warped, "RGBA")
-        result.alpha_composite(warped_image)
-        xs = [point[0] for point in perspective]
-        ys = [point[1] for point in perspective]
-        bbox = (
-            max(0, round(min(xs))),
-            max(0, round(min(ys))),
-            min(base_image.width, round(max(xs))),
-            min(base_image.height, round(max(ys))),
-        )
-        return result.convert("RGB"), bbox, perspective
-
     warped, bbox = _warp_component(component_image, transform, base_image.size)
     x1, y1, x2, y2 = bbox
     paste_x, paste_y = max(0, x1), max(0, y1)
@@ -189,7 +163,7 @@ def _place_manual_component(base_image: Image.Image, component_image: Image.Imag
     visible = warped.crop((crop_l, crop_t, crop_r, crop_b))
     result.paste(visible, (paste_x, paste_y), visible)
     px_bbox = (paste_x, paste_y, paste_x + visible.width, paste_y + visible.height)
-    return result.convert("RGB"), px_bbox, perspective
+    return result.convert("RGB"), px_bbox
 
 
 def _firered_prompt(transform: dict[str, Any]) -> str:
@@ -206,25 +180,31 @@ def _firered_prompt(transform: dict[str, Any]) -> str:
 
 
 def _run_firered_if_available(input_path: Path, output_path: Path, transform: dict[str, Any]) -> bool:
-    script = os.environ.get("FIRERED_REPIN_SCRIPT") or os.environ.get("FIRERED_IMAGE_EDIT_SCRIPT")
-    if not script:
-        return False
+    script = os.environ.get("FIRERED_REPIN_SCRIPT") or os.environ.get("FIRERED_IMAGE_EDIT_SCRIPT") or "/root/Kone/fire_red_image_edit.py"
     script_path = Path(script)
     if not script_path.exists():
         return False
-    subprocess.run(
-        [
-            sys.executable,
-            str(script_path),
-            "--image",
-            str(input_path),
-            "--prompt",
-            _firered_prompt(transform),
-            "--output",
-            str(output_path),
-        ],
-        check=True,
-    )
+    env = {**os.environ, "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0")}
+    try:
+        subprocess.run(
+            [
+                os.environ.get("FIRERED_PYTHON", "/root/Kone/vdotest/ComfyUI/.venv/bin/python"),
+                str(script_path),
+                "--image",
+                str(input_path),
+                "--prompt",
+                _firered_prompt(transform),
+                "--output",
+                str(output_path),
+                "--steps",
+                str(os.environ.get("FIRERED_STEPS", "28")),
+            ],
+            check=True,
+            env=env,
+        )
+    except Exception as exc:
+        print(f"[FIRERED] unavailable or failed: {exc}", file=sys.stderr)
+        return False
     return output_path.exists()
 
 
@@ -348,60 +328,81 @@ def repin_components(payload: ProjectPayload):
     write_status(payload.storage_dir, public_status("processing"))
 
     try:
-        transform = payload.transform or {}
-        source_version = int(transform.get("sourceVersion") or 1)
-        target_version = int(transform.get("targetVersion") or 2)
+        incoming_transforms = payload.transforms if isinstance(payload.transforms, list) else []
+        if payload.transform:
+            incoming_transforms = [*incoming_transforms, payload.transform]
+
+        transforms_by_component: dict[str, dict[str, Any]] = {}
+        for item in incoming_transforms:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("componentKey") or item.get("componentType") or "").lower()
+            if key:
+                transforms_by_component[key] = item
+        transforms = list(transforms_by_component.values())
+        if not transforms:
+            raise ValueError("Repin transform is required")
+
+        target_transform = payload.transform or transforms[0]
+        source_version = int(target_transform.get("sourceVersion") or 1)
+        target_version = int(target_transform.get("targetVersion") or 2)
         if target_version > 5:
             raise ValueError("Version limit reached. Choose the best saved version to continue.")
 
-        source_candidates = [
-            preview_dir / f"final_output_v{source_version}.png",
-            storage / "uploads" / f"repin_source_v{source_version}.png",
-            preview_dir / "final_output.png",
-            storage / "uploads" / "input.jpg",
-        ]
-        source_image_path = next((candidate for candidate in source_candidates if candidate.exists()), None)
+        background_path = target_transform.get("repinBackgroundPath")
+        if background_path and Path(str(background_path)).exists():
+            source_image_path = Path(str(background_path))
+            transforms = [target_transform]
+        else:
+            source_candidates = [
+                preview_dir / f"final_output_v{source_version}.png",
+                preview_dir / "final_output.png",
+                storage / "uploads" / "input.jpg",
+            ]
+            source_image_path = next((candidate for candidate in source_candidates if candidate.exists()), None)
         if source_image_path is None:
-            raise FileNotFoundError("Repin source preview was not found")
+            raise FileNotFoundError("Repin source image was not found")
 
-        base_image = Image.open(source_image_path).convert("RGB")
-        component_image = Image.open(_component_asset_for_transform(transform, payload.component_assets)).convert("RGBA")
-        placed_image, bbox, perspective = _place_manual_component(base_image, component_image, transform)
+        placed_image = Image.open(source_image_path).convert("RGB")
+        placements = []
+        for transform in transforms:
+            component_image = Image.open(_component_image_for_transform(transform, payload.component_assets)).convert("RGBA")
+            placed_image, bbox = _place_manual_component(placed_image, component_image, transform)
+            placements.append({
+                "id": transform.get("componentKey"),
+                "component_type": transform.get("componentType"),
+                "manual_repin": True,
+                "source_version": source_version,
+                "target_version": target_version,
+                "feedback_option": transform.get("feedbackOption"),
+                "transform": transform,
+                "final_insertion_bbox": list(bbox),
+                "final_component_placement": {"bbox": list(bbox), "reason": "manual_repin_transform"},
+                "firered_realism_refine": False,
+                "lama_used": False,
+            })
 
         placed_path = pipeline_dir / f"repin_v{target_version}_placed.png"
         output_path = preview_dir / f"final_output_v{target_version}.png"
         placed_image.save(placed_path)
-        used_firered = _run_firered_if_available(placed_path, output_path, transform)
+        used_firered = _run_firered_if_available(placed_path, output_path, target_transform)
         if not used_firered:
             placed_image.save(output_path)
         shutil.copy2(output_path, preview_dir / "final_output.png")
 
-        placement = {
-            "id": transform.get("componentKey"),
-            "component_type": transform.get("componentType"),
-            "manual_repin": True,
+        for placement in placements:
+            placement["firered_realism_refine"] = used_firered
+
+        placements_path = pipeline_dir / "component_placements.json"
+        placements_path.write_text(json.dumps(placements, indent=2), encoding="utf-8")
+        (pipeline_dir / f"repin_transform_v{target_version}.json").write_text(json.dumps({
             "source_version": source_version,
             "target_version": target_version,
-            "feedback_option": transform.get("feedbackOption"),
-            "transform": transform,
-            "final_insertion_bbox": list(bbox),
-            "final_component_placement": {"bbox": list(bbox), "reason": "manual_repin_transform"},
-            "perspective_corner_points": perspective,
+            "transforms": transforms,
+            "placements": placements,
             "firered_realism_refine": used_firered,
             "lama_used": False,
-        }
-        existing = []
-        placements_path = pipeline_dir / "component_placements.json"
-        if placements_path.exists():
-            try:
-                loaded = json.loads(placements_path.read_text(encoding="utf-8"))
-                existing = loaded if isinstance(loaded, list) else []
-            except json.JSONDecodeError:
-                existing = []
-        existing = [item for item in existing if item.get("id") != transform.get("componentKey")]
-        existing.append(placement)
-        placements_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-        (pipeline_dir / f"repin_transform_v{target_version}.json").write_text(json.dumps(placement, indent=2), encoding="utf-8")
+        }, indent=2), encoding="utf-8")
 
         status = public_status("preview_ready")
         status.update({

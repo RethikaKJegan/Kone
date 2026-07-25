@@ -73,6 +73,7 @@ interface OfferingState {
   setUpload: (file: File) => Promise<void>
   setComponents: (environments: Environment[], components: ComponentKey[]) => Promise<void>
   setPins: (pins: ComponentPin[]) => void
+  setRepinTransforms: (transforms: Partial<Record<ComponentKey, RepinTransform>>) => void
   runAIPlacement: () => Promise<ComponentPin[]>
   submitRepinPreview: (transform: RepinTransform) => Promise<void>
   setAnnotationState: (enabled: boolean, filters: ComponentKey[]) => void
@@ -105,6 +106,7 @@ function normalizeOffering(offering: Offering): Offering {
     downloadUrl: offering.downloadUrl ?? null,
     previewVersions: offering.previewVersions ?? (outputImageUrl ? [{ version: 1, url: outputImageUrl }] : []),
     repinPass: offering.repinPass ?? (offering.previewVersions?.length || (outputImageUrl ? 1 : 0)),
+    repinTransforms: offering.repinTransforms ?? {},
   }
 }
 
@@ -303,6 +305,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
         downloadUrl: null,
         previewVersions: [],
         repinPass: 0,
+        repinTransforms: {},
       })
       set(state => writeOfferingState(state, updated))
       return
@@ -342,6 +345,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       downloadUrl: null,
       previewVersions: [],
       repinPass: 0,
+      repinTransforms: {},
       ...(imageId ? { imageId } : {}),
     }
     const updated = patchOffering(currentOffering, updates)
@@ -368,6 +372,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       downloadUrl: null,
       previewVersions: [],
       repinPass: 0,
+      repinTransforms: {},
     }
     const updated = patchOffering(currentOffering, updates)
     set(state => writeOfferingState(state, updated))
@@ -403,6 +408,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
         downloadUrl: null,
         previewVersions: [],
         repinPass: 0,
+        repinTransforms: {},
       })
       refreshProjects()
 
@@ -437,6 +443,17 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       apiClient.patch(`/offerings/${currentOffering.id}`, { componentPins: pins })
     }
     const updated = patchOffering(currentOffering, { componentPins: pins })
+    set(state => writeOfferingState(state, updated))
+  },
+
+
+  setRepinTransforms: transforms => {
+    const { currentOffering } = get()
+    if (!currentOffering) return
+    if (!isGuestSession()) {
+      apiClient.patch(`/offerings/${currentOffering.id}`, { repinTransforms: transforms }).catch(() => {})
+    }
+    const updated = patchOffering(currentOffering, { repinTransforms: transforms })
     set(state => writeOfferingState(state, updated))
   },
 
@@ -481,13 +498,21 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
     set({ isProcessing: true })
     try {
       const previewRequestKey = `repin:${currentOffering.id}:${transform.componentKey}:v${transform.targetVersion}:${Date.now()}`
-      const selectedComponents = currentOffering.selectedComponents.length ? currentOffering.selectedComponents : [transform.componentKey]
+      const selectedComponents = Array.from(new Set([
+        ...(currentOffering.selectedComponents.length ? currentOffering.selectedComponents : []),
+        transform.componentKey,
+      ]))
+      const confirmedRepinTransforms = {
+        ...(currentOffering.repinTransforms ?? {}),
+        [transform.componentKey]: transform,
+      }
       const updated = patchOffering(currentOffering, {
         pipelineStatus: 'processing',
         previewRequestKey,
         outputVideoUrl: null,
         videoGenerated: false,
         downloadUrl: null,
+        repinTransforms: confirmedRepinTransforms,
       })
       set(state => writeOfferingState(state, updated))
 
@@ -508,6 +533,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
           environments: currentOffering.environments,
           preview_request_key: previewRequestKey,
           transform,
+          transforms: Object.values(confirmedRepinTransforms).filter(Boolean),
         })
       } else {
         const imageId = imageIdFromOffering(currentOffering)
@@ -525,6 +551,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
           component_assets: componentAssets,
           preview_request_key: previewRequestKey,
           transform,
+          transforms: Object.values(confirmedRepinTransforms).filter(Boolean),
         })
       }
     } catch (error) {

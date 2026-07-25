@@ -6,6 +6,13 @@ const ApiError = require('../utils/ApiError');
 const { offeringService, projectService, brochureService, activityLogService } = require('../services');
 
 const fsPromises = fs.promises;
+const storageRoot = path.resolve(__dirname, '..', '..', 'storage');
+const storagePublicUrl = (filePath) => {
+  if (!filePath) return null;
+  const resolved = path.resolve(filePath);
+  if (!resolved.startsWith(storageRoot)) return null;
+  return `/storage/${path.relative(storageRoot, resolved).split(path.sep).join('/')}`;
+};
 
 const getRequestMeta = (req) => ({
   ipAddress: req.ip,
@@ -28,6 +35,60 @@ const exists = async (filePath) => {
   } catch {
     return false;
   }
+};
+
+const readJsonIfExists = async (filePath) => {
+  try {
+    return JSON.parse(await fsPromises.readFile(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
+};
+
+const componentPinsFromPlacement = async (storageDir) => {
+  const placements = await readJsonIfExists(path.join(storageDir, 'pipeline', 'component_placements.json'));
+  if (!Array.isArray(placements)) return [];
+  const detections = await readJsonIfExists(path.join(storageDir, 'pipeline', 'elevator_detections.json'));
+  const width = Number(detections?.metadata?.image_width) || 0;
+  const height = Number(detections?.metadata?.image_height) || 0;
+  if (!width || !height) return [];
+
+  const supported = new Set(['lci', 'cop', 'door', 'ceiling']);
+  return placements
+    .map((placement) => {
+      const componentKey = String(placement.id || '').toLowerCase();
+      if (!supported.has(componentKey)) return null;
+      const bbox = placement.final_insertion_bbox || placement.final_component_placement?.bbox || placement.inpaint_bbox;
+      if (!Array.isArray(bbox) || bbox.length !== 4) return null;
+      const [x1, y1, x2, y2] = bbox.map(Number);
+      if (![x1, y1, x2, y2].every(Number.isFinite)) return null;
+      return {
+        componentKey,
+        x: Math.round(((x1 + x2) / 2 / width) * 100),
+        y: Math.round(((y1 + y2) / 2 / height) * 100),
+        aiPlaced: true,
+        bbox: [x1, y1, x2, y2],
+        imageWidth: width,
+        imageHeight: height,
+        editableLayerUrl: storagePublicUrl(placement.editable_layer_path),
+        repinBackgroundUrl: storagePublicUrl(placement.repin_background_path),
+        repinBackgroundDisplayUrl: storagePublicUrl(placement.repin_background_web_path || placement.repin_background_path),
+      };
+    })
+    .filter(Boolean);
+};
+
+const hydratePlacementPins = async (offering, userId) => {
+  const pins = Array.isArray(offering.componentPins) ? offering.componentPins : [];
+  if (pins.some((pin) => Array.isArray(pin.bbox) && pin.bbox.length === 4)) return offering;
+  const imageId = getImageIdFromOffering(offering);
+  if (!imageId) return offering;
+  const storageDir = path.join(__dirname, '..', '..', 'storage', 'auth', String(userId), imageId);
+  const recoveredPins = await componentPinsFromPlacement(storageDir);
+  if (!recoveredPins.length) return offering;
+  offering.componentPins = recoveredPins;
+  await offering.save();
+  return offering;
 };
 
 const assertProjectAccess = async (projectId, userId) => {
@@ -74,11 +135,13 @@ const createOffering = catchAsync(async (req, res) => {
 const getOfferings = catchAsync(async (req, res) => {
   await assertProjectAccess(req.params.projectId, req.user.id);
   const offerings = await offeringService.getOfferingsByProject(req.params.projectId);
+  await Promise.all(offerings.map((offering) => hydratePlacementPins(offering, req.user.id)));
   res.send(offerings);
 });
 
 const getOffering = catchAsync(async (req, res) => {
   const offering = await assertOfferingAccess(req.params.offeringId, req.user.id);
+  await hydratePlacementPins(offering, req.user.id);
   res.send(offering);
 });
 

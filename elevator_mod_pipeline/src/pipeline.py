@@ -24,6 +24,72 @@ from .video_router import render_video
 from .visualize import save_detection_visuals
 
 
+def _save_repin_layer_outputs(
+    run_dir: Path,
+    component_id: str,
+    before_path: Path,
+    after_path: Path,
+    mask_path: Path,
+    placement_debug: dict[str, Any],
+) -> dict[str, Any]:
+    mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+    before = load_image_rgb(before_path)
+    after = load_image_rgb(after_path)
+    if mask is None or mask.shape[:2] != after.shape[:2]:
+        mask = np.any(np.abs(after.astype(np.int16) - before.astype(np.int16)) > 3, axis=2).astype(np.uint8) * 255
+    bbox = placement_debug.get("final_insertion_bbox") or placement_debug.get("final_component_placement", {}).get("bbox")
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        ys, xs = np.where(mask > 0)
+        if len(xs) == 0 or len(ys) == 0:
+            return {}
+        bbox = [int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1)]
+    h, w = after.shape[:2]
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    x1, y1 = max(0, min(w - 1, x1)), max(0, min(h - 1, y1))
+    x2, y2 = max(x1 + 1, min(w, x2)), max(y1 + 1, min(h, y2))
+    crop_rgb = after[y1:y2, x1:x2]
+    crop_alpha = mask[y1:y2, x1:x2]
+    rgba = np.dstack([crop_rgb, crop_alpha])
+    layer_dir = run_dir / "repin" / "layers"
+    layer_dir.mkdir(parents=True, exist_ok=True)
+    layer_path = layer_dir / f"{component_id}.png"
+    cv2.imwrite(str(layer_path), cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA))
+    return {"editable_layer_path": str(layer_path), "editable_layer_bbox": [x1, y1, x2, y2]}
+
+
+def _save_repin_background_outputs(run_dir: Path, layer_records: list[dict[str, Any]], final_composite_path: Path) -> None:
+    if not layer_records or not final_composite_path.exists():
+        return
+    final_rgb = load_image_rgb(final_composite_path)
+    bg_dir = run_dir / "repin" / "backgrounds"
+    bg_dir.mkdir(parents=True, exist_ok=True)
+    for record in layer_records:
+        component_id = record.get("id")
+        mask_path = Path(record.get("mask_path", ""))
+        before_path = Path(record.get("before_path", ""))
+        if not component_id or not mask_path.exists() or not before_path.exists():
+            continue
+        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        before = load_image_rgb(before_path)
+        if mask is None or mask.shape[:2] != final_rgb.shape[:2] or before.shape[:2] != final_rgb.shape[:2]:
+            continue
+        restore_mask = cv2.dilate((mask > 0).astype(np.uint8) * 255, np.ones((9, 9), np.uint8), iterations=1)
+        restored = final_rgb.copy()
+        restored[restore_mask > 0] = before[restore_mask > 0]
+        background_path = bg_dir / f"{component_id}.png"
+        background_web_path = bg_dir / f"{component_id}_web.jpg"
+        save_rgb(background_path, restored)
+        preview = restored.copy()
+        max_side = 1400
+        scale = min(1.0, max_side / max(preview.shape[:2]))
+        if scale < 1.0:
+            preview = cv2.resize(preview, (max(1, int(preview.shape[1] * scale)), max(1, int(preview.shape[0] * scale))), interpolation=cv2.INTER_AREA)
+        cv2.imwrite(str(background_web_path), cv2.cvtColor(preview, cv2.COLOR_RGB2BGR), [int(cv2.IMWRITE_JPEG_QUALITY), 86])
+        record["placement_debug"]["repin_background_path"] = str(background_path)
+        record["placement_debug"]["repin_background_web_path"] = str(background_web_path)
+
+
+
 class PipelineValidationError(RuntimeError):
     pass
 
@@ -236,10 +302,12 @@ def run(config_path: str | Path) -> None:
         current_background = cleaned_path
         combined_panel_mask = None
         component_placements: list[dict[str, Any]] = []
+        repin_layer_records: list[dict[str, Any]] = []
         for index, (replacement, component_cfg) in enumerate(zip(replacements, component_cfgs), start=1):
             replacement_id = replacement["id"]
             component_out = composite_path if index == len(replacements) else run_dir / f"composite_{replacement_id}.png"
             component_mask_path = run_dir / f"harmonization_mask_{replacement_id}.png"
+            before_component_path = Path(current_background)
             status("place", f"[PLACE] Placing component: {replacement_id}")
             insert_mod_panel(
                 current_background,
@@ -257,8 +325,24 @@ def run(config_path: str | Path) -> None:
             placement_debug = _load_optional_json(run_dir / "component_placement_debug.json")
             placement_debug["id"] = replacement_id
             placement_debug["asset"] = replacement["asset"]
+            layer_info = _save_repin_layer_outputs(
+                run_dir,
+                replacement_id,
+                before_component_path,
+                component_out,
+                component_mask_path,
+                placement_debug,
+            )
+            placement_debug.update(layer_info)
             component_placements.append(placement_debug)
+            repin_layer_records.append({
+                "id": replacement_id,
+                "before_path": str(before_component_path),
+                "mask_path": str(component_mask_path),
+                "placement_debug": placement_debug,
+            })
             current_background = component_out
+        _save_repin_background_outputs(run_dir, repin_layer_records, composite_path)
         if combined_panel_mask is not None:
             cv2.imwrite(str(panel_mask_path), combined_panel_mask)
         save_json(run_dir / "component_placements.json", component_placements)

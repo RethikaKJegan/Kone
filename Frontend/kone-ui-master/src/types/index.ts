@@ -36,11 +36,12 @@ export interface ComponentPin {
   x: number
   y: number
   aiPlaced: boolean
-}
-
-export interface PerspectivePoint {
-  x: number
-  y: number
+  bbox?: [number, number, number, number]
+  imageWidth?: number
+  imageHeight?: number
+  editableLayerUrl?: string | null
+  repinBackgroundUrl?: string | null
+  repinBackgroundDisplayUrl?: string | null
 }
 
 export type RepinFeedbackOption =
@@ -62,7 +63,14 @@ export interface RepinTransform {
   rotation: number
   skewX: number
   skewY: number
-  perspective: PerspectivePoint[]
+  coordinateSpace?: 'pixels' | 'percent'
+  imageWidth?: number
+  imageHeight?: number
+  editableLayerUrl?: string | null
+  repinBackgroundUrl?: string | null
+  repinBackgroundDisplayUrl?: string | null
+  editableLayerPath?: string | null
+  repinBackgroundPath?: string | null
   feedbackOption?: RepinFeedbackOption | null
 }
 
@@ -108,6 +116,7 @@ export interface Offering {
   previewRequestKey?: string | null
   previewVersions?: PreviewVersion[]
   repinPass?: number
+  repinTransforms?: Partial<Record<ComponentKey, RepinTransform>>
   videoGenerated?: boolean
   downloadUrl?: string | null
 }

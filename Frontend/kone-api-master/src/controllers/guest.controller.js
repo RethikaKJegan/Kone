@@ -12,7 +12,7 @@ const API_ROOT = path.join(__dirname, '..', '..');
 const STORAGE_ROOT = path.join(API_ROOT, 'storage');
 const LOGIC_URL = process.env.LOGIC_URL || 'http://localhost:8001';
 const execFileAsync = promisify(execFile);
-const COMFY_ROOT = process.env.COMFY_ROOT || '/root/Kone/vdotest';
+const COMFY_ROOT = process.env.COMFY_ROOT || '/workspace/Kone/vdotest';
 const COMFY_URL = process.env.COMFY_URL || 'http://127.0.0.1:8188';
 const COMFY_RUNNER = process.env.COMFY_RUNNER || path.join(COMFY_ROOT, 'run_i2v_api.py');
 const COMFY_START_SCRIPT = process.env.COMFY_START_SCRIPT || path.join(COMFY_ROOT, 'scripts', 'start_comfy_logged.sh');
@@ -63,6 +63,22 @@ async function writeStatus(root, status) {
 
 function publicStorageUrl(sessionId, projectId, filePath) {
   return filePath ? `/storage/guest/${safeName(sessionId)}/${safeName(projectId)}/${filePath}` : null;
+}
+
+function localStoragePathFromUrl(url) {
+  if (!url || typeof url !== 'string') return null;
+  const [pathname] = url.split('?');
+  if (!pathname.startsWith('/storage/')) return null;
+  const resolved = path.resolve(STORAGE_ROOT, pathname.replace('/storage/', ''));
+  return resolved.startsWith(STORAGE_ROOT) ? resolved : null;
+}
+
+function withLocalRepinFiles(item = {}) {
+  return {
+    ...item,
+    editableLayerPath: item.editableLayerPath || localStoragePathFromUrl(item.editableLayerUrl),
+    repinBackgroundPath: item.repinBackgroundPath || localStoragePathFromUrl(item.repinBackgroundUrl),
+  };
 }
 
 async function readJsonIfExists(file) {
@@ -156,7 +172,7 @@ async function ensureComfyRunning() {
       if (await isComfyAlive()) return;
     }
 
-    throw new Error('ComfyUI did not start on port 8188 within 3 minutes. Check /root/Kone/vdotest/logs.');
+    throw new Error('ComfyUI did not start on port 8188 within 3 minutes. Check /workspace/Kone/vdotest/logs.');
   })().finally(() => {
     comfyStartPromise = null;
   });
@@ -281,7 +297,7 @@ function shouldRegenerateVideo(videoExists, currentVideoMeta, videoOptions, requ
   return requestedIsPremium || currentVideoMeta.quality !== requestedQuality;
 }
 
-async function componentPinsFromPlacement(root) {
+async function componentPinsFromPlacement(root, urlFor = null) {
   const placements = await readJsonIfExists(path.join(root, 'pipeline', 'component_placements.json'));
   if (!Array.isArray(placements)) return [];
   const detections = await readJsonIfExists(path.join(root, 'pipeline', 'elevator_detections.json'));
@@ -303,6 +319,12 @@ async function componentPinsFromPlacement(root) {
         x: Math.round(((x1 + x2) / 2 / width) * 100),
         y: Math.round(((y1 + y2) / 2 / height) * 100),
         aiPlaced: true,
+        bbox: [x1, y1, x2, y2],
+        imageWidth: width,
+        imageHeight: height,
+        editableLayerUrl: urlFor && placement.editable_layer_path ? urlFor(path.relative(root, placement.editable_layer_path)) : null,
+        repinBackgroundUrl: urlFor && placement.repin_background_path ? urlFor(path.relative(root, placement.repin_background_path)) : null,
+        repinBackgroundDisplayUrl: urlFor && (placement.repin_background_web_path || placement.repin_background_path) ? urlFor(path.relative(root, placement.repin_background_web_path || placement.repin_background_path)) : null,
       };
     })
     .filter(Boolean);
@@ -319,6 +341,8 @@ const uploadImage = catchAsync(async (req, res) => {
   }
 
   const root = projectDir(sessionId, projectId);
+  const logicTransform = withLocalRepinFiles(transform);
+  const logicTransforms = transforms.map((item) => withLocalRepinFiles(item));
   await ensureProjectDirs(root);
   await Promise.all(['pipeline', 'preview', 'video', 'downloads'].map((d) => fsp.rm(path.join(root, d), { recursive: true, force: true })));
   await ensureProjectDirs(root);
@@ -331,6 +355,8 @@ const uploadImage = catchAsync(async (req, res) => {
 const precheck = catchAsync(async (req, res) => {
   const { session_id: sessionId, project_id: projectId, project_name: projectName } = req.body;
   const root = projectDir(sessionId, projectId);
+  const logicTransform = withLocalRepinFiles(transform);
+  const logicTransforms = transforms.map((item) => withLocalRepinFiles(item));
   try {
     const { data } = await axios.post(`${LOGIC_URL}/precheck`, {
       session_id: sessionId,
@@ -359,6 +385,8 @@ const runComponents = catchAsync(async (req, res) => {
     preview_request_key: previewRequestKey,
   } = req.body;
   const root = projectDir(sessionId, projectId);
+  const logicTransform = withLocalRepinFiles(transform);
+  const logicTransforms = transforms.map((item) => withLocalRepinFiles(item));
   const queueKey = root;
   const latestKey = previewRequestKey || null;
   latestComponentRunKeys.set(queueKey, latestKey);
@@ -413,8 +441,11 @@ const runRepin = catchAsync(async (req, res) => {
     environments,
     preview_request_key: previewRequestKey,
     transform,
+    transforms = [],
   } = req.body;
   const root = projectDir(sessionId, projectId);
+  const logicTransform = withLocalRepinFiles(transform);
+  const logicTransforms = transforms.map((item) => withLocalRepinFiles(item));
   const queueKey = root;
   const latestKey = previewRequestKey || null;
   latestComponentRunKeys.set(queueKey, latestKey);
@@ -434,7 +465,8 @@ const runRepin = catchAsync(async (req, res) => {
           component_assets: componentAssets,
           environments,
           preview_request_key: previewRequestKey,
-          transform,
+          transform: logicTransform,
+          transforms: logicTransforms,
         }, { timeout: 0 });
         if (!data?.ok) throw new Error(data?.error || 'Repin preview failed');
         const current = await readStatus(root);
@@ -461,8 +493,10 @@ const runRepin = catchAsync(async (req, res) => {
 const status = catchAsync(async (req, res) => {
   const { session_id: sessionId, project_id: projectId } = req.query;
   const root = projectDir(sessionId, projectId);
+  const logicTransform = withLocalRepinFiles(transform);
+  const logicTransforms = transforms.map((item) => withLocalRepinFiles(item));
   const current = await readStatus(root);
-  const componentPins = await componentPinsFromPlacement(root);
+  const componentPins = await componentPinsFromPlacement(root, (filePath) => publicStorageUrl(sessionId, projectId, filePath));
   const previewVersions = Array.isArray(current.preview_versions)
     ? current.preview_versions.map((version) => ({ ...version, url: publicStorageUrl(sessionId, projectId, version.url) }))
     : undefined;
@@ -481,6 +515,8 @@ const status = catchAsync(async (req, res) => {
 const generateVideo = catchAsync(async (req, res) => {
   const { session_id: sessionId, project_id: projectId, video_options: videoOptions } = req.body;
   const root = projectDir(sessionId, projectId);
+  const logicTransform = withLocalRepinFiles(transform);
+  const logicTransforms = transforms.map((item) => withLocalRepinFiles(item));
   await writeStatus(root, { status: 'generating_video', preview_url: 'preview/final_output.png', video_url: null, download_url: null, error: null });
   console.log(`[guest/video] calling ComfyUI for ${projectId}`);
   generateComfyVideo({
@@ -504,6 +540,8 @@ const generateVideo = catchAsync(async (req, res) => {
 const finalize = catchAsync(async (req, res) => {
   const { session_id: sessionId, project_id: projectId, video_options: videoOptions = {} } = req.body;
   const root = projectDir(sessionId, projectId);
+  const logicTransform = withLocalRepinFiles(transform);
+  const logicTransforms = transforms.map((item) => withLocalRepinFiles(item));
   const downloads = path.join(root, 'downloads');
   await fsp.mkdir(downloads, { recursive: true });
   await fsp.rm(path.join(downloads, 'metadata.json'), { force: true });

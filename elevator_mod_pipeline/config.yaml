@@ -1,13 +1,11 @@
 input_image: assets/sample_elevator.jpg
 mod_panel: assets/mod_panel.png
 run_dir: runs/sample_run
-
 preprocessing:
   enabled: true
   auto_correct: true
   max_roll_degrees: 12.0
   max_horizontal_shift_ratio: 0.035
-
 input_validation:
   enabled: true
   fail_on_invalid: true
@@ -15,7 +13,7 @@ input_validation:
   weights:
     perspective: 0.28
     visibility: 0.15
-    sharpness: 0.10
+    sharpness: 0.1
     exposure: 0.12
     context: 0.08
     crop_scale: 0.07
@@ -25,10 +23,10 @@ input_validation:
   hard_fails:
     perspective_fail: 0.62
     perspective_review: 0.68
-    visibility_min: 0.40
+    visibility_min: 0.4
     sharpness_extreme_min: 0.05
-    exposure_min: 0.30
-    composition_min: 0.30
+    exposure_min: 0.3
+    composition_min: 0.3
     technical_defects_min: 0.35
     geometric_defects_min: 0.35
     min_short_side: 420
@@ -37,93 +35,89 @@ input_validation:
     review: 0.55
   elevator_presence:
     min_score: 0.22
-
 detection:
   enabled: true
   model_id: groundingdino_swint_ogc
-  device: auto
+  device: cuda
   box_threshold: 0.25
-  text_threshold: 0.20
+  text_threshold: 0.2
   score_threshold: 0.25
   nms_iou: 0.65
   cross_label_nms_iou: 0.35
   enable_geometry_validation: true
   enable_depth_state_detection: true
   max_detections: 50
-  min_box_area_ratio: 0.00005
-  max_box_area_ratio: 0.90
+  min_box_area_ratio: 5.0e-05
+  max_box_area_ratio: 0.9
   labels:
-    - car operating panel
-    - elevator call button panel
-    - wheelchair button
-    - floor_indicator_display
-    - weight_limit_sign
-    - accessibility control panel
-    - elevator_door
-    - elevator_cabin
-    - threshold_plate
-    - handrail
-    - security_camera
-    - emergency_phone
-
+  - car operating panel
+  - elevator call button panel
+  - wheelchair button
+  - floor_indicator_display
+  - weight_limit_sign
+  - accessibility control panel
+  - elevator_door
+  - elevator_cabin
+  - threshold_plate
+  - handrail
+  - security_camera
+  - emergency_phone
 segmentation:
   enabled: true
-  device: auto
+  device: cuda
   sam2_repo: ../sam2_src
   sam2_config: configs/sam2.1/sam2.1_hiera_l.yaml
   sam2_weights: ../weights/sam2.1_hiera_large.pt
   mask_dilate: 2
   fill_holes: true
   fallback_to_boxes: true
-
 geometry:
   enabled: true
   depth_model_id: depth-anything/Depth-Anything-V2-Base-hf
   known_door_width_mm: 900
   max_plane_points: 4000
   ransac_iterations: 64
-  min_plane_inlier_ratio: 0.60
+  min_plane_inlier_ratio: 0.6
   max_plane_residual: 0.05
-
 removal:
-  # These detections become the LaMa mask. Tune this list per job.
   target_keywords:
-    - elevator panel
-    - car operating panel
-    - elevator call button panel
-    - call button
-    - speaker
+  - elevator panel
+  - car operating panel
+  - elevator call button panel
+  - call button
+  - speaker
   mask_padding_px: 10
   box_mask_padding_px: 3
   mask_dilate_iterations: 2
-  cleanup_engine: auto       # auto, lama, wall_patch, or opencv
+  cleanup_engine: auto
   wall_sample_margin_px: 55
   cleanup_feather_px: 2
   merge_nearby_control_modules: true
   control_module_merge_gap_px: 45
   control_module_horizontal_tolerance_px: 40
-
 inpainting:
-  engine: lama              # lama or opencv
+  engine: lama
   lama_repo: third_party/lama
   lama_model_dir: third_party/lama/big-lama
-  device: auto
+  device: cuda
   fallback_to_opencv: false
   inpaint_crop_padding: 384
   blend_feather: 24
   lama_max_side: 1024
-
 insertion:
-  # Preferred placement source: detection, manual_box, or auto_left_wall.
   placement: detection
   target_keywords:
-    - elevator panel
-    - car operating panel
-    - elevator call button panel
-    - call button
-    - speaker
-  manual_box_xyxy: null     # Example: [95, 415, 140, 560]
-  fallback_box_ratio_xyxy: [0.145, 0.39, 0.255, 0.61]
+  - elevator panel
+  - car operating panel
+  - elevator call button panel
+  - call button
+  - speaker
+  manual_box_xyxy: null
+  fallback_box_ratio_xyxy:
+  - 0.145
+  - 0.39
+  - 0.255
+  - 0.61
   adjacent_wall_side: right
   adjacent_wall_min_margin_ratio: 0.075
   size_mode: fit_box
@@ -142,30 +136,26 @@ insertion:
   texture_strength: 0.04
   max_shadow_radius_px: 18
   homography_max_local_shear: 0.03
-
 perspective_mod_placement:
-  # Runs after normal MOD insertion. In auto mode, wall-plane corners and the
-  # MOD grid box are inferred from geometry and placement debug data.
   enabled: true
   auto: true
   base_image: null
   panel: null
   out_dir: null
-  plane: null           # Example: "420,180 780,220 750,680 390,640"
+  plane: null
   grid_cols: 8
   grid_rows: 12
-  mod_box: null         # Example: "5.2,4.0 6.5,7.2"
+  mod_box: null
   match_lighting: false
-
 refinement:
   enabled: false
   model_id: runwayml/stable-diffusion-inpainting
   strength: 0.22
   guidance_scale: 6.5
   steps: 28
-  prompt: ultra realistic commercial elevator wall panel, natural indoor lighting, subtle shadows, photorealistic
+  prompt: ultra realistic commercial elevator wall panel, natural indoor lighting,
+    subtle shadows, photorealistic
   negative_prompt: blurry, distorted, low quality, cartoon, cgi, warped geometry
-
 video:
   enabled: true
   engine: opencv
@@ -173,12 +163,12 @@ video:
   quality: 720p
   quality_mode: best
   duration_seconds: 5
-  action: auto              # auto, open, or close
-  cycle: true               # true = animate to the opposite state and back
-  open_reference_image: null   # optional: image showing the elevator interior/cabin when doors are open
+  action: auto
+  cycle: true
+  open_reference_image: null
   door_open_interior_image: tests/images/default_door_open_interior.png
   default_door_image: tests/images/default_door.png
-  closed_reference_image: null # optional: image showing the closed elevator doors/exterior
+  closed_reference_image: null
   fps: 24
   seed: 42
   bitrate: 10000k
@@ -192,7 +182,7 @@ video:
     model_key: wan22_14b_i2v
     task: i2v-14B
     mode: image_to_video
-    size: "1280*720"
+    size: 1280*720
     sample_steps: 4
     sample_shift: 5
     sample_guide_scale: null
@@ -208,7 +198,8 @@ video:
     offload_model: true
     t5_cpu: true
     prompt_extension: false
-    negative_prompt: "blurry, warped elevator geometry, distorted doors, low quality, cartoon, CGI, flicker, unstable lighting"
+    negative_prompt: blurry, warped elevator geometry, distorted doors, low quality,
+      cartoon, CGI, flicker, unstable lighting
   comfy:
     url: http://127.0.0.1:8188
     root_dir: /root/vdotest/ComfyUI
@@ -229,6 +220,5 @@ video:
     low_noise_lora: wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors
     clip_name: umt5_xxl_fp8_e4m3fn_scaled.safetensors
     vae_name: wan_2.1_vae.safetensors
-
 monitoring:
   interval_s: 1.0

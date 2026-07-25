@@ -11,8 +11,6 @@ import { cn } from '../../../lib/utils'
 import type { ComponentKey, ComponentPin, PreviewVersion, RepinFeedbackOption, RepinTransform } from '../../../types'
 
 const COMP_LABELS = Object.fromEntries(KONE_COMPONENTS.map(c => [c.key, c.label])) as Record<ComponentKey, string>
-const COMPONENT_IMAGES = Object.fromEntries(KONE_COMPONENTS.map(c => [c.key, c.imageUrl])) as Record<ComponentKey, string | undefined>
-
 const FEEDBACK_OPTIONS: { value: RepinFeedbackOption; label: string }[] = [
   { value: 'wrong_placement', label: 'Wrong placement' },
   { value: 'wrong_component', label: 'Wrong component' },
@@ -28,10 +26,10 @@ function versionUrl(version: PreviewVersion | undefined, fallback: string | null
 export default function Step4Repin() {
   const { projectId, offeringId } = useParams()
   const navigate = useNavigate()
-  const { currentOffering, setCurrentOffering, submitRepinPreview, goToStep, isProcessing } = useOfferingStore()
+  const { currentOffering, setCurrentOffering, setRepinTransforms, submitRepinPreview, goToStep, isProcessing } = useOfferingStore()
   const offering = currentOffering
   const selectedComponents = offering?.selectedComponents ?? []
-  const components = KONE_COMPONENTS.map(component => component.key)
+  const components = selectedComponents.length ? selectedComponents : KONE_COMPONENTS.map(component => component.key)
   const pins = offering?.componentPins ?? []
   const versions = offering?.previewVersions?.length
     ? offering.previewVersions
@@ -42,17 +40,32 @@ export default function Step4Repin() {
   const sourceVersion = latestVersion || 1
   const targetVersion = Math.min(sourceVersion + 1, 5)
   const generationLimitReached = latestVersion >= 5
-  const [selectedComp, setSelectedComp] = useState<ComponentKey | null>(components[0] ?? null)
+  const [selectedComp, setSelectedComp] = useState<ComponentKey | null>(selectedComponents[0] ?? components[0] ?? null)
   const selectedPin = pins.find((p: ComponentPin) => p.componentKey === selectedComp)
-  const [transform, setTransform] = useState<RepinTransform | null>(null)
+  const [repinTransforms, setLocalRepinTransforms] = useState<Partial<Record<ComponentKey, RepinTransform>>>(offering?.repinTransforms ?? {})
   const [feedbackOption, setFeedbackOption] = useState<RepinFeedbackOption>('wrong_placement')
 
   useEffect(() => {
-    const component = selectedComp ?? selectedComponents[0] ?? components[0]
+    const component = selectedComp && components.includes(selectedComp) ? selectedComp : components[0]
     if (!component) return
-    setSelectedComp(component)
-    setTransform(repinTransformFromPin(component, sourceVersion, targetVersion, pins.find((p: ComponentPin) => p.componentKey === component)))
-  }, [selectedComp, sourceVersion, targetVersion, selectedComponents.join('|')])
+    if (selectedComp !== component) setSelectedComp(component)
+
+    let changed = false
+    const nextTransforms: Partial<Record<ComponentKey, RepinTransform>> = { ...(offering?.repinTransforms ?? repinTransforms) }
+    components.forEach(comp => {
+      if (nextTransforms[comp]) return
+      nextTransforms[comp] = repinTransformFromPin(comp, sourceVersion, targetVersion, pins.find((p: ComponentPin) => p.componentKey === comp))
+      changed = true
+    })
+    if (changed) {
+      setLocalRepinTransforms(nextTransforms)
+      setRepinTransforms(nextTransforms)
+    }
+  }, [selectedComp, sourceVersion, targetVersion, components.join('|'), pins.map(pin => `${pin.componentKey}:${pin.x}:${pin.y}`).join('|')])
+
+  useEffect(() => {
+    setLocalRepinTransforms(offering?.repinTransforms ?? {})
+  }, [offering?.id])
 
   useEffect(() => {
     let stopped = false
@@ -132,18 +145,26 @@ export default function Step4Repin() {
 
   const previewImageUrl = useMemo(() => versionUrl(versions.find(v => v.version === sourceVersion), offering?.outputImageUrl), [versions, sourceVersion, offering?.outputImageUrl])
 
+  const transform = selectedComp ? repinTransforms[selectedComp] ?? null : null
+  const selectedComponentItem = selectedComp ? KONE_COMPONENTS.find(component => component.key === selectedComp) : null
+
+  const persistTransforms = (nextTransforms: Partial<Record<ComponentKey, RepinTransform>>) => {
+    setLocalRepinTransforms(nextTransforms)
+    setRepinTransforms(nextTransforms)
+  }
+
   const handleTransformChange = (next: RepinTransform) => {
-    setTransform(next)
+    persistTransforms({ ...repinTransforms, [next.componentKey]: next })
   }
 
   const handleNumericChange = (field: keyof Pick<RepinTransform, 'x' | 'y' | 'width' | 'height' | 'rotation' | 'skewX' | 'skewY'>, value: number) => {
-    if (!transform) return
-    setTransform({ ...transform, [field]: value })
+    if (!transform || !selectedComp) return
+    persistTransforms({ ...repinTransforms, [selectedComp]: { ...transform, [field]: value } })
   }
 
   const handleReset = () => {
     if (!selectedComp) return
-    setTransform(repinTransformFromPin(selectedComp, sourceVersion, targetVersion, selectedPin))
+    persistTransforms({ ...repinTransforms, [selectedComp]: repinTransformFromPin(selectedComp, sourceVersion, targetVersion, selectedPin) })
   }
 
   const handleGenerate = async () => {
@@ -159,6 +180,12 @@ export default function Step4Repin() {
       componentType: selectedComp,
       sourceVersion,
       targetVersion,
+      rotation: transform.rotation || 0,
+      skewX: transform.skewX || 0,
+      skewY: transform.skewY || 0,
+      editableLayerUrl: transform.editableLayerUrl ?? null,
+      repinBackgroundUrl: transform.repinBackgroundUrl ?? null,
+      repinBackgroundDisplayUrl: transform.repinBackgroundDisplayUrl ?? null,
       feedbackOption: feedbackRequired ? feedbackOption : null,
     }
     try {
@@ -204,10 +231,10 @@ export default function Step4Repin() {
         <div className="relative flex-[3] p-6 pr-3">
           {transform && selectedComp ? (
             <RepinTransformCanvas
-              imageUrl={previewImageUrl}
-              componentImageUrl={COMPONENT_IMAGES[selectedComp]}
+              imageUrl={transform.repinBackgroundDisplayUrl ?? transform.repinBackgroundUrl ?? previewImageUrl}
               transform={transform}
               label={COMP_LABELS[selectedComp]}
+              componentImageUrl={transform.editableLayerUrl ?? selectedComponentItem?.imageUrl ?? null}
               onChange={handleTransformChange}
             />
           ) : (
@@ -227,11 +254,11 @@ export default function Step4Repin() {
                 key={comp}
                 onClick={() => setSelectedComp(comp)}
                 className={cn(
-                  'rounded-[5px] border px-3 py-2 text-left text-xs font-medium transition-colors duration-[120ms]',
+                  'min-w-0 rounded-[5px] border px-3 py-2 text-left text-xs font-medium transition-colors duration-[120ms]',
                   selectedComp === comp ? 'border-[#1450F5] bg-[#EFF6FF] text-[#1450F5]' : 'border-[#E4E4E4] text-[#525252] hover:border-[#BFDBFE]'
                 )}
               >
-                {COMP_LABELS[comp]}
+                <span className="block truncate">{COMP_LABELS[comp]}</span>
               </button>
             ))}
           </div>
@@ -251,9 +278,6 @@ export default function Step4Repin() {
                   />
                 </label>
               ))}
-              <div className="col-span-2 rounded-[5px] border border-[#E4E4E4] bg-[#FAFAFA] p-2 text-[11px] text-[#6B7280]">
-                Perspective: {transform.perspective.map(point => `${point.x},${point.y}`).join(' | ')}
-              </div>
             </div>
           )}
 

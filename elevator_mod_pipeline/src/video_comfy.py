@@ -540,6 +540,27 @@ def subgraph_workflow_to_api_prompt(workflow: dict[str, Any], *, comfy_cfg: dict
             if api_node.get("class_type") == "CLIPTextEncode" and "negative" in title:
                 api_node.setdefault("inputs", {})["text"] = negative_prompt
             prompt[str(node["id"])] = api_node
+
+    # The UI subgraph stores KSamplerAdvanced noise_seed as a fixed widget
+    # value. Replace it with the seed requested by the API for the sampler
+    # that actually introduces noise.
+    generation_seed = int(
+        preset.get("seed")
+        if preset.get("seed") is not None
+        else time.time() * 1000
+    ) % 1000000000
+
+    for api_node in prompt.values():
+        if api_node.get("class_type") != "KSamplerAdvanced":
+            continue
+
+        sampler_inputs = api_node.get("inputs")
+        if not isinstance(sampler_inputs, dict):
+            continue
+
+        if str(sampler_inputs.get("add_noise", "")).lower() == "enable":
+            sampler_inputs["noise_seed"] = generation_seed
+
     if inner_output_source:
         save_nodes = [api_node for api_node in prompt.values() if api_node.get("class_type") == "SaveVideo" and isinstance(api_node.get("inputs"), dict)]
         if save_nodes:

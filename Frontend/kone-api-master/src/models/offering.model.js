@@ -7,6 +7,12 @@ const componentPinSchema = mongoose.Schema(
     x: { type: Number, required: true },
     y: { type: Number, required: true },
     aiPlaced: { type: Boolean, default: false },
+    bbox: { type: [Number], default: undefined },
+    imageWidth: { type: Number, default: null },
+    imageHeight: { type: Number, default: null },
+    editableLayerUrl: { type: String, default: null },
+    repinBackgroundUrl: { type: String, default: null },
+    repinBackgroundDisplayUrl: { type: String, default: null },
   },
   { _id: false }
 );
@@ -130,6 +136,10 @@ const offeringSchema = mongoose.Schema(
     repinPass: {
       type: Number,
       default: 0,
+    },
+    repinTransforms: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
     },
     outputImageUrl: {
       type: String,

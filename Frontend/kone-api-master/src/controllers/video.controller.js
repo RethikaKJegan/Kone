@@ -246,7 +246,7 @@ const { projectService } = require('../services');
 const fsPromises = fs.promises;
 const execFileAsync = promisify(execFile);
 const LOGIC_URL = process.env.LOGIC_URL || 'http://localhost:8001';
-const COMFY_ROOT = process.env.COMFY_ROOT || '/root/Kone/vdotest';
+const COMFY_ROOT = process.env.COMFY_ROOT || '/workspace/Kone/vdotest';
 const COMFY_URL = process.env.COMFY_URL || 'http://127.0.0.1:8188';
 const COMFY_RUNNER = process.env.COMFY_RUNNER || path.join(COMFY_ROOT, 'run_i2v_api.py');
 const COMFY_START_SCRIPT = process.env.COMFY_START_SCRIPT || path.join(COMFY_ROOT, 'scripts', 'start_comfy_logged.sh');
@@ -261,6 +261,25 @@ const repinRuns = new Map();
 const getUploadInputPath = (imageId) => path.join(__dirname, '..', '..', 'uploads', imageId, 'input.jpg');
 const getOutputDir = (imageId) => path.join(__dirname, '..', '..', 'output', imageId);
 const getLogicStorageDir = (userId, imageId) => path.join(__dirname, '..', '..', 'storage', 'auth', String(userId), imageId);
+const storageRoot = path.resolve(__dirname, '..', '..', 'storage');
+const storagePublicUrl = (filePath) => {
+  if (!filePath) return null;
+  const resolved = path.resolve(filePath);
+  if (!resolved.startsWith(storageRoot)) return null;
+  return `/storage/${path.relative(storageRoot, resolved).split(path.sep).join('/')}`;
+};
+const localStoragePathFromUrl = (url) => {
+  if (!url || typeof url !== 'string') return null;
+  const [pathname] = url.split('?');
+  if (!pathname.startsWith('/storage/')) return null;
+  const resolved = path.resolve(storageRoot, pathname.replace('/storage/', ''));
+  return resolved.startsWith(storageRoot) ? resolved : null;
+};
+const withLocalRepinFiles = (item = {}) => ({
+  ...item,
+  editableLayerPath: item.editableLayerPath || localStoragePathFromUrl(item.editableLayerUrl),
+  repinBackgroundPath: item.repinBackgroundPath || localStoragePathFromUrl(item.repinBackgroundUrl),
+});
 
 const localOutputPathFromUrl = (url) => {
   if (!url || typeof url !== 'string') return null;
@@ -286,6 +305,21 @@ const readJsonIfExists = async (filePath) => {
     return JSON.parse(await fsPromises.readFile(filePath, 'utf-8'));
   } catch {
     return {};
+  }
+};
+
+const createWebPreview = async (inputPath, outputPath, maxSide = 1400) => {
+  try {
+    await execFileAsync('python3', [
+      '-c',
+      'from PIL import Image; import sys; im=Image.open(sys.argv[1]).convert("RGB"); im.thumbnail((int(sys.argv[3]), int(sys.argv[3])), Image.Resampling.LANCZOS); im.save(sys.argv[2], "JPEG", quality=86, optimize=True)',
+      inputPath,
+      outputPath,
+      String(maxSide),
+    ], { timeout: 30000 });
+    return await fileExists(outputPath);
+  } catch {
+    return false;
   }
 };
 
@@ -333,6 +367,12 @@ const componentPinsFromPlacement = async (storageDir) => {
         x: Math.round(((x1 + x2) / 2 / width) * 100),
         y: Math.round(((y1 + y2) / 2 / height) * 100),
         aiPlaced: true,
+        bbox: [x1, y1, x2, y2],
+        imageWidth: width,
+        imageHeight: height,
+        editableLayerUrl: storagePublicUrl(placement.editable_layer_path),
+        repinBackgroundUrl: storagePublicUrl(placement.repin_background_path),
+        repinBackgroundDisplayUrl: storagePublicUrl(placement.repin_background_web_path || placement.repin_background_path),
       };
     })
     .filter(Boolean);
@@ -381,10 +421,12 @@ const runLogicComponents = async ({
   }
 
   await fsPromises.copyFile(path.join(previewDir, 'final_output.png'), path.join(outputDir, 'final_output.png'));
+  const webPreviewCreated = await createWebPreview(path.join(outputDir, 'final_output.png'), path.join(outputDir, 'final_output_web.jpg'));
   const pins = await componentPinsFromPlacement(storageDir);
   return {
     storageDir,
-    previewUrl: `/output/${imageId}/final_output.png`,
+    previewUrl: webPreviewCreated ? `/output/${imageId}/final_output_web.jpg` : `/output/${imageId}/final_output.png`,
+    fullPreviewUrl: `/output/${imageId}/final_output.png`,
     pins,
   };
 };
@@ -396,7 +438,9 @@ const normalizePreviewVersions = (offering, fallbackUrl) => {
   return fallbackUrl ? [{ version: 1, url: fallbackUrl, createdAt: new Date() }] : [];
 };
 
-const runLogicRepin = async ({ imageId, userId, transform, componentAssets, environments, previewRequestKey }) => {
+const runLogicRepin = async ({ imageId, userId, transform, transforms = [], componentAssets, environments, previewRequestKey }) => {
+  const logicTransform = withLocalRepinFiles(transform);
+  const logicTransforms = transforms.map((item) => withLocalRepinFiles(item));
   const storageDir = getLogicStorageDir(userId, imageId);
   const uploadsDir = path.join(storageDir, 'uploads');
   const previewDir = path.join(storageDir, 'preview');
@@ -404,12 +448,12 @@ const runLogicRepin = async ({ imageId, userId, transform, componentAssets, envi
   const outputDir = getOutputDir(imageId);
   await Promise.all([uploadsDir, previewDir, pipelineDir, outputDir].map((dir) => fsPromises.mkdir(dir, { recursive: true })));
 
-  const sourcePath = transform.sourceVersion > 1
-    ? path.join(outputDir, `final_output_v${transform.sourceVersion}.png`)
+  const sourcePath = logicTransform.sourceVersion > 1
+    ? path.join(outputDir, `final_output_v${logicTransform.sourceVersion}.png`)
     : path.join(outputDir, 'final_output.png');
   const fallbackInput = getUploadInputPath(imageId);
   const sourceImage = (await fileExists(sourcePath)) ? sourcePath : ((await fileExists(path.join(outputDir, 'final_output.png'))) ? path.join(outputDir, 'final_output.png') : fallbackInput);
-  await fsPromises.copyFile(sourceImage, path.join(uploadsDir, `repin_source_v${transform.sourceVersion}.png`));
+  await fsPromises.copyFile(sourceImage, path.join(uploadsDir, `repin_source_v${logicTransform.sourceVersion}.png`));
 
   const { data } = await axios.post(
     `${LOGIC_URL}/repin-components`,
@@ -422,25 +466,30 @@ const runLogicRepin = async ({ imageId, userId, transform, componentAssets, envi
       component_assets: componentAssets,
       environments,
       preview_request_key: previewRequestKey,
-      transform,
+      transform: logicTransform,
+      transforms: logicTransforms,
     },
     { timeout: 0 }
   );
 
   if (!data?.ok) throw new Error(data?.error || 'Logic repin placement failed');
 
-  const versionFile = `final_output_v${transform.targetVersion}.png`;
+  const versionFile = `final_output_v${logicTransform.targetVersion}.png`;
+  const webVersionFile = `final_output_v${logicTransform.targetVersion}_web.jpg`;
   await fsPromises.copyFile(path.join(previewDir, versionFile), path.join(outputDir, versionFile));
   await fsPromises.copyFile(path.join(previewDir, 'final_output.png'), path.join(outputDir, 'final_output.png'));
+  const webVersionCreated = await createWebPreview(path.join(outputDir, versionFile), path.join(outputDir, webVersionFile));
+  const webCurrentCreated = await createWebPreview(path.join(outputDir, 'final_output.png'), path.join(outputDir, 'final_output_web.jpg'));
   return {
     storageDir,
-    previewUrl: `/output/${imageId}/${versionFile}`,
-    currentPreviewUrl: `/output/${imageId}/final_output.png`,
+    previewUrl: webVersionCreated ? `/output/${imageId}/${webVersionFile}` : `/output/${imageId}/${versionFile}`,
+    currentPreviewUrl: webCurrentCreated ? `/output/${imageId}/final_output_web.jpg` : `/output/${imageId}/final_output.png`,
+    fullPreviewUrl: `/output/${imageId}/${versionFile}`,
     pins: await componentPinsFromPlacement(storageDir),
   };
 };
 
-const startRepinRun = ({ offeringId, imageId, userId, transform, componentAssets, environments, previewRequestKey }) => {
+const startRepinRun = ({ offeringId, imageId, userId, transform, transforms = [], componentAssets, environments, previewRequestKey }) => {
   const runKey = `${offeringId}:${previewRequestKey || `repin-v${transform.targetVersion}`}`;
   if (repinRuns.has(runKey)) return;
 
@@ -449,7 +498,7 @@ const startRepinRun = ({ offeringId, imageId, userId, transform, componentAssets
       const offering = await getOwnedOffering(offeringId, userId);
       if (!offering) throw new Error('Invalid offeringId');
       if (Number(transform.targetVersion) > 5) throw new Error('Version limit reached. Choose the best saved version to continue.');
-      const placement = await runLogicRepin({ imageId, userId, transform, componentAssets, environments, previewRequestKey });
+      const placement = await runLogicRepin({ imageId, userId, transform, transforms, componentAssets, environments, previewRequestKey });
       const versionUrl = `${placement.previewUrl}?v=${Date.now()}`;
       const versions = normalizePreviewVersions(offering, offering.outputImagePath || offering.outputImageUrl);
       const nextVersion = {
@@ -466,7 +515,7 @@ const startRepinRun = ({ offeringId, imageId, userId, transform, componentAssets
       await Offering.findByIdAndUpdate(offeringId, {
         componentPins: placement.pins,
         outputImageUrl: versionUrl,
-        outputImagePath: placement.currentPreviewUrl,
+        outputImagePath: placement.fullPreviewUrl || placement.currentPreviewUrl,
         previewImagePath: placement.currentPreviewUrl,
         previewVersions: withoutTarget,
         repinPass: Number(transform.targetVersion),
@@ -559,8 +608,8 @@ const startComponentRun = ({ offeringId, imageId, userId, inputPath, components,
       await Offering.findByIdAndUpdate(offeringId, {
         componentPins: placement.pins,
         outputImageUrl: previewUrl,
-        outputImagePath: placement.previewUrl,
-        previewImagePath: placement.previewUrl,
+        outputImagePath: placement.fullPreviewUrl || placement.previewUrl,
+        previewImagePath: placement.fullPreviewUrl || placement.previewUrl,
         outputVideoUrl: null,
         outputVideoPath: null,
         downloadUrl: null,
@@ -725,7 +774,7 @@ const ensureComfyRunning = async () => {
       if (await isComfyAlive()) return;
     }
 
-    throw new Error('ComfyUI did not start on port 8188 within 3 minutes. Check /root/Kone/vdotest/logs.');
+    throw new Error('ComfyUI did not start on port 8188 within 3 minutes. Check /workspace/Kone/vdotest/logs.');
   })().finally(() => {
     comfyStartPromise = null;
   });
@@ -1016,6 +1065,7 @@ const repinPreview = async (req, res) => {
       component_assets: componentAssets = {},
       preview_request_key: previewRequestKey = null,
       transform,
+      transforms = [],
     } = req.body;
 
     if (!transform || !transform.componentKey) {
@@ -1053,7 +1103,8 @@ const repinPreview = async (req, res) => {
       offeringId,
       imageId,
       userId: req.user.id,
-      transform,
+      transform: logicTransform,
+      transforms: logicTransforms,
       componentAssets,
       environments: environments.length ? environments : offering.environments,
       previewRequestKey,
