@@ -534,7 +534,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
           preview_request_key: previewRequestKey,
           transform,
           transforms: Object.values(confirmedRepinTransforms).filter(Boolean),
-        })
+        }, { timeout: 0 })
       } else {
         const imageId = imageIdFromOffering(currentOffering)
         if (!imageId) throw new Error('Uploaded image is not ready for repin')
@@ -552,11 +552,15 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
           preview_request_key: previewRequestKey,
           transform,
           transforms: Object.values(confirmedRepinTransforms).filter(Boolean),
-        })
+        }, { timeout: 0 })
       }
     } catch (error) {
       set({ isProcessing: false })
-      throw error
+      const response = error && typeof error === 'object' && 'response' in error
+        ? (error as { response?: { data?: { message?: string; error?: string } } }).response
+        : null
+      const message = response?.data?.message || response?.data?.error
+      throw new Error(message || (error instanceof Error ? error.message : 'Could not start repin preview'))
     }
   },
 

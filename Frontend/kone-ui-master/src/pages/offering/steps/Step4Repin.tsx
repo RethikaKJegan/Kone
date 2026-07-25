@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { RotateCcw, Wand2 } from 'lucide-react'
+import { Check, Eye, RotateCcw, Wand2 } from 'lucide-react'
 import apiClient from '../../../api/client'
 import { getGuestSessionId, isGuestSession } from '../../../api/guestWorkflow'
 import { useOfferingStore } from '../../../store/offeringStore'
@@ -44,6 +44,8 @@ export default function Step4Repin() {
   const selectedPin = pins.find((p: ComponentPin) => p.componentKey === selectedComp)
   const [repinTransforms, setLocalRepinTransforms] = useState<Partial<Record<ComponentKey, RepinTransform>>>(offering?.repinTransforms ?? {})
   const [feedbackOption, setFeedbackOption] = useState<RepinFeedbackOption>('wrong_placement')
+  const [inspectedVersion, setInspectedVersion] = useState<PreviewVersion | null>(null)
+  const [canvasConfirmed, setCanvasConfirmed] = useState(false)
 
   useEffect(() => {
     const component = selectedComp && components.includes(selectedComp) ? selectedComp : components[0]
@@ -64,8 +66,14 @@ export default function Step4Repin() {
   }, [selectedComp, sourceVersion, targetVersion, components.join('|'), pins.map(pin => `${pin.componentKey}:${pin.x}:${pin.y}`).join('|')])
 
   useEffect(() => {
-    setLocalRepinTransforms(offering?.repinTransforms ?? {})
+    if (offering?.repinTransforms && Object.keys(offering.repinTransforms).length > 0) {
+      setLocalRepinTransforms(offering.repinTransforms)
+    }
   }, [offering?.id])
+
+  useEffect(() => {
+    setCanvasConfirmed(false)
+  }, [selectedComp, sourceVersion])
 
   useEffect(() => {
     let stopped = false
@@ -145,8 +153,9 @@ export default function Step4Repin() {
 
   const previewImageUrl = useMemo(() => versionUrl(versions.find(v => v.version === sourceVersion), offering?.outputImageUrl), [versions, sourceVersion, offering?.outputImageUrl])
 
-  const transform = selectedComp ? repinTransforms[selectedComp] ?? null : null
-  const selectedComponentItem = selectedComp ? KONE_COMPONENTS.find(component => component.key === selectedComp) : null
+  const defaultTransformFor = (component: ComponentKey) => repinTransformFromPin(component, sourceVersion, targetVersion, pins.find((p: ComponentPin) => p.componentKey === component))
+
+  const transform = selectedComp ? repinTransforms[selectedComp] ?? defaultTransformFor(selectedComp) : null
 
   const persistTransforms = (nextTransforms: Partial<Record<ComponentKey, RepinTransform>>) => {
     setLocalRepinTransforms(nextTransforms)
@@ -167,13 +176,30 @@ export default function Step4Repin() {
     persistTransforms({ ...repinTransforms, [selectedComp]: repinTransformFromPin(selectedComp, sourceVersion, targetVersion, selectedPin) })
   }
 
+  const handleConfirmCanvas = () => {
+    if (!selectedComp || !transform) return
+    if (!repinTransforms[selectedComp]) {
+      persistTransforms({ ...repinTransforms, [selectedComp]: transform })
+    }
+    setInspectedVersion(null)
+    setCanvasConfirmed(true)
+  }
+
+  const handleInspectVersion = (version: PreviewVersion) => {
+    setCanvasConfirmed(false)
+    setInspectedVersion(version)
+  }
+
   const handleGenerate = async () => {
     if (!transform || !selectedComp) return
+    if (!canvasConfirmed) {
+      toast('Confirm the selected component before generating a new preview.', 'destructive')
+      return
+    }
     if (generationLimitReached) {
       toast('Version limit reached. Choose the best saved version to continue to video.', 'destructive')
       return
     }
-    const feedbackRequired = targetVersion >= 3
     const payload = {
       ...transform,
       componentKey: selectedComp,
@@ -186,7 +212,7 @@ export default function Step4Repin() {
       editableLayerUrl: transform.editableLayerUrl ?? null,
       repinBackgroundUrl: transform.repinBackgroundUrl ?? null,
       repinBackgroundDisplayUrl: transform.repinBackgroundDisplayUrl ?? null,
-      feedbackOption: feedbackRequired ? feedbackOption : null,
+      feedbackOption: feedbackOption ?? null,
     }
     try {
       await submitRepinPreview(payload)
@@ -230,15 +256,32 @@ export default function Step4Repin() {
       <div className="mt-4 flex gap-0 border-t border-[#E9ECEF]">
         <div className="relative flex-[3] p-6 pr-3">
           {transform && selectedComp ? (
-            <RepinTransformCanvas
-              imageUrl={transform.repinBackgroundDisplayUrl ?? transform.repinBackgroundUrl ?? previewImageUrl}
-              transform={transform}
-              label={COMP_LABELS[selectedComp]}
-              componentImageUrl={transform.editableLayerUrl ?? selectedComponentItem?.imageUrl ?? null}
-              onChange={handleTransformChange}
-            />
+            canvasConfirmed ? (
+              <RepinTransformCanvas
+                imageUrl={transform.repinBackgroundDisplayUrl ?? transform.repinBackgroundUrl ?? inspectedVersion?.url ?? previewImageUrl}
+                transform={transform}
+                label={COMP_LABELS[selectedComp]}
+                componentImageUrl={transform.editableLayerUrl ?? null}
+                onChange={handleTransformChange}
+              />
+            ) : inspectedVersion ? (
+              <div className="relative flex min-h-[360px] items-center justify-center overflow-hidden rounded-lg border border-[#E4E4E4] bg-[#0A0A0A]">
+                <img src={inspectedVersion.url} alt={`Version ${inspectedVersion.version}`} className="h-full max-h-[460px] w-full object-contain" />
+              </div>
+            ) : (
+              <div className="flex min-h-[360px] items-center justify-center rounded-lg border border-[#E4E4E4] text-sm text-[#6B7280]">Confirm a component to open the repin canvas.</div>
+            )
           ) : (
             <div className="flex min-h-[360px] items-center justify-center rounded-lg border border-[#E4E4E4] text-sm text-[#6B7280]">Select a component to repin.</div>
+          )}
+          {inspectedVersion && canvasConfirmed && (
+            <div className="mt-4 rounded-lg border border-[#E4E4E4] bg-white p-3">
+              <div className="mb-2 flex items-center justify-between">
+                <p className="text-xs font-semibold text-[#111827]">Version {inspectedVersion.version}</p>
+                <button onClick={() => handleUseVersion(inspectedVersion)} className="text-xs font-medium text-[#1450F5] hover:text-[#0B3BBF]">Use for video</button>
+              </div>
+              <img src={inspectedVersion.url} alt={`Version ${inspectedVersion.version}`} className="max-h-[360px] w-full rounded-[6px] bg-[#0A0A0A] object-contain" />
+            </div>
           )}
         </div>
 
@@ -294,12 +337,18 @@ export default function Step4Repin() {
           )}
 
           <div className="mt-5 flex items-center gap-2">
-            <button onClick={handleReset} className="flex h-9 items-center gap-1.5 rounded-[5px] border border-[#E4E4E4] px-3 text-xs font-medium text-[#525252] hover:border-[#A3A3A3]">
-              <RotateCcw style={{ width: 13, height: 13 }} /> Reset
-            </button>
+            {canvasConfirmed ? (
+              <button onClick={handleReset} className="flex h-9 items-center gap-1.5 rounded-[5px] border border-[#E4E4E4] px-3 text-xs font-medium text-[#525252] hover:border-[#A3A3A3]">
+                <RotateCcw style={{ width: 13, height: 13 }} /> Reset
+              </button>
+            ) : (
+              <button onClick={handleConfirmCanvas} disabled={!selectedComp || !transform} className="flex h-9 items-center gap-1.5 rounded-[5px] border border-[#1450F5] px-3 text-xs font-medium text-[#1450F5] hover:bg-[#EFF6FF] disabled:cursor-not-allowed disabled:opacity-40">
+                <Check style={{ width: 13, height: 13 }} /> Confirm
+              </button>
+            )}
             <button
               onClick={handleGenerate}
-              disabled={isProcessing || generationLimitReached || !transform}
+              disabled={isProcessing || generationLimitReached || !transform || !canvasConfirmed}
               className="flex h-9 items-center gap-1.5 rounded-[5px] bg-[#0A0A0A] px-4 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               <Wand2 style={{ width: 13, height: 13 }} /> {isProcessing ? 'Generating...' : 'Generate New Preview'}
@@ -311,10 +360,23 @@ export default function Step4Repin() {
           <div className="mt-5 space-y-2 border-t border-[#E4E4E4] pt-4">
             <p className="label-caps">Saved Versions</p>
             {versions.map(version => (
-              <button key={version.version} onClick={() => handleUseVersion(version)} className="flex w-full items-center justify-between rounded-[5px] border border-[#E4E4E4] px-3 py-2 text-xs text-[#525252] hover:border-[#1450F5] hover:text-[#1450F5]">
-                <span>Version {version.version}</span>
-                <span>Use for video</span>
-              </button>
+              <div key={version.version} className="flex w-full items-center gap-2 rounded-[5px] border border-[#E4E4E4] px-2 py-2 text-xs text-[#525252]">
+                <button
+                  onClick={() => handleInspectVersion(version)}
+                  className={cn(
+                    'flex h-7 w-7 shrink-0 items-center justify-center rounded-[4px] border transition-colors duration-[120ms]',
+                    inspectedVersion?.version === version.version ? 'border-[#1450F5] text-[#1450F5]' : 'border-[#E4E4E4] text-[#6B7280] hover:border-[#1450F5] hover:text-[#1450F5]'
+                  )}
+                  aria-label={`Preview Version ${version.version}`}
+                  title={`Preview Version ${version.version}`}
+                >
+                  <Eye style={{ width: 14, height: 14 }} />
+                </button>
+                <button onClick={() => handleInspectVersion(version)} className="min-w-0 flex-1 truncate text-left font-medium hover:text-[#1450F5]">
+                  Version {version.version}
+                </button>
+                <button onClick={() => handleUseVersion(version)} className="shrink-0 font-medium text-[#525252] hover:text-[#1450F5]">Use for video</button>
+              </div>
             ))}
           </div>
         </div>

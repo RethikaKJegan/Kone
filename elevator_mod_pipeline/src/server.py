@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 import yaml
 from fastapi import FastAPI
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 from pydantic import BaseModel
 
 from input_validation import validate_elevator_or_cop_upload, validate_input_image
@@ -117,11 +117,11 @@ def _component_image_for_transform(transform: dict[str, Any], component_assets: 
     editable_layer = transform.get("editableLayerPath")
     if editable_layer and Path(str(editable_layer)).exists():
         return Path(str(editable_layer))
-    component_key = str(transform.get("componentKey") or transform.get("componentType") or "").lower()
-    assets = selected_component_asset_paths(component_assets)
-    if component_key not in assets:
-        raise ValueError(f"Unsupported repin component: {component_key}")
-    return Path(assets[component_key])
+    component_key = str(transform.get("componentKey") or transform.get("componentType") or "component").lower()
+    raise ValueError(
+        f"Repin requires the saved editable preview layer for {component_key}. "
+        "Regenerate the automatic preview once so the selected component layer can be repinned directly."
+    )
 
 
 def _warp_component(component: Image.Image, transform: dict[str, Any], image_size: tuple[int, int]) -> tuple[Image.Image, tuple[int, int, int, int]]:
@@ -151,6 +151,57 @@ def _warp_component(component: Image.Image, transform: dict[str, Any], image_siz
     return slot, (x1, y1, x2, y2)
 
 
+def _match_component_to_scene(component: Image.Image, scene_crop: Image.Image) -> Image.Image:
+    comp = component.convert("RGBA")
+    alpha = np.asarray(comp.getchannel("A"), dtype=np.float32) / 255.0
+    if float(alpha.max()) <= 0.0:
+        return comp
+
+    comp_rgb = np.asarray(comp.convert("RGB"), dtype=np.float32)
+    scene_rgb = np.asarray(scene_crop.convert("RGB").resize(comp.size, Image.Resampling.BICUBIC), dtype=np.float32)
+    visible = alpha > 0.08
+    if int(np.count_nonzero(visible)) < 8:
+        return comp
+
+    comp_luma = (comp_rgb[..., 0] * 0.299 + comp_rgb[..., 1] * 0.587 + comp_rgb[..., 2] * 0.114)[visible]
+    scene_luma = (scene_rgb[..., 0] * 0.299 + scene_rgb[..., 1] * 0.587 + scene_rgb[..., 2] * 0.114)[visible]
+    gain = float(np.clip(np.median(scene_luma) / max(1.0, np.median(comp_luma)), 0.72, 1.22))
+    scene_mean = scene_rgb[visible].mean(axis=0)
+    comp_mean = comp_rgb[visible].mean(axis=0)
+    balanced = comp_rgb * gain
+    balanced = balanced * 0.88 + np.clip(balanced + (scene_mean - comp_mean) * 0.16, 0, 255) * 0.12
+
+    light_x = np.linspace(0.96, 1.04, comp.width, dtype=np.float32)[None, :, None]
+    light_y = np.linspace(1.03, 0.95, comp.height, dtype=np.float32)[:, None, None]
+    balanced = np.clip(balanced * light_x * light_y, 0, 255).astype(np.uint8)
+    return Image.merge("RGBA", (*Image.fromarray(balanced, "RGB").split(), comp.getchannel("A")))
+
+
+def _soften_component_alpha(component: Image.Image) -> Image.Image:
+    comp = component.convert("RGBA")
+    alpha = comp.getchannel("A")
+    if alpha.getbbox() is None:
+        return comp
+    edge = alpha.filter(ImageFilter.GaussianBlur(radius=0.8))
+    return Image.merge("RGBA", (*comp.convert("RGB").split(), edge))
+
+
+def _paste_with_contact_shadow(
+    result: Image.Image,
+    component: Image.Image,
+    paste_xy: tuple[int, int],
+    shadow_strength: float = 0.34,
+) -> None:
+    alpha = component.getchannel("A")
+    shadow = Image.new("RGBA", component.size, (0, 0, 0, 0))
+    shadow_alpha = alpha.filter(ImageFilter.GaussianBlur(radius=max(3, int(min(component.size) * 0.035))))
+    shadow_alpha = shadow_alpha.point(lambda value: int(value * shadow_strength))
+    shadow.putalpha(shadow_alpha)
+    offset = max(1, int(min(component.size) * 0.014))
+    result.alpha_composite(shadow, (paste_xy[0] + offset, paste_xy[1] + offset))
+    result.paste(component, paste_xy, component)
+
+
 def _place_manual_component(base_image: Image.Image, component_image: Image.Image, transform: dict[str, Any]) -> tuple[Image.Image, tuple[int, int, int, int]]:
     result = base_image.convert("RGBA")
     warped, bbox = _warp_component(component_image, transform, base_image.size)
@@ -161,43 +212,121 @@ def _place_manual_component(base_image: Image.Image, component_image: Image.Imag
     if crop_r <= crop_l or crop_b <= crop_t:
         raise ValueError("Repin transform places the component outside the image")
     visible = warped.crop((crop_l, crop_t, crop_r, crop_b))
-    result.paste(visible, (paste_x, paste_y), visible)
+    scene_crop = base_image.crop((paste_x, paste_y, paste_x + visible.width, paste_y + visible.height))
+    visible = _soften_component_alpha(_match_component_to_scene(visible, scene_crop))
+    _paste_with_contact_shadow(result, visible, (paste_x, paste_y))
     px_bbox = (paste_x, paste_y, paste_x + visible.width, paste_y + visible.height)
     return result.convert("RGB"), px_bbox
 
 
 def _firered_prompt(transform: dict[str, Any]) -> str:
-    feedback = str(transform.get("feedbackOption") or "").replace("_", " ")
+    feedback_key = str(transform.get("feedbackOption") or "").strip()
     component = str(transform.get("componentKey") or transform.get("componentType") or "component")
-    feedback_sentence = f" Address this user feedback: {feedback}." if feedback else ""
+    feedback_instructions = {
+        "wrong_placement": "The user has manually corrected placement; preserve that exact placement and make the mounted result believable at this location.",
+        "wrong_component": "Preserve the exact visible component layer and product design from the repin canvas; do not replace it with a different panel, buttons, display, or interior material.",
+        "bad_perspective": "Improve only perspective realism around the selected geometry: edge alignment, bevel thickness, wall contact, and local camera perspective cues.",
+        "bad_lighting_shadow": "Focus refinement on realistic local lighting, soft contact shadows, ambient occlusion, wall bounce light, reflections, and matching color temperature.",
+        "poor_blending_unrealistic": "Focus refinement on edge blending, material integration, camera grain, reflection consistency, and removing any sticker-like appearance.",
+    }
+    feedback_sentence = f" User feedback instruction: {feedback_instructions.get(feedback_key, feedback_key)}" if feedback_key else ""
     return (
-        f"Make the inserted KONE {component} look realistically installed at its current exact position and geometry. "
-        "Preserve the exact component design, dimensions, orientation, and placement chosen by the user. "
-        "Refine only lighting, shadows, edge blending, wall contact, texture match, reflections, and perspective realism. "
-        "Do not redesign the component, do not move it, do not resize it, and do not alter the surrounding elevator scene."
+        f"Photorealistically integrate the already placed KONE {component} into this real elevator photograph. "
+        "The geometry is user-approved: keep the exact x/y position, width, height, aspect ratio, rotation, skew, perspective corner alignment, buttons, display, arrows, numbers, labels, and product design. "
+        "The panel must remain inside the exact selected bounding box; do not make it taller, wider, straighter, less skewed, less rotated, or shifted. "
+        "FireRed may refine only realism: flush wall contact, local perspective cues, subtle bevel thickness, soft contact shadow behind the plate, ambient occlusion at edges, matching indoor light direction, matching color temperature, metal/plastic reflections, wall bounce light, texture match, and slight camera grain. "
+        "Do not move, resize, redesign, replace, erase, or duplicate the component. Do not alter elevator doors, wall tiles, signs, floor, ceiling, or background geometry outside the immediate component edge transition. "
+        "No new buttons, no redesigned display, no warped text, no extra panels, no floating sticker look."
         f"{feedback_sentence}"
     )
 
 
-def _run_firered_if_available(input_path: Path, output_path: Path, transform: dict[str, Any]) -> bool:
+def _expanded_crop_box(bbox: tuple[int, int, int, int], image_size: tuple[int, int], pad_ratio: float = 0.85) -> tuple[int, int, int, int]:
+    width, height = image_size
+    x1, y1, x2, y2 = bbox
+    pad = int(max(80, min(width, height) * 0.035, max(x2 - x1, y2 - y1) * pad_ratio))
+    return (
+        max(0, x1 - pad),
+        max(0, y1 - pad),
+        min(width, x2 + pad),
+        min(height, y2 + pad),
+    )
+
+
+def _crop_blend_mask(size: tuple[int, int], feather_px: int = 32) -> Image.Image:
+    width, height = size
+    mask = Image.new("L", size, 0)
+    draw = ImageDraw.Draw(mask)
+    feather = max(2, min(feather_px, width // 3, height // 3))
+    draw.rectangle((feather, feather, width - feather - 1, height - feather - 1), fill=255)
+    return mask.filter(ImageFilter.GaussianBlur(radius=max(1, feather // 2)))
+
+
+def _component_refine_mask(
+    crop_size: tuple[int, int],
+    crop_box: tuple[int, int, int, int],
+    bbox: tuple[int, int, int, int],
+) -> Image.Image:
+    width, height = crop_size
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    cx1, cy1, _, _ = crop_box
+    local = (
+        max(0, x1 - cx1),
+        max(0, y1 - cy1),
+        min(width, x2 - cx1),
+        min(height, y2 - cy1),
+    )
+    if local[2] <= local[0] or local[3] <= local[1]:
+        return _crop_blend_mask(crop_size, feather_px=16)
+
+    panel_w = max(1, local[2] - local[0])
+    panel_h = max(1, local[3] - local[1])
+    edge_pad = int(os.environ.get("FIRERED_EDGE_PAD", max(10, min(28, min(panel_w, panel_h) * 0.08))))
+    feather = int(os.environ.get("FIRERED_EDGE_FEATHER", max(8, min(20, edge_pad))))
+    mask = Image.new("L", crop_size, 0)
+    draw = ImageDraw.Draw(mask)
+    draw.rectangle(
+        (
+            max(0, local[0] - edge_pad),
+            max(0, local[1] - edge_pad),
+            min(width - 1, local[2] + edge_pad),
+            min(height - 1, local[3] + edge_pad),
+        ),
+        fill=255,
+    )
+    return mask.filter(ImageFilter.GaussianBlur(radius=max(1, feather)))
+
+
+def _run_firered_if_available(input_path: Path, output_path: Path, transform: dict[str, Any], bbox: tuple[int, int, int, int] | None = None) -> bool:
     script = os.environ.get("FIRERED_REPIN_SCRIPT") or os.environ.get("FIRERED_IMAGE_EDIT_SCRIPT") or "/root/Kone/fire_red_image_edit.py"
     script_path = Path(script)
     if not script_path.exists():
         return False
     env = {**os.environ, "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0")}
+    fire_input = input_path
+    fire_output = output_path
+    crop_box: tuple[int, int, int, int] | None = None
+    if bbox is not None:
+        source = Image.open(input_path).convert("RGB")
+        crop_box = _expanded_crop_box(bbox, source.size)
+        fire_input = output_path.with_name(f"{output_path.stem}_firered_crop_input.png")
+        fire_output = output_path.with_name(f"{output_path.stem}_firered_crop_output.png")
+        source.crop(crop_box).save(fire_input)
     try:
         subprocess.run(
             [
                 os.environ.get("FIRERED_PYTHON", "/root/Kone/vdotest/ComfyUI/.venv/bin/python"),
                 str(script_path),
                 "--image",
-                str(input_path),
+                str(fire_input),
                 "--prompt",
                 _firered_prompt(transform),
                 "--output",
-                str(output_path),
+                str(fire_output),
                 "--steps",
-                str(os.environ.get("FIRERED_STEPS", "28")),
+                str(os.environ.get("FIRERED_STEPS", "36")),
+                "--true-cfg-scale",
+                str(os.environ.get("FIRERED_TRUE_CFG_SCALE", "3.8")),
             ],
             check=True,
             env=env,
@@ -205,6 +334,20 @@ def _run_firered_if_available(input_path: Path, output_path: Path, transform: di
     except Exception as exc:
         print(f"[FIRERED] unavailable or failed: {exc}", file=sys.stderr)
         return False
+    if crop_box is not None:
+        if not fire_output.exists():
+            return False
+        source = Image.open(input_path).convert("RGB")
+        source_crop = source.crop(crop_box)
+        edited_crop = Image.open(fire_output).convert("RGB")
+        crop_size = (crop_box[2] - crop_box[0], crop_box[3] - crop_box[1])
+        if edited_crop.size != crop_size:
+            edited_crop = edited_crop.resize(crop_size, Image.Resampling.LANCZOS)
+        refine_mask = _component_refine_mask(crop_size, crop_box, tuple(int(v) for v in bbox))
+        constrained_crop = Image.composite(edited_crop, source_crop, refine_mask)
+        blend_mask = _crop_blend_mask(crop_size, feather_px=int(max(24, min(crop_size) * 0.08)))
+        source.paste(constrained_crop, (crop_box[0], crop_box[1]), blend_mask)
+        source.save(output_path)
     return output_path.exists()
 
 
@@ -385,7 +528,12 @@ def repin_components(payload: ProjectPayload):
         placed_path = pipeline_dir / f"repin_v{target_version}_placed.png"
         output_path = preview_dir / f"final_output_v{target_version}.png"
         placed_image.save(placed_path)
-        used_firered = _run_firered_if_available(placed_path, output_path, target_transform)
+        target_key = str(target_transform.get("componentKey") or target_transform.get("componentType") or "").lower()
+        target_bbox = next(
+            (placement["final_insertion_bbox"] for placement in placements if str(placement.get("id") or placement.get("component_type") or "").lower() == target_key),
+            placements[-1]["final_insertion_bbox"] if placements else None,
+        )
+        used_firered = _run_firered_if_available(placed_path, output_path, target_transform, target_bbox)
         if not used_firered:
             placed_image.save(output_path)
         shutil.copy2(output_path, preview_dir / "final_output.png")

@@ -341,8 +341,6 @@ const uploadImage = catchAsync(async (req, res) => {
   }
 
   const root = projectDir(sessionId, projectId);
-  const logicTransform = withLocalRepinFiles(transform);
-  const logicTransforms = transforms.map((item) => withLocalRepinFiles(item));
   await ensureProjectDirs(root);
   await Promise.all(['pipeline', 'preview', 'video', 'downloads'].map((d) => fsp.rm(path.join(root, d), { recursive: true, force: true })));
   await ensureProjectDirs(root);
@@ -355,8 +353,6 @@ const uploadImage = catchAsync(async (req, res) => {
 const precheck = catchAsync(async (req, res) => {
   const { session_id: sessionId, project_id: projectId, project_name: projectName } = req.body;
   const root = projectDir(sessionId, projectId);
-  const logicTransform = withLocalRepinFiles(transform);
-  const logicTransforms = transforms.map((item) => withLocalRepinFiles(item));
   try {
     const { data } = await axios.post(`${LOGIC_URL}/precheck`, {
       session_id: sessionId,
@@ -385,8 +381,6 @@ const runComponents = catchAsync(async (req, res) => {
     preview_request_key: previewRequestKey,
   } = req.body;
   const root = projectDir(sessionId, projectId);
-  const logicTransform = withLocalRepinFiles(transform);
-  const logicTransforms = transforms.map((item) => withLocalRepinFiles(item));
   const queueKey = root;
   const latestKey = previewRequestKey || null;
   latestComponentRunKeys.set(queueKey, latestKey);
@@ -493,8 +487,6 @@ const runRepin = catchAsync(async (req, res) => {
 const status = catchAsync(async (req, res) => {
   const { session_id: sessionId, project_id: projectId } = req.query;
   const root = projectDir(sessionId, projectId);
-  const logicTransform = withLocalRepinFiles(transform);
-  const logicTransforms = transforms.map((item) => withLocalRepinFiles(item));
   const current = await readStatus(root);
   const componentPins = await componentPinsFromPlacement(root, (filePath) => publicStorageUrl(sessionId, projectId, filePath));
   const previewVersions = Array.isArray(current.preview_versions)
@@ -515,8 +507,6 @@ const status = catchAsync(async (req, res) => {
 const generateVideo = catchAsync(async (req, res) => {
   const { session_id: sessionId, project_id: projectId, video_options: videoOptions } = req.body;
   const root = projectDir(sessionId, projectId);
-  const logicTransform = withLocalRepinFiles(transform);
-  const logicTransforms = transforms.map((item) => withLocalRepinFiles(item));
   await writeStatus(root, { status: 'generating_video', preview_url: 'preview/final_output.png', video_url: null, download_url: null, error: null });
   console.log(`[guest/video] calling ComfyUI for ${projectId}`);
   generateComfyVideo({
@@ -540,8 +530,6 @@ const generateVideo = catchAsync(async (req, res) => {
 const finalize = catchAsync(async (req, res) => {
   const { session_id: sessionId, project_id: projectId, video_options: videoOptions = {} } = req.body;
   const root = projectDir(sessionId, projectId);
-  const logicTransform = withLocalRepinFiles(transform);
-  const logicTransforms = transforms.map((item) => withLocalRepinFiles(item));
   const downloads = path.join(root, 'downloads');
   await fsp.mkdir(downloads, { recursive: true });
   await fsp.rm(path.join(downloads, 'metadata.json'), { force: true });
