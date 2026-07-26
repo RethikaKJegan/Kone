@@ -132,12 +132,20 @@ def _warp_component(component: Image.Image, transform: dict[str, Any], image_siz
     skew_x = _clamp_float(transform.get("skewX"))
     skew_y = _clamp_float(transform.get("skewY"))
     if abs(skew_x) > 0.01 or abs(skew_y) > 0.01:
-        slot = slot.transform(
-            slot.size,
+        pad_x = int(abs(skew_x) / 100.0 * target_h) + 8
+        pad_y = int(abs(skew_y) / 100.0 * target_w) + 8
+        padded = Image.new("RGBA", (slot.width + pad_x * 2, slot.height + pad_y * 2), (0, 0, 0, 0))
+        padded.paste(slot, (pad_x, pad_y), slot)
+        slot = padded.transform(
+            padded.size,
             Image.Transform.AFFINE,
             (1, -skew_x / 100.0, 0, -skew_y / 100.0, 1, 0),
             resample=Image.Resampling.BICUBIC,
         )
+        x1 -= pad_x
+        y1 -= pad_y
+        x2 = x1 + slot.width
+        y2 = y1 + slot.height
 
     rotation = _clamp_float(transform.get("rotation"))
     if abs(rotation) > 0.01:
@@ -219,6 +227,20 @@ def _place_manual_component(base_image: Image.Image, component_image: Image.Imag
     return result.convert("RGB"), px_bbox
 
 
+def _component_mask_for_transform(component_image: Image.Image, transform: dict[str, Any], image_size: tuple[int, int]) -> Image.Image:
+    warped, bbox = _warp_component(component_image, transform, image_size)
+    x1, y1, x2, y2 = bbox
+    paste_x, paste_y = max(0, x1), max(0, y1)
+    crop_l, crop_t = max(0, -x1), max(0, -y1)
+    crop_r, crop_b = warped.width - max(0, x2 - image_size[0]), warped.height - max(0, y2 - image_size[1])
+    mask = Image.new("L", image_size, 0)
+    if crop_r <= crop_l or crop_b <= crop_t:
+        return mask
+    visible_alpha = warped.crop((crop_l, crop_t, crop_r, crop_b)).getchannel("A")
+    mask.paste(visible_alpha, (paste_x, paste_y), visible_alpha)
+    return mask
+
+
 def _firered_prompt(transform: dict[str, Any]) -> str:
     feedback_key = str(transform.get("feedbackOption") or "").strip()
     component = str(transform.get("componentKey") or transform.get("componentType") or "component")
@@ -262,6 +284,21 @@ def _crop_blend_mask(size: tuple[int, int], feather_px: int = 32) -> Image.Image
     return mask.filter(ImageFilter.GaussianBlur(radius=max(1, feather // 2)))
 
 
+def _preserve_component_geometry(
+    source_crop: Image.Image,
+    edited_crop: Image.Image,
+    component_mask: Image.Image | None,
+    crop_box: tuple[int, int, int, int],
+) -> Image.Image:
+    if component_mask is None:
+        return edited_crop
+    crop_mask = component_mask.crop(crop_box)
+    if crop_mask.getbbox() is None:
+        return edited_crop
+    preserve_mask = crop_mask.filter(ImageFilter.MinFilter(9)).filter(ImageFilter.GaussianBlur(radius=1.2))
+    return Image.composite(source_crop, edited_crop, preserve_mask)
+
+
 def _component_refine_mask(
     crop_size: tuple[int, int],
     crop_box: tuple[int, int, int, int],
@@ -297,7 +334,7 @@ def _component_refine_mask(
     return mask.filter(ImageFilter.GaussianBlur(radius=max(1, feather)))
 
 
-def _run_firered_if_available(input_path: Path, output_path: Path, transform: dict[str, Any], bbox: tuple[int, int, int, int] | None = None) -> bool:
+def _run_firered_if_available(input_path: Path, output_path: Path, transform: dict[str, Any], bbox: tuple[int, int, int, int] | None = None, component_mask: Image.Image | None = None) -> bool:
     script = os.environ.get("FIRERED_REPIN_SCRIPT") or os.environ.get("FIRERED_IMAGE_EDIT_SCRIPT") or "/root/Kone/fire_red_image_edit.py"
     script_path = Path(script)
     if not script_path.exists():
@@ -345,6 +382,7 @@ def _run_firered_if_available(input_path: Path, output_path: Path, transform: di
             edited_crop = edited_crop.resize(crop_size, Image.Resampling.LANCZOS)
         refine_mask = _component_refine_mask(crop_size, crop_box, tuple(int(v) for v in bbox))
         constrained_crop = Image.composite(edited_crop, source_crop, refine_mask)
+        constrained_crop = _preserve_component_geometry(source_crop, constrained_crop, component_mask, crop_box)
         blend_mask = _crop_blend_mask(crop_size, feather_px=int(max(24, min(crop_size) * 0.08)))
         source.paste(constrained_crop, (crop_box[0], crop_box[1]), blend_mask)
         source.save(output_path)
@@ -508,8 +546,10 @@ def repin_components(payload: ProjectPayload):
 
         placed_image = Image.open(source_image_path).convert("RGB")
         placements = []
+        component_masks = []
         for transform in transforms:
             component_image = Image.open(_component_image_for_transform(transform, payload.component_assets)).convert("RGBA")
+            component_masks.append(_component_mask_for_transform(component_image, transform, placed_image.size))
             placed_image, bbox = _place_manual_component(placed_image, component_image, transform)
             placements.append({
                 "id": transform.get("componentKey"),
@@ -529,11 +569,13 @@ def repin_components(payload: ProjectPayload):
         output_path = preview_dir / f"final_output_v{target_version}.png"
         placed_image.save(placed_path)
         target_key = str(target_transform.get("componentKey") or target_transform.get("componentType") or "").lower()
-        target_bbox = next(
-            (placement["final_insertion_bbox"] for placement in placements if str(placement.get("id") or placement.get("component_type") or "").lower() == target_key),
-            placements[-1]["final_insertion_bbox"] if placements else None,
+        target_index = next(
+            (index for index, placement in enumerate(placements) if str(placement.get("id") or placement.get("component_type") or "").lower() == target_key),
+            len(placements) - 1 if placements else -1,
         )
-        used_firered = _run_firered_if_available(placed_path, output_path, target_transform, target_bbox)
+        target_bbox = placements[target_index]["final_insertion_bbox"] if target_index >= 0 else None
+        target_mask = component_masks[target_index] if target_index >= 0 else None
+        used_firered = _run_firered_if_available(placed_path, output_path, target_transform, target_bbox, target_mask)
         if not used_firered:
             placed_image.save(output_path)
         shutil.copy2(output_path, preview_dir / "final_output.png")

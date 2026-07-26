@@ -212,13 +212,13 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
   }), [normalized, imageSize])
 
   return (
-    <div className="relative w-full overflow-hidden rounded-lg bg-[#0A0A0A]" style={{ aspectRatio: '4/3' }}>
+    <div className="relative w-full overflow-hidden rounded-lg bg-transparent" style={{ aspectRatio: `${imageSize.width} / ${imageSize.height}` }}>
       <div ref={containerRef} className="relative h-full w-full touch-none select-none">
         {imageUrl ? (
           <img
             src={imageUrl}
             alt="Generated preview"
-            className="h-full w-full object-cover"
+            className="h-full w-full object-fill"
             onLoad={event => {
               const img = event.currentTarget
               const nextSize = { width: img.naturalWidth || imageSize.width, height: img.naturalHeight || imageSize.height }
