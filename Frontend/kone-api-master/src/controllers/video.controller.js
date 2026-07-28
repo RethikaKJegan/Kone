@@ -299,6 +299,15 @@ const fileExists = async (filePath) => {
   }
 };
 
+const fileSha256 = async (filePath) => new Promise((resolve, reject) => {
+  const hash = crypto.createHash('sha256');
+  const stream = fs.createReadStream(filePath);
+
+  stream.on('error', reject);
+  stream.on('data', (chunk) => hash.update(chunk));
+  stream.on('end', () => resolve(hash.digest('hex')));
+});
+
 const readJsonIfExists = async (filePath) => {
   if (!(await fileExists(filePath))) return {};
   try {
@@ -657,10 +666,14 @@ const getOrRecoverJob = async (imageId, userId) => {
 };
 
 const VIDEO_PROMPTS = {
-  'zoom-in': 'Ultra-photorealistic smartphone video generated from the exact input image. The ONLY motion is the CAMERA performing a smooth, continuous handheld push-in (forward dolly) toward the elevator over the entire clip. The camera physically moves forward approximately 1-2 meters while maintaining the elevator perfectly centered, making the elevator gradually become larger in frame from beginning to end. This is NOT a digital zoom—the camera itself moves closer with natural perspective change and realistic parallax.The operator stands still except for the slow forward camera movement. Natural handheld micro-shake, subtle breathing motion, slight vertical walking bob, realistic smartphone stabilization, tiny autofocus breathing, and smooth exposure adaptation. Camera movement is slow, steady, and cinematic with no sudden acceleration.The elevator doors remain COMPLETELY CLOSED throughout the entire video with absolutely zero opening, closing, vibration, or movement. Preserve the exact wall textures, marble panels, stainless-steel reflections, lighting, floor tiles, elevator button panel, ceiling lights, signage, and all architectural geometry exactly as in the input image.No people enter the frame. No moving objects. No added objects. No text overlays. No environmental changes. No camera rotation beyond tiny natural handheld sway. No panning, tilting, or orbiting. Only a straight forward dolly-in.Shot on a modern smartphone (iPhone 15 Pro / Google Pixel), 24 fps, realistic rolling shutter, authentic indoor lighting, physically accurate reflections, true-to-life colors, subtle sensor noise, realistic depth changes from forward camera motion, perfect temporal consistency, documentary realism, no CGI look, no warping, no morphing, no hallucinated objects, no flickering.',
-  'pan-lr': 'realistic handheld smartphone video of an elevator lobby, the camera starts from a straight front view of the elevator and slowly arcs to the left with a subtle push-in on the left wall, the LCI panel stays clearly visible and in focus throughout the video, the elevator remains visible in the background, smooth natural camera movement, realistic indoor lighting, glossy brown wall tiles, brushed stainless steel elevator doors, natural reflections, stable perspective, no zoom jump, no sudden camera shake, photorealistic, documentary style, as if recorded by a person on a phone',
-  'pan-rl':'realistic handheld smartphone video of an elevator lobby, the camera starts from a straight front view of the elevator and slowly arcs to the right with a subtle push-in on the right wall, the LCI panel stays clearly visible and in focus throughout the video, the elevator remains visible in the background, smooth natural camera movement, realistic indoor lighting, glossy brown wall tiles, brushed stainless steel elevator doors, natural reflections, stable perspective, no zoom jump, no sudden camera shake, photorealistic, documentary style, as if recorded by a person on a phone',
-  'door-functionality':'the elevator doors open smoothly from fully closed to fully open, realistic handheld smartphone video of an elevator door in an indoor building corridor, fixed camera position, natural indoor lighting, brushed stainless steel elevator doors moving smoothly, realistic reflections on metal, subtle real world camera noise, stable perspective'
+  'zoom-in':'A clearly visible continuous camera push forward toward the elevator for the entire 5-second clip. The camera begins at the exact viewpoint shown in the input image and steadily moves closer, ending noticeably closer than it started. The elevator doors and call panel become progressively larger in the frame from the first frame to the last frame, with realistic perspective change and gentle natural parallax. The forward camera movement must begin immediately in the first second, remain visible throughout the clip, and finish with a smooth slowdown. This is physical forward camera movement, not an abrupt digital zoom. Keep the elevator centered and preserve the original architectural layout, wall textures, call panel, buttons, floor, ceiling, signage, lighting, and reflections. The elevator doors remain fully closed, rigid, and motionless. No door opening or door movement. No people and no new objects, panels, text, buttons, or signs. No sideways pan, orbit, backward movement, or vertical movement. Stable indoor lighting, smooth cinematic motion, photorealistic, temporally consistent, 5-second clip.',
+
+  'pan-lr': 'A clearly visible slow cinematic camera arc toward the existing elevator LCI call panel for the entire 5-second clip. First identify which side of the elevator contains the real LCI panel in the input image. If the LCI is on the right side, smoothly move and arc the camera toward the right. If the LCI is on the left side, smoothly move and arc the camera toward the left. The movement must begin during the first second and continue steadily throughout the clip, ending noticeably closer to the LCI side than it started. Follow a gentle shallow curved path with realistic lateral parallax while maintaining a comfortable distance from the wall. Keep both the elevator doors or visible elevator interior and the LCI panel clearly visible in the frame from beginning to end. The LCI becomes slightly more prominent, but do not move so close that it becomes a close-up or causes the elevator to leave the frame. The camera gently turns toward the elevator and LCI while moving, then slows smoothly at the end. This is camera movement only. Preserve the exact elevator, LCI panel, buttons, walls, floor, ceiling, signage, lighting, reflections, textures, and architectural geometry from the input image. The elevator doors retain their original state and remain completely motionless. No people and no new panels, displays, buttons, signs, text, objects, or architectural details. No movement away from the LCI, no movement toward the opposite wall, no abrupt zoom, no vertical movement, no camera shake, and no door movement. Smooth realistic arc movement, natural perspective change, photorealistic, temporally consistent, 5-second clip.',
+
+  'pan': 'A clearly visible slow cinematic camera arc toward the existing elevator LCI call panel for the entire 5-second clip. First identify which side of the elevator contains the real LCI panel in the input image. If the LCI is on the right side, smoothly move and arc the camera toward the right. If the LCI is on the left side, smoothly move and arc the camera toward the left. The movement must begin during the first second and continue steadily throughout the clip, ending noticeably closer to the LCI side than it started. Follow a gentle shallow curved path with realistic lateral parallax while maintaining a comfortable distance from the wall. Keep both the elevator doors or visible elevator interior and the LCI panel clearly visible in the frame from beginning to end. The LCI becomes slightly more prominent, but do not move so close that it becomes a close-up or causes the elevator to leave the frame. The camera gently turns toward the elevator and LCI while moving, then slows smoothly at the end. This is camera movement only. Preserve the exact elevator, LCI panel, buttons, walls, floor, ceiling, signage, lighting, reflections, textures, and architectural geometry from the input image. The elevator doors retain their original state and remain completely motionless. No people and no new panels, displays, buttons, signs, text, objects, or architectural details. No movement away from the LCI, no movement toward the opposite wall, no abrupt zoom, no vertical movement, no camera shake, and no door movement. Smooth realistic arc movement, natural perspective change, photorealistic, temporally consistent, 5-second clip.',
+  'pan-rl': 'Slow smooth camera pan from right moving to the left. The camera moves left at a slow, steady pace and stops before any component visible in the input image exits the frame. Every element already present in the input image — elevator doors, call panel, buttons, walls, floor, ceiling — must stay fully visible and inside the frame for the entire clip. Do not create, add, or hallucinate any new panels, displays, LCI units, signage, buttons, or any object that does not already exist in the input image. Nothing new appears anywhere in the scene. Elevator doors remain fully closed and completely motionless throughout. No vertical movement. No people, no humans, no figures. Constant stable indoor lighting, no flickering, no exposure change, no texture shimmer on any surface. Photorealistic, temporally consistent, 5-second clip.',
+
+  'door-functionality': 'The elevator doors perform a single smooth realistic action. If the doors are closed in the input image they slide open from center to fully open revealing the elevator interior. If the doors are open in the input image they slide closed from sides to fully shut. Camera position is completely fixed and does not move at all. All existing components — call panel, buttons, walls, floor, ceiling, lighting — remain exactly in place and unchanged. No new objects, panels, text, logos, or signage are created. Realistic metal door sliding mechanics, natural consistent reflections on stainless steel, constant stable indoor lighting, no flickering, no exposure change, no texture shimmer on any surface, photorealistic, temporally consistent, 5 second clip.'
 };
 
 const VIDEO_NEGATIVE_PROMPT = [
@@ -795,6 +808,7 @@ const generateComfyVideo = async ({ inputPath, outputDir, videoOptions }) => {
   const quality = videoOptions.quality || '1080p';
   const workflow = 'wan_i2v';
   const seed = Math.floor(Date.now() % 1000000000);
+  const inputSha256 = await fileSha256(inputPath);
   const existingMeta = await readJsonIfExists(metadataPath);
 
   if (
@@ -803,7 +817,8 @@ const generateComfyVideo = async ({ inputPath, outputDir, videoOptions }) => {
     existingMeta.motion === motion &&
     existingMeta.quality === quality &&
     existingMeta.workflow === workflow &&
-    existingMeta.prompt === prompt
+    existingMeta.prompt === prompt &&
+    existingMeta.input_sha256 === inputSha256
   ) {
     return;
   }
@@ -861,6 +876,7 @@ const generateComfyVideo = async ({ inputPath, outputDir, videoOptions }) => {
         motion,
         quality,
         workflow,
+        input_sha256: inputSha256,
         raw_video_options: videoOptions,
         selected_prompt_key: motion,
         prompt,
@@ -1154,21 +1170,35 @@ const generateVideo = async (req, res) => {
     await fsPromises.mkdir(outputDir, { recursive: true });
 
     const requestedSourcePath = localOutputPathFromUrl(sourceImageUrl);
-    const inputPath = requestedSourcePath && (await fileExists(requestedSourcePath))
+
+    let inputPath = requestedSourcePath && (await fileExists(requestedSourcePath))
       ? requestedSourcePath
       : job.inputPath;
 
-    const originalOutputPath = path.join(outputDir, '01_original.jpg');
-    const finalOutputPath = path.join(outputDir, 'final_output.png');
-    if (path.resolve(inputPath) !== path.resolve(originalOutputPath)) {
-      await fsPromises.copyFile(inputPath, originalOutputPath);
+    // The UI displays compressed *_web.jpg previews. Wan must receive
+    // the full-resolution PNG for the exact version selected by the user.
+    if (inputPath && /_web\.(jpg|jpeg)$/i.test(inputPath)) {
+      const selectedVersionFullResolutionPath = inputPath.replace(
+        /_web\.(jpg|jpeg)$/i,
+        '.png'
+      );
+
+      if (await fileExists(selectedVersionFullResolutionPath)) {
+        inputPath = selectedVersionFullResolutionPath;
+      }
     }
-    if (path.resolve(inputPath) !== path.resolve(finalOutputPath)) {
-      await fsPromises.copyFile(inputPath, finalOutputPath);
+
+    // Preserve 01_original.jpg, final_output.png and all version files.
+    // Use a dedicated staging copy containing the selected full-resolution
+    // version for this Wan generation.
+    const videoInputPath = path.join(outputDir, 'video_input.png');
+
+    if (path.resolve(inputPath) !== path.resolve(videoInputPath)) {
+      await fsPromises.copyFile(inputPath, videoInputPath);
     }
 
     await generateComfyVideo({
-      inputPath: finalOutputPath,
+      inputPath: videoInputPath,
       outputDir,
       videoOptions,
     });

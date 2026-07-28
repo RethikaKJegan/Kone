@@ -544,11 +544,8 @@ def subgraph_workflow_to_api_prompt(workflow: dict[str, Any], *, comfy_cfg: dict
     # The UI subgraph stores KSamplerAdvanced noise_seed as a fixed widget
     # value. Replace it with the seed requested by the API for the sampler
     # that actually introduces noise.
-    generation_seed = int(
-        preset.get("seed")
-        if preset.get("seed") is not None
-        else time.time() * 1000
-    ) % 1000000000
+    # Fixed seed used by the known-good July 24 video runs.
+    generation_seed = 0
 
     for api_node in prompt.values():
         if api_node.get("class_type") != "KSamplerAdvanced":

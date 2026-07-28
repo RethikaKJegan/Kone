@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 import yaml
 from fastapi import FastAPI
-from PIL import Image, ImageDraw, ImageFilter, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageEnhance
 from pydantic import BaseModel
 
 from input_validation import validate_elevator_or_cop_upload, validate_input_image
@@ -256,7 +256,7 @@ def _firered_prompt(transform: dict[str, Any]) -> str:
         f"Photorealistically integrate the already placed KONE {component} into this real elevator photograph. "
         "The geometry is user-approved: keep the exact x/y position, width, height, aspect ratio, rotation, skew, perspective corner alignment, buttons, display, arrows, numbers, labels, and product design. "
         "The panel must remain inside the exact selected bounding box; do not make it taller, wider, straighter, less skewed, less rotated, or shifted. "
-        "FireRed may refine only realism: flush wall contact, local perspective cues, subtle bevel thickness, soft contact shadow behind the plate, ambient occlusion at edges, matching indoor light direction, matching color temperature, metal/plastic reflections, wall bounce light, texture match, and slight camera grain. "
+        "FireRed may refine only realism immediately along the existing panel boundary: matching indoor light direction, matching color temperature, restrained edge ambient occlusion, material consistency, wall bounce light, texture match, and slight camera grain. Do not create any visible plate, rectangle, extrusion, border, duplicate edge, object, or cast shadow behind or outside the panel. "
         "Do not move, resize, redesign, replace, erase, or duplicate the component. Do not alter elevator doors, wall tiles, signs, floor, ceiling, or background geometry outside the immediate component edge transition. "
         "No new buttons, no redesigned display, no warped text, no extra panels, no floating sticker look."
         f"{feedback_sentence}"
@@ -295,7 +295,11 @@ def _preserve_component_geometry(
     crop_mask = component_mask.crop(crop_box)
     if crop_mask.getbbox() is None:
         return edited_crop
-    preserve_mask = crop_mask.filter(ImageFilter.MinFilter(9)).filter(ImageFilter.GaussianBlur(radius=1.2))
+    # Preserve only the inner product details.
+    # FireRed remains responsible for the outer edge, wall contact and shadows.
+    preserve_mask = crop_mask.filter(
+        ImageFilter.GaussianBlur(radius=0.8)
+    )
     return Image.composite(source_crop, edited_crop, preserve_mask)
 
 
@@ -334,12 +338,210 @@ def _component_refine_mask(
     return mask.filter(ImageFilter.GaussianBlur(radius=max(1, feather)))
 
 
+def _component_outer_ring_mask(
+    component_mask: Image.Image | None,
+    crop_box: tuple[int, int, int, int],
+    crop_size: tuple[int, int],
+) -> Image.Image:
+    if component_mask is None:
+        return Image.new("L", crop_size, 0)
+
+    crop_mask = component_mask.crop(crop_box).convert("L")
+
+    if crop_mask.size != crop_size:
+        crop_mask = crop_mask.resize(crop_size, Image.Resampling.LANCZOS)
+
+    if crop_mask.getbbox() is None:
+        return Image.new("L", crop_size, 0)
+
+    ring_width = int(os.environ.get("FIRERED_RING_WIDTH", "31"))
+    ring_blur = float(os.environ.get("FIRERED_RING_BLUR", "5.0"))
+
+    ring_width = max(3, ring_width)
+    if ring_width % 2 == 0:
+        ring_width += 1
+
+    expanded = crop_mask.filter(ImageFilter.MaxFilter(ring_width))
+    ring = ImageChops.subtract(expanded, crop_mask)
+    ring = ring.filter(
+        ImageFilter.GaussianBlur(radius=max(0.5, ring_blur))
+    )
+
+    return ring
+
+def _offset_mask_without_wrap(
+    mask: Image.Image,
+    offset_x: int,
+    offset_y: int,
+) -> Image.Image:
+    shifted = Image.new("L", mask.size, 0)
+
+    source_left = max(0, -offset_x)
+    source_top = max(0, -offset_y)
+    source_right = min(mask.width, mask.width - offset_x)
+    source_bottom = min(mask.height, mask.height - offset_y)
+
+    if source_right <= source_left or source_bottom <= source_top:
+        return shifted
+
+    destination_left = max(0, offset_x)
+    destination_top = max(0, offset_y)
+
+    shifted.paste(
+        mask.crop(
+            (
+                source_left,
+                source_top,
+                source_right,
+                source_bottom,
+            )
+        ),
+        (destination_left, destination_top),
+    )
+    return shifted
+def _harmonize_placed_component(
+    placed_image: Image.Image,
+    component_mask: Image.Image,
+) -> Image.Image:
+    image = placed_image.convert("RGB")
+    mask = component_mask.convert("L")
+
+    if mask.size != image.size:
+        mask = mask.resize(image.size, Image.Resampling.LANCZOS)
+
+    if mask.getbbox() is None:
+        return image
+
+    expanded = mask.filter(ImageFilter.MaxFilter(31))
+    surrounding_ring = ImageChops.subtract(expanded, mask)
+
+    image_array = np.asarray(image, dtype=np.float32)
+    mask_array = np.asarray(mask, dtype=np.float32) / 255.0
+    ring_array = np.asarray(surrounding_ring, dtype=np.float32) / 255.0
+
+    component_pixels = image_array[mask_array > 0.75]
+    surrounding_pixels = image_array[ring_array > 0.20]
+
+    if len(component_pixels) < 32 or len(surrounding_pixels) < 32:
+        return image
+
+    component_mid = np.percentile(component_pixels, 50, axis=0)
+    component_low = np.percentile(component_pixels, 10, axis=0)
+    component_high = np.percentile(component_pixels, 90, axis=0)
+
+    surrounding_mid = np.percentile(surrounding_pixels, 50, axis=0)
+    surrounding_low = np.percentile(surrounding_pixels, 10, axis=0)
+    surrounding_high = np.percentile(surrounding_pixels, 90, axis=0)
+
+    component_range = np.maximum(component_high - component_low, 18.0)
+    surrounding_range = np.maximum(surrounding_high - surrounding_low, 18.0)
+
+    contrast_scale = np.clip(
+        surrounding_range / component_range,
+        0.88,
+        1.14,
+    )
+
+    brightness_shift = np.clip(
+        surrounding_mid - component_mid,
+        -38.0,
+        18.0,
+    )
+
+    corrected = (
+        (image_array - component_mid) * contrast_scale
+        + component_mid
+        + brightness_shift
+    )
+
+    correction_strength = float(
+        os.environ.get("COMPONENT_COLOR_MATCH_STRENGTH", "0.55")
+    )
+    correction_strength = float(np.clip(correction_strength, 0.0, 1.0))
+
+    corrected = (
+        image_array * (1.0 - correction_strength)
+        + corrected * correction_strength
+    )
+    corrected = np.clip(corrected, 0.0, 255.0)
+
+    feathered_mask = mask.filter(ImageFilter.GaussianBlur(radius=0.7))
+    feathered_array = (
+        np.asarray(feathered_mask, dtype=np.float32) / 255.0
+    )[..., None]
+
+    corrected_component = (
+        image_array * (1.0 - feathered_array)
+        + corrected * feathered_array
+    )
+
+    contact_ring = ImageChops.subtract(
+        mask.filter(ImageFilter.MaxFilter(5)),
+        mask,
+    ).filter(
+        ImageFilter.GaussianBlur(radius=1.0)
+    )
+
+    shadow_offset_x = int(
+        os.environ.get("COMPONENT_SHADOW_OFFSET_X", "-5")
+    )
+    shadow_offset_y = int(
+        os.environ.get("COMPONENT_SHADOW_OFFSET_Y", "7")
+    )
+    shadow_blur = float(
+        os.environ.get("COMPONENT_SHADOW_BLUR", "3.5")
+    )
+
+    shifted_mask = _offset_mask_without_wrap(
+        mask,
+        shadow_offset_x,
+        shadow_offset_y,
+    )
+
+    cast_shadow = ImageChops.subtract(
+        shifted_mask,
+        mask,
+    ).filter(
+        ImageFilter.GaussianBlur(radius=shadow_blur)
+    )
+
+    contact_strength = float(
+        os.environ.get("COMPONENT_CONTACT_SHADOW_STRENGTH", "0.14")
+    )
+    cast_strength = float(
+        os.environ.get("COMPONENT_CAST_SHADOW_STRENGTH", "0.26")
+    )
+
+    contact_strength = float(np.clip(contact_strength, 0.0, 0.35))
+    cast_strength = float(np.clip(cast_strength, 0.0, 0.80))
+
+    contact_array = (
+        np.asarray(contact_ring, dtype=np.float32) / 255.0
+    )[..., None]
+    cast_array = (
+        np.asarray(cast_shadow, dtype=np.float32) / 255.0
+    )[..., None]
+
+    corrected_component *= 1.0 - contact_array * contact_strength
+    corrected_component *= 1.0 - cast_array * cast_strength
+
+    return Image.fromarray(
+        np.clip(corrected_component, 0.0, 255.0).astype(np.uint8),
+        mode="RGB",
+    )
+    
 def _run_firered_if_available(input_path: Path, output_path: Path, transform: dict[str, Any], bbox: tuple[int, int, int, int] | None = None, component_mask: Image.Image | None = None) -> bool:
     script = os.environ.get("FIRERED_REPIN_SCRIPT") or os.environ.get("FIRERED_IMAGE_EDIT_SCRIPT") or "/root/Kone/fire_red_image_edit.py"
     script_path = Path(script)
     if not script_path.exists():
         return False
-    env = {**os.environ, "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0")}
+    env = {
+        **os.environ,
+        "CUDA_VISIBLE_DEVICES": os.environ.get(
+            "FIRERED_CUDA_VISIBLE_DEVICES",
+            os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
+        ),
+    }
     fire_input = input_path
     fire_output = output_path
     crop_box: tuple[int, int, int, int] | None = None
@@ -380,11 +582,36 @@ def _run_firered_if_available(input_path: Path, output_path: Path, transform: di
         crop_size = (crop_box[2] - crop_box[0], crop_box[3] - crop_box[1])
         if edited_crop.size != crop_size:
             edited_crop = edited_crop.resize(crop_size, Image.Resampling.LANCZOS)
-        refine_mask = _component_refine_mask(crop_size, crop_box, tuple(int(v) for v in bbox))
-        constrained_crop = Image.composite(edited_crop, source_crop, refine_mask)
-        constrained_crop = _preserve_component_geometry(source_crop, constrained_crop, component_mask, crop_box)
-        blend_mask = _crop_blend_mask(crop_size, feather_px=int(max(24, min(crop_size) * 0.08)))
-        source.paste(constrained_crop, (crop_box[0], crop_box[1]), blend_mask)
+        refine_mask = _component_outer_ring_mask(
+            component_mask,
+            crop_box,
+            crop_size,
+        )
+
+        constrained_crop = Image.composite(
+            edited_crop,
+            source_crop,
+            refine_mask,
+        )
+
+        constrained_crop = _preserve_component_geometry(
+            source_crop,
+            constrained_crop,
+            component_mask,
+            crop_box,
+        )
+
+        blend_mask = _crop_blend_mask(
+            crop_size,
+            feather_px=int(max(24, min(crop_size) * 0.08)),
+        )
+
+        source.paste(
+            constrained_crop,
+            (crop_box[0], crop_box[1]),
+            blend_mask,
+        )
+
         source.save(output_path)
     return output_path.exists()
 
@@ -531,26 +758,47 @@ def repin_components(payload: ProjectPayload):
             raise ValueError("Version limit reached. Choose the best saved version to continue.")
 
         background_path = target_transform.get("repinBackgroundPath")
-        if background_path and Path(str(background_path)).exists():
-            source_image_path = Path(str(background_path))
-            transforms = [target_transform]
-        else:
-            source_candidates = [
-                preview_dir / f"final_output_v{source_version}.png",
-                preview_dir / "final_output.png",
-                storage / "uploads" / "input.jpg",
-            ]
-            source_image_path = next((candidate for candidate in source_candidates if candidate.exists()), None)
-        if source_image_path is None:
-            raise FileNotFoundError("Repin source image was not found")
+        if not background_path:
+            raise ValueError(
+                "Repin requires the clean LaMa background. "
+                "repinBackgroundPath was not provided."
+            )
 
+        source_image_path = Path(str(background_path))
+        if not source_image_path.exists():
+            raise FileNotFoundError(
+                f"Clean Repin background was not found: {source_image_path}"
+            )
+
+        transforms = [target_transform]
         placed_image = Image.open(source_image_path).convert("RGB")
         placements = []
         component_masks = []
         for transform in transforms:
-            component_image = Image.open(_component_image_for_transform(transform, payload.component_assets)).convert("RGBA")
-            component_masks.append(_component_mask_for_transform(component_image, transform, placed_image.size))
-            placed_image, bbox = _place_manual_component(placed_image, component_image, transform)
+            component_image = Image.open(
+                _component_image_for_transform(
+                    transform,
+                    payload.component_assets,
+                )
+            ).convert("RGBA")
+
+            component_mask = _component_mask_for_transform(
+                component_image,
+                transform,
+                placed_image.size,
+            )
+            component_masks.append(component_mask)
+
+            placed_image, bbox = _place_manual_component(
+                placed_image,
+                component_image,
+                transform,
+            )
+
+            placed_image = _harmonize_placed_component(
+                placed_image,
+                component_mask,
+            )
             placements.append({
                 "id": transform.get("componentKey"),
                 "component_type": transform.get("componentType"),

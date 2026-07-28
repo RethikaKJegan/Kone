@@ -156,7 +156,7 @@ export default function Step5Video() {
         toast('Upload an image before generating the video preview.', 'destructive')
         return
       }
-      if (!currentOffering.outputImageUrl) {
+      if (!currentOffering.outputImagePath && !currentOffering.outputImageUrl) {
         toast('Generate the image preview before generating the video.', 'destructive')
         return
       }
@@ -181,9 +181,11 @@ export default function Step5Video() {
 
         await apiClient.post('/video/generate', {
           imageId: effectiveImageId,
-          sourceImageUrl: currentOffering.outputImageUrl,
+          sourceImageUrl:
+          currentOffering.outputImagePath
+          ?? currentOffering.outputImageUrl,
           videoOptions,
-        }, { timeout: 0 })
+          }, { timeout: 0 })
 
         const { data } = await apiClient.post<Offering>(`/offerings/${currentOffering.id}/render`)
         if (!data.outputVideoUrl) {

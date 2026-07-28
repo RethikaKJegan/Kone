@@ -1,4 +1,4 @@
-`from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import sys
@@ -6,8 +6,15 @@ from pathlib import Path
 
 import torch
 from diffusers import DiffusionPipeline
-from PIL import Image, ImageDraw, ImageFilter, ImageOps, UnidentifiedImageError
-
+import numpy as np
+from PIL import (
+    Image,
+    ImageChops,
+    ImageDraw,
+    ImageFilter,
+    ImageOps,
+    UnidentifiedImageError,
+)
 
 MODEL_ID = "FireRedTeam/FireRed-Image-Edit-1.1"
 
@@ -44,33 +51,45 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--pad",
-        default=140,
+        default=90,
         type=int,
         help="Padding around component box for FireRed local blending",
     )
     parser.add_argument(
         "--shadow-offset-x",
-        default=6,
+        default=3,
         type=int,
-        help="Horizontal contact-shadow offset in pixels",
+        help="Horizontal cast-shadow offset in pixels",
     )
     parser.add_argument(
         "--shadow-offset-y",
-        default=10,
+        default=5,
         type=int,
-        help="Vertical contact-shadow offset in pixels",
+        help="Vertical cast-shadow offset in pixels",
     )
     parser.add_argument(
         "--shadow-blur",
-        default=14.0,
+        default=8.0,
         type=float,
-        help="Contact-shadow Gaussian blur radius",
+        help="Cast-shadow Gaussian blur radius",
     )
     parser.add_argument(
         "--shadow-opacity",
-        default=95,
+        default=42,
         type=int,
-        help="Contact-shadow opacity from 0 to 255",
+        help="Cast-shadow opacity from 0 to 255",
+    )
+    parser.add_argument(
+        "--color-match-strength",
+        default=0.72,
+        type=float,
+        help="Strength of pre-FireRed color, brightness, and contrast matching",
+    )
+    parser.add_argument(
+        "--component-edge-feather",
+        default=5.0,
+        type=float,
+        help="Feather applied to the component alpha edge",
     )
     parser.add_argument(
         "--crop-feather",
@@ -98,13 +117,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--steps",
-        default=40,
+        default=45,
         type=int,
         help="Number of inference steps",
     )
     parser.add_argument(
         "--true-cfg-scale",
-        default=4.0,
+        default=3.5,
         type=float,
         help="FireRed/Qwen edit CFG scale",
     )
@@ -201,6 +220,103 @@ def offset_mask(
     )
     return shifted
 
+def sample_surrounding_surface(
+    image: Image.Image,
+    box: tuple[int, int, int, int],
+) -> np.ndarray:
+    x1, y1, x2, y2 = validate_box(box, image.size)
+    box_width = x2 - x1
+    box_height = y2 - y1
+    margin = max(12, round(max(box_width, box_height) * 0.18))
+
+    outer_x1 = max(0, x1 - margin)
+    outer_y1 = max(0, y1 - margin)
+    outer_x2 = min(image.width, x2 + margin)
+    outer_y2 = min(image.height, y2 + margin)
+
+    region = np.asarray(
+        image.crop((outer_x1, outer_y1, outer_x2, outer_y2)).convert("RGB"),
+        dtype=np.float32,
+    )
+
+    mask = np.ones(region.shape[:2], dtype=bool)
+    inner_x1 = x1 - outer_x1
+    inner_y1 = y1 - outer_y1
+    inner_x2 = x2 - outer_x1
+    inner_y2 = y2 - outer_y1
+    mask[inner_y1:inner_y2, inner_x1:inner_x2] = False
+
+    pixels = region[mask]
+    if len(pixels) < 64:
+        pixels = region.reshape(-1, 3)
+
+    return pixels
+
+
+def match_component_to_scene(
+    component: Image.Image,
+    scene_pixels: np.ndarray,
+    strength: float,
+) -> Image.Image:
+    strength = float(np.clip(strength, 0.0, 1.0))
+
+    rgba = np.asarray(component.convert("RGBA"), dtype=np.uint8)
+    rgb = rgba[..., :3].astype(np.float32)
+    alpha = rgba[..., 3]
+    valid = alpha > 16
+
+    if not np.any(valid):
+        return component.convert("RGBA")
+
+    source_pixels = rgb[valid]
+
+    source_low = np.percentile(source_pixels, 10, axis=0)
+    source_mid = np.percentile(source_pixels, 50, axis=0)
+    source_high = np.percentile(source_pixels, 90, axis=0)
+
+    target_low = np.percentile(scene_pixels, 10, axis=0)
+    target_mid = np.percentile(scene_pixels, 50, axis=0)
+    target_high = np.percentile(scene_pixels, 90, axis=0)
+
+    source_range = np.maximum(source_high - source_low, 12.0)
+    target_range = np.maximum(target_high - target_low, 12.0)
+    contrast_scale = np.clip(target_range / source_range, 0.70, 1.35)
+
+    corrected = (rgb - source_mid) * contrast_scale + target_mid
+    corrected = np.clip(corrected, 0.0, 255.0)
+    rgb = rgb * (1.0 - strength) + corrected * strength
+
+    result = np.dstack(
+        (
+            np.clip(rgb, 0.0, 255.0).astype(np.uint8),
+            alpha,
+        )
+    )
+    return Image.fromarray(result, mode="RGBA")
+
+
+def feather_alpha(image: Image.Image, radius: float) -> Image.Image:
+    if radius <= 0:
+        return image
+
+    result = image.copy()
+    alpha = result.getchannel("A")
+    inset = max(1, round(radius))
+
+    edge_mask = Image.new("L", result.size, 0)
+    draw = ImageDraw.Draw(edge_mask)
+    draw.rectangle(
+        (
+            inset,
+            inset,
+            max(inset, result.width - inset - 1),
+            max(inset, result.height - inset - 1),
+        ),
+        fill=255,
+    )
+    edge_mask = edge_mask.filter(ImageFilter.GaussianBlur(radius))
+    result.putalpha(ImageChops.multiply(alpha, edge_mask))
+    return result
 
 def place_component(
     base_image: Image.Image,
@@ -210,6 +326,8 @@ def place_component(
     shadow_offset_y: int,
     shadow_blur: float,
     shadow_opacity: int,
+    color_match_strength: float,
+    component_edge_feather: float,
 ) -> Image.Image:
     if shadow_blur < 0:
         raise ValueError("--shadow-blur must be greater than or equal to 0")
@@ -227,6 +345,15 @@ def place_component(
         method=Image.Resampling.LANCZOS,
     )
 
+    scene_pixels = sample_surrounding_surface(base_image, box)
+    fitted = match_component_to_scene(
+        component=fitted,
+        scene_pixels=scene_pixels,
+        strength=color_match_strength,
+    )
+    fitted = fitted.filter(ImageFilter.GaussianBlur(radius=0.35))
+    fitted = feather_alpha(fitted, component_edge_feather)
+
     offset_x = (target_width - fitted.width) // 2
     offset_y = (target_height - fitted.height) // 2
     component_position = (x1 + offset_x, y1 + offset_y)
@@ -235,23 +362,30 @@ def place_component(
     component_layer.paste(fitted, component_position, fitted)
 
     component_alpha = component_layer.getchannel("A")
-    shadow_alpha = component_alpha.point(
+
+    contact_alpha = component_alpha.filter(
+        ImageFilter.GaussianBlur(radius=2.0)
+    )
+    contact_alpha = contact_alpha.point(
+        lambda value: round(value * min(72, shadow_opacity + 25) / 255)
+    )
+    contact_alpha = offset_mask(contact_alpha, 1, 2)
+
+    cast_alpha = component_alpha.filter(
+        ImageFilter.GaussianBlur(radius=shadow_blur)
+    )
+    cast_alpha = cast_alpha.point(
         lambda value: round(value * shadow_opacity / 255)
     )
-
-    if shadow_blur > 0:
-        shadow_alpha = shadow_alpha.filter(
-            ImageFilter.GaussianBlur(shadow_blur)
-        )
-
-    shadow_alpha = offset_mask(
-        shadow_alpha,
+    cast_alpha = offset_mask(
+        cast_alpha,
         shadow_offset_x,
         shadow_offset_y,
     )
 
+    combined_shadow = ImageChops.lighter(contact_alpha, cast_alpha)
     shadow_layer = Image.new("RGBA", base_image.size, (0, 0, 0, 0))
-    shadow_layer.putalpha(shadow_alpha)
+    shadow_layer.putalpha(combined_shadow)
 
     result = Image.alpha_composite(
         base_image.convert("RGBA"),
@@ -261,24 +395,6 @@ def place_component(
     return result.convert("RGB")
 
 
-def place_component_in_crop(
-    crop_image: Image.Image,
-    component_image: Image.Image,
-    component_box_in_crop: tuple[int, int, int, int],
-    shadow_offset_x: int,
-    shadow_offset_y: int,
-    shadow_blur: float,
-    shadow_opacity: int,
-) -> Image.Image:
-    return place_component(
-        base_image=crop_image,
-        component_image=component_image,
-        box=component_box_in_crop,
-        shadow_offset_x=shadow_offset_x,
-        shadow_offset_y=shadow_offset_y,
-        shadow_blur=shadow_blur,
-        shadow_opacity=shadow_opacity,
-    )
 
 
 def create_feather_mask(
@@ -487,6 +603,8 @@ def main() -> int:
                 shadow_offset_y=args.shadow_offset_y,
                 shadow_blur=args.shadow_blur,
                 shadow_opacity=args.shadow_opacity,
+                color_match_strength=args.color_match_strength,  # type: ignore
+                component_edge_feather=args.component_edge_feather,  # type: ignore
             )
 
             pipe = load_pipeline(args.model, device)
@@ -537,4 +655,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())`
+    raise SystemExit(main())
