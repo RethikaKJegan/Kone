@@ -165,7 +165,7 @@ export default function Step4Repin() {
   const previewImageUrl = useMemo(() => versionUrl(selectedSourcePreview, offering?.outputImageUrl), [selectedSourcePreview, offering?.outputImageUrl])
   const originalImageUrl = offering?.uploadedFileUrl ?? offering?.inputImagePath ?? null
   const sourceVersionComponent = selectedSourcePreview?.transform?.componentKey ?? null
-  const shouldUseOriginalForPlacement = sourceVersion === 1 || sourceVersionComponent === selectedComp
+  const shouldUseOriginalForPlacement = sourceVersion === 1
   const sourceBaseMode: 'original' | 'version' = shouldUseOriginalForPlacement ? 'original' : 'version'
   const editingBackgroundUrl = shouldUseOriginalForPlacement ? (originalImageUrl ?? previewImageUrl) : (previewImageUrl ?? originalImageUrl)
   const defaultTransformFor = (component: ComponentKey) => repinTransformFromPin(component, sourceVersion, targetVersion, pins.find((p: ComponentPin) => p.componentKey === component))

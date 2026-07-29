@@ -29,6 +29,13 @@ export interface ComponentItem {
   label: string
   description: string
   imageUrl?: string
+  variants?: ComponentVariant[]
+}
+
+export interface ComponentVariant {
+  id: string
+  label: string
+  imageUrl: string
 }
 
 export interface ComponentPin {
@@ -107,6 +114,7 @@ export interface Offering {
   uploadedFileType: 'image' | 'video' | null
   environments: Environment[]
   selectedComponents: ComponentKey[]
+  selectedComponentAssets?: Partial<Record<ComponentKey, string>>
   componentPins: ComponentPin[]
   annotationsEnabled: boolean
   activeAnnotationFilters: ComponentKey[]
