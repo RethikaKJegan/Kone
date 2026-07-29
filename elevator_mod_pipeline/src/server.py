@@ -256,7 +256,16 @@ def _firered_prompt(transform: dict[str, Any]) -> str:
         f"Photorealistically integrate the already placed KONE {component} into this real elevator photograph. "
         "The geometry is user-approved: keep the exact x/y position, width, height, aspect ratio, rotation, skew, perspective corner alignment, buttons, display, arrows, numbers, labels, and product design. "
         "The panel must remain inside the exact selected bounding box; do not make it taller, wider, straighter, less skewed, less rotated, or shifted. "
-        "FireRed may refine only realism immediately along the existing panel boundary: matching indoor light direction, matching color temperature, restrained edge ambient occlusion, material consistency, wall bounce light, texture match, and slight camera grain. Do not create any visible plate, rectangle, extrusion, border, duplicate edge, object, or cast shadow behind or outside the panel. "
+        "Photorealistically finish the physical installation of the single existing elevator landing call indicator already placed on the wall. The Repin geometry is final and immutable: preserve the exact four corner coordinates, bounding box, width, height, aspect ratio, rotation, skew, perspective transform, silhouette and wall position. Do not move, resize, straighten, widen, extend, crop or warp the panel."
+
+        "Improve realism only through physically consistent appearance. Match the panel exposure, brightness, black level, contrast, white balance and color temperature to the surrounding wall and elevator photograph. Remove the flat pasted-image appearance. Give the faceplate realistic coated-metal construction with restrained roughness, subtle vertical material variation, soft wall-color reflections, natural highlight rolloff, mild camera softness and matching photographic grain. Keep the black display dark and glossy without changing its contents."
+
+        "Infer the dominant light direction from the surrounding wall, ceiling highlights and elevator reflections. Apply that same illumination continuously across the panel. Create a restrained highlight on the light-facing edges and darker shading on the opposite edges."
+        "Express depth only through subtle tonal shading and restrained edge highlights entirely inside the existing panel silhouette. Do not generate visible thickness, extrusion, backing material, raised extensions or any pixels resembling another object outside the exact four panel corners."
+
+        "Create tight ambient occlusion directly along all four panel-to-wall seams. Add one clearly visible soft cast shadow on the wall opposite the dominant light source. The shadow must begin at the panel boundary, remain attached to the plate, be darkest near the mounting edge and gradually soften with distance. The shadow must follow the existing panel silhouette and perspective. Do not create a second rectangle, backing plate, border, frame, floating layer or duplicate panel."
+
+        "Preserve exactly every existing button, display, arrow, number, icon, logo, label, spacing and product detail. Do not add, remove, repeat, merge, redraw or reinterpret any control. Do not alter the elevator, door, wall tiles, joints, signs, floor or surrounding architecture. There is exactly one LCI in the edited region."
         "Do not move, resize, redesign, replace, erase, or duplicate the component. Do not alter elevator doors, wall tiles, signs, floor, ceiling, or background geometry outside the immediate component edge transition. "
         "No new buttons, no redesigned display, no warped text, no extra panels, no floating sticker look."
         f"{feedback_sentence}"
@@ -529,7 +538,118 @@ def _harmonize_placed_component(
         np.clip(corrected_component, 0.0, 255.0).astype(np.uint8),
         mode="RGB",
     )
-    
+def _firered_constrained_composite(
+    source_crop: Image.Image,
+    edited_crop: Image.Image,
+    component_mask: Image.Image | None,
+    crop_box: tuple[int, int, int, int],
+) -> Image.Image:
+    if component_mask is None:
+        return source_crop
+
+    crop_size = source_crop.size
+    crop_mask = component_mask.crop(crop_box).convert("L")
+
+    if crop_mask.size != crop_size:
+        crop_mask = crop_mask.resize(
+            crop_size,
+            Image.Resampling.LANCZOS,
+        )
+
+    if crop_mask.getbbox() is None:
+        return source_crop
+
+    face_strength = float(
+        os.environ.get("FIRERED_FACE_STRENGTH", "0.20")
+    )
+    shadow_strength = float(
+        os.environ.get("FIRERED_SHADOW_STRENGTH", "0.70")
+    )
+
+    face_strength = float(np.clip(face_strength, 0.0, 0.33))
+    shadow_strength = float(np.clip(shadow_strength, 0.0, 0.85))
+
+    inner_face_mask = crop_mask.filter(
+        ImageFilter.MinFilter(5)
+    ).filter(
+        ImageFilter.GaussianBlur(radius=0.8)
+    )
+
+    outer_ring_mask = _component_outer_ring_mask(
+        component_mask,
+        crop_box,
+        crop_size,
+    )
+
+    grayscale = source_crop.convert("L")
+    grayscale_array = np.asarray(grayscale, dtype=np.uint8)
+    component_array = np.asarray(crop_mask, dtype=np.uint8)
+
+    component_values = grayscale_array[component_array > 128]
+    if len(component_values) == 0:
+        return source_crop
+
+    dark_threshold = int(np.percentile(component_values, 38))
+
+    dark_details = grayscale.point(
+        lambda value: 255 if value <= dark_threshold else 0
+    )
+    dark_details = ImageChops.multiply(
+        dark_details,
+        crop_mask,
+    )
+
+    edge_details = grayscale.filter(
+        ImageFilter.FIND_EDGES
+    ).point(
+        lambda value: 255 if value >= 24 else 0
+    )
+    edge_details = ImageChops.multiply(
+        edge_details,
+        crop_mask,
+    )
+
+    protected_details = ImageChops.lighter(
+        dark_details,
+        edge_details,
+    ).filter(
+        ImageFilter.MaxFilter(5)
+    ).filter(
+        ImageFilter.GaussianBlur(radius=0.7)
+    )
+
+    face_refinement = Image.blend(
+        source_crop,
+        edited_crop,
+        face_strength,
+    )
+
+    result = Image.composite(
+        face_refinement,
+        source_crop,
+        inner_face_mask,
+    )
+
+    shadow_refinement = Image.blend(
+        source_crop,
+        edited_crop,
+        shadow_strength,
+    )
+
+    result = Image.composite(
+        shadow_refinement,
+        result,
+        outer_ring_mask,
+    )
+
+    result = Image.composite(
+        source_crop,
+        result,
+        protected_details,
+    )
+
+    return result
+
 def _run_firered_if_available(input_path: Path, output_path: Path, transform: dict[str, Any], bbox: tuple[int, int, int, int] | None = None, component_mask: Image.Image | None = None) -> bool:
     script = os.environ.get("FIRERED_REPIN_SCRIPT") or os.environ.get("FIRERED_IMAGE_EDIT_SCRIPT") or "/root/Kone/fire_red_image_edit.py"
     script_path = Path(script)
@@ -582,21 +702,9 @@ def _run_firered_if_available(input_path: Path, output_path: Path, transform: di
         crop_size = (crop_box[2] - crop_box[0], crop_box[3] - crop_box[1])
         if edited_crop.size != crop_size:
             edited_crop = edited_crop.resize(crop_size, Image.Resampling.LANCZOS)
-        refine_mask = _component_outer_ring_mask(
-            component_mask,
-            crop_box,
-            crop_size,
-        )
-
-        constrained_crop = Image.composite(
+        constrained_crop = _firered_constrained_composite(
+            source_crop,
             edited_crop,
-            source_crop,
-            refine_mask,
-        )
-
-        constrained_crop = _preserve_component_geometry(
-            source_crop,
-            constrained_crop,
             component_mask,
             crop_box,
         )
@@ -795,10 +903,7 @@ def repin_components(payload: ProjectPayload):
                 transform,
             )
 
-            placed_image = _harmonize_placed_component(
-                placed_image,
-                component_mask,
-            )
+            placed_image = placed_image
             placements.append({
                 "id": transform.get("componentKey"),
                 "component_type": transform.get("componentType"),
