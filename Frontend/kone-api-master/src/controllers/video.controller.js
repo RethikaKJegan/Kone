@@ -447,6 +447,18 @@ const normalizePreviewVersions = (offering, fallbackUrl) => {
   return fallbackUrl ? [{ version: 1, url: fallbackUrl, createdAt: new Date() }] : [];
 };
 
+const mergeComponentPins = (existingPins = [], updatedPins = []) => {
+  const byKey = new Map();
+  existingPins.forEach((pin) => {
+    const plain = typeof pin.toObject === 'function' ? pin.toObject() : pin;
+    if (plain?.componentKey) byKey.set(String(plain.componentKey).toLowerCase(), plain);
+  });
+  updatedPins.forEach((pin) => {
+    if (pin?.componentKey) byKey.set(String(pin.componentKey).toLowerCase(), pin);
+  });
+  return Array.from(byKey.values());
+};
+
 const runLogicRepin = async ({ imageId, userId, transform, transforms = [], componentAssets, environments, previewRequestKey }) => {
   const logicTransform = withLocalRepinFiles(transform);
   const logicTransforms = transforms.map((item) => withLocalRepinFiles(item));
@@ -457,10 +469,12 @@ const runLogicRepin = async ({ imageId, userId, transform, transforms = [], comp
   const outputDir = getOutputDir(imageId);
   await Promise.all([uploadsDir, previewDir, pipelineDir, outputDir].map((dir) => fsPromises.mkdir(dir, { recursive: true })));
 
-  const sourcePath = logicTransform.sourceVersion > 1
-    ? path.join(outputDir, `final_output_v${logicTransform.sourceVersion}.png`)
-    : path.join(outputDir, 'final_output.png');
   const fallbackInput = getUploadInputPath(imageId);
+  const sourcePath = logicTransform.sourceBaseMode === 'original'
+    ? fallbackInput
+    : (logicTransform.sourceVersion > 1
+        ? path.join(outputDir, `final_output_v${logicTransform.sourceVersion}.png`)
+        : path.join(outputDir, 'final_output.png'));
   const sourceImage = (await fileExists(sourcePath)) ? sourcePath : ((await fileExists(path.join(outputDir, 'final_output.png'))) ? path.join(outputDir, 'final_output.png') : fallbackInput);
   await fsPromises.copyFile(sourceImage, path.join(uploadsDir, `repin_source_v${logicTransform.sourceVersion}.png`));
 
@@ -509,20 +523,21 @@ const startRepinRun = ({ offeringId, imageId, userId, transform, transforms = []
       if (Number(transform.targetVersion) > 5) throw new Error('Version limit reached. Choose the best saved version to continue.');
       const placement = await runLogicRepin({ imageId, userId, transform, transforms, componentAssets, environments, previewRequestKey });
       const versionUrl = `${placement.previewUrl}?v=${Date.now()}`;
-      const versions = normalizePreviewVersions(offering, offering.outputImagePath || offering.outputImageUrl);
+      const versions = normalizePreviewVersions(offering, offering.previewImagePath || offering.outputImagePath || offering.outputImageUrl);
       const nextVersion = {
         version: Number(transform.targetVersion),
         url: versionUrl,
         sourceVersion: Number(transform.sourceVersion),
         transform,
         feedbackOption: transform.feedbackOption || null,
+        feedbackOptions: Array.isArray(transform.feedbackOptions) ? transform.feedbackOptions : (transform.feedbackOption ? [transform.feedbackOption] : []),
         createdAt: new Date(),
       };
       const withoutTarget = versions.filter((version) => Number(version.version) !== Number(transform.targetVersion));
       withoutTarget.push(nextVersion);
       withoutTarget.sort((a, b) => Number(a.version) - Number(b.version));
       await Offering.findByIdAndUpdate(offeringId, {
-        componentPins: placement.pins,
+        componentPins: mergeComponentPins(offering.componentPins, placement.pins),
         outputImageUrl: versionUrl,
         outputImagePath: placement.fullPreviewUrl || placement.currentPreviewUrl,
         previewImagePath: placement.currentPreviewUrl,
@@ -619,6 +634,8 @@ const startComponentRun = ({ offeringId, imageId, userId, inputPath, components,
         outputImageUrl: previewUrl,
         outputImagePath: placement.fullPreviewUrl || placement.previewUrl,
         previewImagePath: placement.fullPreviewUrl || placement.previewUrl,
+        previewVersions: [{ version: 1, url: previewUrl, createdAt: new Date() }],
+        repinPass: 1,
         outputVideoUrl: null,
         outputVideoPath: null,
         downloadUrl: null,

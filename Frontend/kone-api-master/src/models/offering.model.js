@@ -25,6 +25,7 @@ const previewVersionSchema = mongoose.Schema(
     sourceVersion: { type: Number, default: null },
     transform: { type: mongoose.Schema.Types.Mixed, default: null },
     feedbackOption: { type: String, default: null },
+    feedbackOptions: { type: [String], default: [] },
   },
   { _id: false }
 );

@@ -11,12 +11,13 @@ import { cn } from '../../../lib/utils'
 import type { ComponentKey, ComponentPin, PreviewVersion, RepinFeedbackOption, RepinTransform } from '../../../types'
 
 const COMP_LABELS = Object.fromEntries(KONE_COMPONENTS.map(c => [c.key, c.label])) as Record<ComponentKey, string>
+const COMP_IMAGES = Object.fromEntries(KONE_COMPONENTS.map(c => [c.key, c.imageUrl ?? null])) as Record<ComponentKey, string | null>
 const FEEDBACK_OPTIONS: { value: RepinFeedbackOption; label: string }[] = [
-  { value: 'wrong_placement', label: 'Wrong placement' },
-  { value: 'wrong_component', label: 'Wrong component' },
-  { value: 'bad_perspective', label: 'Bad perspective' },
-  { value: 'bad_lighting_shadow', label: 'Bad lighting / shadow' },
-  { value: 'poor_blending_unrealistic', label: 'Poor blending / unrealistic' },
+  { value: 'edge_alignment', label: 'Sharper edge alignment' },
+  { value: 'perspective_depth', label: 'Better perspective depth' },
+  { value: 'lighting_shadow', label: 'Match lighting and shadows' },
+  { value: 'material_reflections', label: 'Improve material reflections' },
+  { value: 'seamless_blending', label: 'Blend naturally into scene' },
 ]
 
 function versionUrl(version: PreviewVersion | undefined, fallback: string | null | undefined) {
@@ -37,16 +38,22 @@ export default function Step4Repin() {
       ? [{ version: 1, url: offering.outputImageUrl }]
       : []
   const latestVersion = versions.reduce((max, version) => Math.max(max, version.version), versions.length ? 1 : 0)
-  const sourceVersion = latestVersion || 1
-  const targetVersion = Math.min(sourceVersion + 1, 5)
+  const [selectedSourceVersion, setSelectedSourceVersion] = useState(latestVersion || 1)
+  const sourceVersion = versions.some(version => version.version === selectedSourceVersion) ? selectedSourceVersion : latestVersion || 1
+  const targetVersion = Math.min(latestVersion + 1, 5)
   const generationLimitReached = latestVersion >= 5
   const [selectedComp, setSelectedComp] = useState<ComponentKey | null>(selectedComponents[0] ?? components[0] ?? null)
   const selectedPin = pins.find((p: ComponentPin) => p.componentKey === selectedComp)
   const [repinTransforms, setLocalRepinTransforms] = useState<Partial<Record<ComponentKey, RepinTransform>>>(offering?.repinTransforms ?? {})
-  const [feedbackOption, setFeedbackOption] = useState<RepinFeedbackOption>('wrong_placement')
+  const [feedbackOptions, setFeedbackOptions] = useState<RepinFeedbackOption[]>(['seamless_blending'])
   const [inspectedVersion, setInspectedVersion] = useState<PreviewVersion | null>(null)
   const [canvasConfirmed, setCanvasConfirmed] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
+
+  useEffect(() => {
+    if (!latestVersion) return
+    setSelectedSourceVersion(current => versions.some(version => version.version === current) ? current : latestVersion)
+  }, [latestVersion, versions.map(version => version.version).join('|')])
 
   useEffect(() => {
     const component = selectedComp && components.includes(selectedComp) ? selectedComp : components[0]
@@ -108,6 +115,7 @@ export default function Step4Repin() {
                 : offering.previewVersions,
               repinPass: data.repin_pass ?? offering.repinPass,
             })
+            if (data.repin_pass) setSelectedSourceVersion(data.repin_pass)
             toast('New repin preview generated')
             return
           }
@@ -133,6 +141,7 @@ export default function Step4Repin() {
               videoGenerated: false,
               downloadUrl: null,
             })
+            if (data.repinPass) setSelectedSourceVersion(data.repinPass)
             toast('New repin preview generated')
             return
           }
@@ -152,9 +161,13 @@ export default function Step4Repin() {
     }
   }, [projectId, offeringId, offering?.previewRequestKey, offering?.pipelineStatus])
 
-  const previewImageUrl = useMemo(() => versionUrl(versions.find(v => v.version === sourceVersion), offering?.outputImageUrl), [versions, sourceVersion, offering?.outputImageUrl])
-  const editingBackgroundUrl = offering?.uploadedFileUrl ?? offering?.inputImagePath ?? previewImageUrl
-
+  const selectedSourcePreview = versions.find(v => v.version === sourceVersion)
+  const previewImageUrl = useMemo(() => versionUrl(selectedSourcePreview, offering?.outputImageUrl), [selectedSourcePreview, offering?.outputImageUrl])
+  const originalImageUrl = offering?.uploadedFileUrl ?? offering?.inputImagePath ?? null
+  const sourceVersionComponent = selectedSourcePreview?.transform?.componentKey ?? null
+  const shouldUseOriginalForPlacement = sourceVersion === 1 || sourceVersionComponent === selectedComp
+  const sourceBaseMode: 'original' | 'version' = shouldUseOriginalForPlacement ? 'original' : 'version'
+  const editingBackgroundUrl = shouldUseOriginalForPlacement ? (originalImageUrl ?? previewImageUrl) : (previewImageUrl ?? originalImageUrl)
   const defaultTransformFor = (component: ComponentKey) => repinTransformFromPin(component, sourceVersion, targetVersion, pins.find((p: ComponentPin) => p.componentKey === component))
 
   const transform = selectedComp ? repinTransforms[selectedComp] ?? defaultTransformFor(selectedComp) : null
@@ -191,10 +204,27 @@ export default function Step4Repin() {
     setInspectedVersion(version)
   }
 
+  const handleEditFromVersion = (version: PreviewVersion) => {
+    setSelectedSourceVersion(version.version)
+    setInspectedVersion(null)
+    setCanvasConfirmed(false)
+    toast(`Editing from Version ${version.version}`)
+  }
+
   const handleFeedbackChange = (option: RepinFeedbackOption) => {
-    setFeedbackOption(option)
+    const nextOptions = feedbackOptions.includes(option)
+      ? feedbackOptions.filter(item => item !== option)
+      : [...feedbackOptions, option]
+    if (!nextOptions.length) {
+      toast('Select at least one FireRed correction.', 'destructive')
+      return
+    }
+    setFeedbackOptions(nextOptions)
     if (!selectedComp || !transform) return
-    persistTransforms({ ...repinTransforms, [selectedComp]: { ...transform, feedbackOption: option } })
+    persistTransforms({
+      ...repinTransforms,
+      [selectedComp]: { ...transform, feedbackOption: nextOptions[0], feedbackOptions: nextOptions },
+    })
   }
 
   const handleGenerate = async () => {
@@ -205,6 +235,10 @@ export default function Step4Repin() {
     }
     if (generationLimitReached) {
       toast('Version limit reached. Choose the best saved version to continue to video.', 'destructive')
+      return
+    }
+    if (!feedbackOptions.length) {
+      toast('Select at least one FireRed correction.', 'destructive')
       return
     }
     const payload = {
@@ -219,7 +253,10 @@ export default function Step4Repin() {
       editableLayerUrl: transform.editableLayerUrl ?? null,
       repinBackgroundUrl: transform.repinBackgroundUrl ?? null,
       repinBackgroundDisplayUrl: transform.repinBackgroundDisplayUrl ?? null,
-      feedbackOption: feedbackOption ?? null,
+      feedbackOption: feedbackOptions[0] ?? null,
+      feedbackOptions,
+      sourceBaseMode,
+      sourceVersionComponent,
     }
     try {
       await submitRepinPreview(payload)
@@ -285,7 +322,7 @@ export default function Step4Repin() {
                 </button>
               ))}
             </div>
-            <span className="text-[11px] font-medium text-[#9CA3AF]">Version {sourceVersion} to {targetVersion}</span>
+            <span className="text-[11px] font-medium text-[#9CA3AF]">Editing Version {sourceVersion} to {targetVersion}</span>
           </div>
 
           {transform && selectedComp ? (
@@ -293,14 +330,17 @@ export default function Step4Repin() {
               <div className="relative flex min-h-[360px] items-center justify-center overflow-hidden rounded-lg border border-[#E4E4E4] bg-[#0A0A0A]">
                 <img src={inspectedVersion.url} alt={`Version ${inspectedVersion.version}`} className="max-h-[520px] w-full object-contain" />
                 <div className="absolute left-3 top-3 rounded-[4px] bg-black/70 px-2 py-1 text-[11px] font-semibold text-white">Version {inspectedVersion.version}</div>
-                <button onClick={() => setInspectedVersion(null)} className="absolute right-3 top-3 rounded-[4px] bg-white px-2 py-1 text-[11px] font-semibold text-[#111827] shadow-sm hover:text-[#1450F5]">Edit placement</button>
+                <div className="absolute right-3 top-3 flex gap-2">
+                  <button onClick={() => handleEditFromVersion(inspectedVersion)} className="rounded-[4px] bg-[#1450F5] px-2 py-1 text-[11px] font-semibold text-white shadow-sm hover:bg-[#0B3BBF]">Edit from this version</button>
+                  <button onClick={() => setInspectedVersion(null)} className="rounded-[4px] bg-white px-2 py-1 text-[11px] font-semibold text-[#111827] shadow-sm hover:text-[#1450F5]">Edit current</button>
+                </div>
               </div>
             ) : (
               <RepinTransformCanvas
                 imageUrl={editingBackgroundUrl}
                 transform={transform}
                 label={COMP_LABELS[selectedComp]}
-                componentImageUrl={transform.editableLayerUrl ?? null}
+                componentImageUrl={transform.editableLayerUrl ?? COMP_IMAGES[selectedComp] ?? null}
                 onChange={handleTransformChange}
               />
             )
@@ -323,7 +363,7 @@ export default function Step4Repin() {
           <div className="rounded-[6px] border border-[#E4E4E4] bg-[#FAFAFA] p-3">
             <p className="text-xs font-semibold text-[#111827]">{selectedComp ? COMP_LABELS[selectedComp] : 'Component'}</p>
             <p className="mt-1 text-[11px] leading-4 text-[#6B7280]">
-              Move, resize, rotate, or skew the overlay directly on the preview.
+              Move, resize, rotate, or skew the overlay on the active editing image.
             </p>
           </div>
 
@@ -351,12 +391,12 @@ export default function Step4Repin() {
             </details>
           )}
 
-          {latestVersion > 1 && !generationLimitReached && (
+          {versions.length > 1 && !generationLimitReached && (
             <fieldset className="mt-4 space-y-2 rounded-[6px] border border-[#E4E4E4] p-3">
               <legend className="text-[11px] font-semibold text-[#525252]">Feedback</legend>
               {FEEDBACK_OPTIONS.map(option => (
                 <label key={option.value} className="flex items-center gap-2 text-xs text-[#525252]">
-                  <input type="radio" name="repin-feedback" checked={feedbackOption === option.value} onChange={() => handleFeedbackChange(option.value)} />
+                  <input type="checkbox" checked={feedbackOptions.includes(option.value)} onChange={() => handleFeedbackChange(option.value)} />
                   {option.label}
                 </label>
               ))}
@@ -380,31 +420,50 @@ export default function Step4Repin() {
             </button>
           </div>
 
-          {generationLimitReached && <p className="mt-3 text-xs font-medium text-[#B45309]">Version 5 reached. Choose a saved version to continue to video.</p>}
+          {generationLimitReached && <p className="mt-3 text-xs font-medium text-[#B45309]">Version 5 is the last editable base. Choose an earlier version to generate another preview.</p>}
 
           <div className="mt-5 space-y-2 border-t border-[#E4E4E4] pt-4">
-            <p className="label-caps">Saved Versions</p>
+            <div className="flex items-center justify-between">
+              <p className="label-caps">Version Queue</p>
+              <span className="text-[10px] font-medium text-[#9CA3AF]">{'1 -> 2 -> 3'}</span>
+            </div>
             {versions.map(version => (
-              <div key={version.version} className="flex w-full items-center gap-3 rounded-[5px] border border-[#E4E4E4] p-2 text-xs text-[#525252]">
-                <button
-                  onClick={() => handleInspectVersion(version)}
-                  className={cn(
-                    'relative h-12 w-16 shrink-0 overflow-hidden rounded-[4px] border bg-[#0A0A0A] transition-colors duration-[120ms]',
-                    inspectedVersion?.version === version.version ? 'border-[#1450F5]' : 'border-[#E4E4E4] hover:border-[#1450F5]'
-                  )}
-                  aria-label={`Preview Version ${version.version}`}
-                  title={`Preview Version ${version.version}`}
-                >
-                  <img src={version.url} alt="" className="h-full w-full object-cover" />
-                  <span className="absolute inset-0 flex items-center justify-center bg-black/0 text-white opacity-0 transition-opacity duration-[120ms] hover:bg-black/35 hover:opacity-100">
-                    <Eye style={{ width: 14, height: 14 }} />
-                  </span>
-                </button>
-                <button onClick={() => handleInspectVersion(version)} className="min-w-0 flex-1 text-left hover:text-[#1450F5]">
-                  <span className="block font-semibold text-[#111827]">Version {version.version}</span>
-                  <span className="mt-0.5 block truncate text-[11px] text-[#9CA3AF]">{version.sourceVersion ? `From Version ${version.sourceVersion}` : 'Original preview'}</span>
-                </button>
-                <button onClick={() => handleUseVersion(version)} className="shrink-0 font-medium text-[#525252] hover:text-[#1450F5]">Use for video</button>
+              <div
+                key={version.version}
+                className={cn(
+                  'rounded-[6px] border bg-white p-2.5 text-xs transition-colors duration-[120ms]',
+                  version.version === sourceVersion ? 'border-[#BFDBFE] bg-[#F8FBFF]' : 'border-[#E4E4E4]'
+                )}
+              >
+                <div className="flex items-start gap-3">
+                  <button
+                    onClick={() => handleInspectVersion(version)}
+                    className={cn(
+                      'relative h-14 w-[72px] shrink-0 overflow-hidden rounded-[4px] border bg-[#0A0A0A] transition-colors duration-[120ms]',
+                      inspectedVersion?.version === version.version ? 'border-[#1450F5]' : 'border-[#E4E4E4] hover:border-[#1450F5]'
+                    )}
+                    aria-label={`Preview Version ${version.version}`}
+                    title={`Preview Version ${version.version}`}
+                  >
+                    <img src={version.url} alt="" className="h-full w-full object-cover" />
+                    <span className="absolute inset-0 flex items-center justify-center bg-black/0 text-white opacity-0 transition-opacity duration-[120ms] hover:bg-black/35 hover:opacity-100">
+                      <Eye style={{ width: 14, height: 14 }} />
+                    </span>
+                  </button>
+
+                  <button onClick={() => handleInspectVersion(version)} className="min-w-0 flex-1 text-left hover:text-[#1450F5]">
+                    <span className="flex flex-wrap items-center gap-1.5 font-semibold text-[#111827]">
+                      Version {version.version}
+                      {version.version === sourceVersion && <span className="rounded-full bg-[#DBEAFE] px-1.5 py-0.5 text-[9px] font-semibold text-[#1450F5]">Base</span>}
+                    </span>
+                    <span className="mt-1 block truncate text-[11px] text-[#9CA3AF]">{version.sourceVersion ? `Generated from Version ${version.sourceVersion}` : 'Preview step output'}</span>
+                  </button>
+                </div>
+
+                <div className="mt-2 flex items-center justify-end gap-2 border-t border-[#EEF2F7] pt-2">
+                  <button onClick={() => handleEditFromVersion(version)} className="rounded-[4px] px-2 py-1 text-[11px] font-semibold text-[#1450F5] hover:bg-[#EFF6FF]">Edit from</button>
+                  <button onClick={() => handleUseVersion(version)} className="rounded-[4px] px-2 py-1 text-[11px] font-semibold text-[#525252] hover:bg-[#F5F5F5] hover:text-[#1450F5]">Use for video</button>
+                </div>
               </div>
             ))}
           </div>

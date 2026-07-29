@@ -22,8 +22,11 @@ const repinTransform = Joi.object().keys({
   editableLayerPath: Joi.string().allow(null, ''),
   repinBackgroundPath: Joi.string().allow(null, ''),
   feedbackOption: Joi.string()
-    .valid('wrong_placement', 'wrong_component', 'bad_perspective', 'bad_lighting_shadow', 'poor_blending_unrealistic')
+    .valid('edge_alignment', 'perspective_depth', 'lighting_shadow', 'material_reflections', 'seamless_blending')
     .allow(null),
+  feedbackOptions: Joi.array().items(Joi.string().valid('edge_alignment', 'perspective_depth', 'lighting_shadow', 'material_reflections', 'seamless_blending')).min(1).default(['seamless_blending']),
+  sourceBaseMode: Joi.string().valid('original', 'version').default('version'),
+  sourceVersionComponent: Joi.string().valid('ceiling', 'lci', 'door', 'cop').allow(null, ''),
 });
 
 const previewVersion = Joi.object().keys({
@@ -33,8 +36,11 @@ const previewVersion = Joi.object().keys({
   sourceVersion: Joi.number().integer().min(1).max(5).allow(null),
   transform: repinTransform.allow(null),
   feedbackOption: Joi.string()
-    .valid('wrong_placement', 'wrong_component', 'bad_perspective', 'bad_lighting_shadow', 'poor_blending_unrealistic')
+    .valid('edge_alignment', 'perspective_depth', 'lighting_shadow', 'material_reflections', 'seamless_blending')
     .allow(null),
+  feedbackOptions: Joi.array().items(Joi.string().valid('edge_alignment', 'perspective_depth', 'lighting_shadow', 'material_reflections', 'seamless_blending')).min(1).default(['seamless_blending']),
+  sourceBaseMode: Joi.string().valid('original', 'version').default('version'),
+  sourceVersionComponent: Joi.string().valid('ceiling', 'lci', 'door', 'cop').allow(null, ''),
 });
 
 const offeringId = {

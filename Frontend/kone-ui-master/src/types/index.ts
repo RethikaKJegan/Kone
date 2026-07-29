@@ -45,11 +45,11 @@ export interface ComponentPin {
 }
 
 export type RepinFeedbackOption =
-  | 'wrong_placement'
-  | 'wrong_component'
-  | 'bad_perspective'
-  | 'bad_lighting_shadow'
-  | 'poor_blending_unrealistic'
+  | 'edge_alignment'
+  | 'perspective_depth'
+  | 'lighting_shadow'
+  | 'material_reflections'
+  | 'seamless_blending'
 
 export interface RepinTransform {
   componentKey: ComponentKey
@@ -72,6 +72,9 @@ export interface RepinTransform {
   editableLayerPath?: string | null
   repinBackgroundPath?: string | null
   feedbackOption?: RepinFeedbackOption | null
+  feedbackOptions?: RepinFeedbackOption[]
+  sourceBaseMode?: 'original' | 'version'
+  sourceVersionComponent?: ComponentKey | null
 }
 
 export interface PreviewVersion {
@@ -81,6 +84,9 @@ export interface PreviewVersion {
   sourceVersion?: number
   transform?: RepinTransform
   feedbackOption?: RepinFeedbackOption | null
+  feedbackOptions?: RepinFeedbackOption[]
+  sourceBaseMode?: 'original' | 'version'
+  sourceVersionComponent?: ComponentKey | null
 }
 
 export type OfferingStatus = 'draft' | 'active' | 'complete'

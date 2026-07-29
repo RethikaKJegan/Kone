@@ -118,9 +118,12 @@ def _component_image_for_transform(transform: dict[str, Any], component_assets: 
     if editable_layer and Path(str(editable_layer)).exists():
         return Path(str(editable_layer))
     component_key = str(transform.get("componentKey") or transform.get("componentType") or "component").lower()
+    asset_path = selected_component_asset_paths(component_assets).get(component_key)
+    if asset_path and Path(asset_path).exists():
+        return Path(asset_path)
     raise ValueError(
-        f"Repin requires the saved editable preview layer for {component_key}. "
-        "Regenerate the automatic preview once so the selected component layer can be repinned directly."
+        f"Repin requires an editable layer or component asset for {component_key}. "
+        "Regenerate the automatic preview once so the selected component can be repinned directly."
     )
 
 
@@ -242,16 +245,27 @@ def _component_mask_for_transform(component_image: Image.Image, transform: dict[
 
 
 def _firered_prompt(transform: dict[str, Any]) -> str:
-    feedback_key = str(transform.get("feedbackOption") or "").strip()
+    raw_feedback = transform.get("feedbackOptions")
+    if isinstance(raw_feedback, list):
+        feedback_keys = [str(item).strip() for item in raw_feedback if str(item).strip()]
+    else:
+        feedback_key = str(transform.get("feedbackOption") or "").strip()
+        feedback_keys = [feedback_key] if feedback_key else []
     component = str(transform.get("componentKey") or transform.get("componentType") or "component")
     feedback_instructions = {
+        "edge_alignment": "Sharpen only the local edge alignment: make the component boundary sit flush to the wall with clean seams, no halos, no ghost outline, and no duplicate border.",
+        "perspective_depth": "Improve local perspective depth: align bevels, face plane, thickness cues, and contact geometry to the camera angle while preserving the exact selected silhouette.",
+        "lighting_shadow": "Match lighting and shadows: use the scene light direction, soft contact shadows, ambient occlusion, wall bounce light, and matching color temperature.",
+        "material_reflections": "Improve material and reflections: make metal, plastic, glass, and button surfaces match surrounding reflectivity, roughness, exposure, and black levels.",
+        "seamless_blending": "Blend naturally into the scene: remove pasted/sticker appearance, match camera grain, mild blur, compression, contrast, and surrounding texture continuity.",
         "wrong_placement": "The user has manually corrected placement; preserve that exact placement and make the mounted result believable at this location.",
         "wrong_component": "Preserve the exact visible component layer and product design from the repin canvas; do not replace it with a different panel, buttons, display, or interior material.",
         "bad_perspective": "Improve only perspective realism around the selected geometry: edge alignment, bevel thickness, wall contact, and local camera perspective cues.",
         "bad_lighting_shadow": "Focus refinement on realistic local lighting, soft contact shadows, ambient occlusion, wall bounce light, reflections, and matching color temperature.",
         "poor_blending_unrealistic": "Focus refinement on edge blending, material integration, camera grain, reflection consistency, and removing any sticker-like appearance.",
     }
-    feedback_sentence = f" User feedback instruction: {feedback_instructions.get(feedback_key, feedback_key)}" if feedback_key else ""
+    selected_instructions = [feedback_instructions.get(key, key) for key in feedback_keys]
+    feedback_sentence = " User selected FireRed corrections: " + " ".join(selected_instructions) if selected_instructions else ""
     return (
         f"Photorealistically integrate the already placed KONE {component} into this real elevator photograph. "
         "The geometry is user-approved: keep the exact x/y position, width, height, aspect ratio, rotation, skew, perspective corner alignment, buttons, display, arrows, numbers, labels, and product design. "
@@ -826,7 +840,13 @@ def run_components(payload: ProjectPayload):
         )
         final_output = pipeline_dir / "final_output.png"
         shutil.copy2(final_output if final_output.exists() else input_image, preview_dir / "final_output.png")
-        write_status(payload.storage_dir, public_status("preview_ready"))
+        status = public_status("preview_ready")
+        status.update({
+            "preview_url": "preview/final_output.png",
+            "preview_versions": [{"version": 1, "url": "preview/final_output.png"}],
+            "repin_pass": 1,
+        })
+        write_status(payload.storage_dir, status)
         return {"ok": True, "status": "preview_ready"}
     except Exception as exc:
         write_status(payload.storage_dir, public_status("failed", str(exc)))
@@ -865,17 +885,25 @@ def repin_components(payload: ProjectPayload):
         if target_version > 5:
             raise ValueError("Version limit reached. Choose the best saved version to continue.")
 
-        background_path = target_transform.get("repinBackgroundPath")
-        if not background_path:
-            raise ValueError(
-                "Repin requires the clean LaMa background. "
-                "repinBackgroundPath was not provided."
-            )
-
-        source_image_path = Path(str(background_path))
-        if not source_image_path.exists():
+        source_base_mode = str(target_transform.get("sourceBaseMode") or "version").lower()
+        if source_base_mode == "original":
+            source_candidates = [
+                storage / "uploads" / "input.jpg",
+                storage / "uploads" / f"repin_source_v{source_version}.png",
+                preview_dir / f"final_output_v{source_version}.png",
+                preview_dir / "final_output.png",
+            ]
+        else:
+            source_candidates = [
+                storage / "uploads" / f"repin_source_v{source_version}.png",
+                preview_dir / f"final_output_v{source_version}.png",
+                preview_dir / "final_output.png",
+                storage / "uploads" / "input.jpg",
+            ]
+        source_image_path = next((candidate for candidate in source_candidates if candidate.exists()), None)
+        if source_image_path is None:
             raise FileNotFoundError(
-                f"Clean Repin background was not found: {source_image_path}"
+                f"Repin source Version {source_version} was not found"
             )
 
         transforms = [target_transform]
@@ -911,6 +939,7 @@ def repin_components(payload: ProjectPayload):
                 "source_version": source_version,
                 "target_version": target_version,
                 "feedback_option": transform.get("feedbackOption"),
+                "feedback_options": transform.get("feedbackOptions") or ([transform.get("feedbackOption")] if transform.get("feedbackOption") else []),
                 "transform": transform,
                 "final_insertion_bbox": list(bbox),
                 "final_component_placement": {"bbox": list(bbox), "reason": "manual_repin_transform"},
@@ -944,6 +973,7 @@ def repin_components(payload: ProjectPayload):
             "transforms": transforms,
             "placements": placements,
             "firered_realism_refine": used_firered,
+            "source_base_mode": source_base_mode,
             "lama_used": False,
         }, indent=2), encoding="utf-8")
 
@@ -952,7 +982,15 @@ def repin_components(payload: ProjectPayload):
             "preview_url": f"preview/final_output_v{target_version}.png",
             "current_preview_url": "preview/final_output.png",
             "repin_pass": target_version,
-            "preview_versions": [{"version": target_version, "url": f"preview/final_output_v{target_version}.png"}],
+            "preview_versions": [{
+                "version": target_version,
+                "url": f"preview/final_output_v{target_version}.png",
+                "sourceVersion": source_version,
+                "transform": target_transform,
+                "feedbackOption": target_transform.get("feedbackOption"),
+                "feedbackOptions": target_transform.get("feedbackOptions") or ([target_transform.get("feedbackOption")] if target_transform.get("feedbackOption") else []),
+                "sourceBaseMode": source_base_mode,
+            }],
         })
         write_status(payload.storage_dir, status)
         return {"ok": True, "status": "preview_ready", "preview_url": status["preview_url"], "repin_pass": target_version}
