@@ -1,5 +1,15 @@
 const Joi = require('joi');
 
+const repinPoint = Joi.object().keys({
+  x: Joi.number().required(),
+  y: Joi.number().required(),
+});
+
+const eraserHistoryEntry = Joi.object().keys({
+  repinBackgroundUrl: Joi.string().allow(null, ''),
+  repinBackgroundDisplayUrl: Joi.string().allow(null, ''),
+});
+
 const imageIdBody = {
   body: Joi.object().keys({
     imageId: Joi.string().required(),
@@ -27,12 +37,15 @@ const repinTransform = Joi.object().keys({
   rotation: Joi.number().default(0),
   skewX: Joi.number().required(),
   skewY: Joi.number().required(),
+  points: Joi.array().ordered(repinPoint, repinPoint, repinPoint, repinPoint),
   coordinateSpace: Joi.string().valid('pixels').default('pixels'),
   imageWidth: Joi.number().positive(),
   imageHeight: Joi.number().positive(),
   editableLayerUrl: Joi.string().allow(null, ''),
   repinBackgroundUrl: Joi.string().allow(null, ''),
   repinBackgroundDisplayUrl: Joi.string().allow(null, ''),
+  eraserHistory: Joi.array().items(eraserHistoryEntry).default([]),
+  eraserRedoStack: Joi.array().items(eraserHistoryEntry).default([]),
   editableLayerPath: Joi.string().allow(null, ''),
   repinBackgroundPath: Joi.string().allow(null, ''),
   feedbackOption: Joi.string().valid('edge_alignment', 'perspective_depth', 'lighting_shadow', 'material_reflections', 'seamless_blending').allow(null),
@@ -49,6 +62,18 @@ const selectComponents = {
     environments: Joi.array().items(Joi.string().valid('car', 'lobby')).default([]),
     component_assets: Joi.object().pattern(Joi.string(), Joi.string()).default({}),
     preview_request_key: Joi.string().allow(null, ''),
+  }),
+};
+
+
+const repinEraser = {
+  body: Joi.object().keys({
+    imageId: Joi.string().required(),
+    offeringId: Joi.string().required(),
+    sourceVersion: Joi.number().integer().min(1).max(5).required(),
+    sourceBaseMode: Joi.string().valid('original', 'version').default('version'),
+    maskDataUrl: Joi.string().required(),
+    transform: repinTransform.required(),
   }),
 };
 
@@ -70,4 +95,5 @@ module.exports = {
   selectEnvironment,
   selectComponents,
   repinPreview,
+  repinEraser,
 };

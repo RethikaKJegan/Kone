@@ -425,6 +425,38 @@ const runComponents = catchAsync(async (req, res) => {
 });
 
 
+
+const runRepinEraser = catchAsync(async (req, res) => {
+  const {
+    session_id: sessionId,
+    project_id: projectId,
+    project_name: projectName,
+    source_version: sourceVersion,
+    source_base_mode: sourceBaseMode = 'version',
+    mask_data_url: maskDataUrl,
+    transform,
+  } = req.body;
+  const root = projectDir(sessionId, projectId);
+  await ensureProjectDirs(root);
+  const { data } = await axios.post(`${LOGIC_URL}/repin-erase`, {
+    session_id: sessionId,
+    project_id: projectId,
+    project_name: projectName,
+    storage_dir: root,
+    source_version: sourceVersion,
+    source_base_mode: sourceBaseMode,
+    mask_data_url: maskDataUrl,
+    transform: withLocalRepinFiles(transform),
+  }, { timeout: 0 });
+  if (!data?.ok) throw new Error(data?.error || 'Magic Eraser failed');
+  res.send({
+    ok: true,
+    repinBackgroundUrl: publicStorageUrl(sessionId, projectId, data.repin_background_url || data.preview_url),
+    repinBackgroundDisplayUrl: publicStorageUrl(sessionId, projectId, data.preview_url || data.repin_background_url),
+    maskUrl: publicStorageUrl(sessionId, projectId, data.mask_url),
+  });
+});
+
 const runRepin = catchAsync(async (req, res) => {
   const {
     session_id: sessionId,
@@ -592,4 +624,4 @@ const download = catchAsync(async (req, res) => {
   archive.finalize();
 });
 
-module.exports = { createSession, uploadImage, precheck, runComponents, runRepin, status, generateVideo, finalize, download };
+module.exports = { createSession, uploadImage, precheck, runComponents, runRepin, runRepinEraser, status, generateVideo, finalize, download };

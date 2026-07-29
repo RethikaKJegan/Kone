@@ -5,6 +5,8 @@ import { KONE_COMPONENTS } from '../lib/constants'
 import { useProjectStore } from './projectStore'
 import type { Offering, OfferingStep, Environment, ComponentKey, ComponentPin, RepinTransform } from '../types'
 
+type ComponentAssetMap = Partial<Record<ComponentKey, string>>
+
 function getGuestData<T>(key: string): T | null {
   try {
     const raw = localStorage.getItem(key) ?? sessionStorage.getItem(key)
@@ -43,6 +45,7 @@ function makeGuestOffering(projectId: string): Offering {
     uploadedFileType: null,
     environments: [],
     selectedComponents: [],
+    selectedComponentAssets: {},
     componentPins: [],
     annotationsEnabled: true,
     activeAnnotationFilters: [],
@@ -71,11 +74,12 @@ interface OfferingState {
   updateOfferingName: (projectId: string, offeringId: string, name: string) => Promise<Offering>
   deleteOffering: (projectId: string, offeringId: string) => Promise<void>
   setUpload: (file: File) => Promise<void>
-  setComponents: (environments: Environment[], components: ComponentKey[]) => Promise<void>
+  setComponents: (environments: Environment[], components: ComponentKey[], componentAssets?: ComponentAssetMap) => Promise<void>
   setPins: (pins: ComponentPin[]) => void
   setRepinTransforms: (transforms: Partial<Record<ComponentKey, RepinTransform>>) => void
   runAIPlacement: () => Promise<ComponentPin[]>
   submitRepinPreview: (transform: RepinTransform) => Promise<void>
+  eraseRepinBackground: (transform: RepinTransform, maskDataUrl: string, sourceVersion: number, sourceBaseMode: 'original' | 'version') => Promise<RepinTransform>
   setAnnotationState: (enabled: boolean, filters: ComponentKey[]) => void
   setVideoSettings: (
     settings: Partial<Pick<Offering, 'videoMotionStyle' | 'videoSpeed' | 'videoQuality'>>
@@ -89,6 +93,24 @@ interface OfferingState {
 
 function patchOffering(offering: Offering, updates: Partial<Offering>): Offering {
   return { ...offering, ...updates }
+}
+
+
+function eraserEntryFromTransform(transform: RepinTransform) {
+  return {
+    repinBackgroundUrl: transform.repinBackgroundUrl ?? null,
+    repinBackgroundDisplayUrl: transform.repinBackgroundDisplayUrl ?? transform.repinBackgroundUrl ?? null,
+  }
+}
+
+function transformWithEraserEntry(transform: RepinTransform, entry: ReturnType<typeof eraserEntryFromTransform>, eraserHistory: ReturnType<typeof eraserEntryFromTransform>[], eraserRedoStack: ReturnType<typeof eraserEntryFromTransform>[] = []): RepinTransform {
+  return {
+    ...transform,
+    repinBackgroundUrl: entry.repinBackgroundUrl,
+    repinBackgroundDisplayUrl: entry.repinBackgroundDisplayUrl,
+    eraserHistory,
+    eraserRedoStack,
+  }
 }
 
 function normalizeOffering(offering: Offering): Offering {
@@ -107,6 +129,7 @@ function normalizeOffering(offering: Offering): Offering {
     previewVersions: offering.previewVersions ?? (outputImageUrl ? [{ version: 1, url: outputImageUrl }] : []),
     repinPass: offering.repinPass ?? (offering.previewVersions?.length || (outputImageUrl ? 1 : 0)),
     repinTransforms: offering.repinTransforms ?? {},
+    selectedComponentAssets: offering.selectedComponentAssets ?? {},
   }
 }
 
@@ -118,11 +141,29 @@ function saveGuestOfferings(state: { offerings: Record<string, Offering[]>; curr
   }
 }
 
-function componentSignature(environments: Environment[], components: ComponentKey[]) {
+function componentSignature(environments: Environment[], components: ComponentKey[], componentAssets: ComponentAssetMap = {}) {
   return JSON.stringify({
     environments: [...environments].sort(),
     components: [...components].sort(),
+    componentAssets: Object.fromEntries(
+      Object.entries(componentAssets)
+        .filter(([, value]) => Boolean(value))
+        .sort(([a], [b]) => a.localeCompare(b))
+    ),
   })
+}
+
+function defaultComponentAsset(componentKey: ComponentKey) {
+  const component = KONE_COMPONENTS.find(item => item.key === componentKey)
+  return component?.variants?.[0]?.imageUrl ?? component?.imageUrl ?? null
+}
+
+function componentAssetMap(components: ComponentKey[], selectedAssets: ComponentAssetMap = {}) {
+  return Object.fromEntries(
+    components
+      .map(componentKey => [componentKey, selectedAssets[componentKey] ?? defaultComponentAsset(componentKey)] as const)
+      .filter(([, value]) => Boolean(value))
+  ) as ComponentAssetMap
 }
 
 function isHttpStatus(error: unknown, status: number) {
@@ -352,15 +393,17 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
     set(state => writeOfferingState(state, updated))
   },
 
-  setComponents: async (environments, components) => {
+  setComponents: async (environments, components, selectedAssets = {}) => {
     const { currentOffering } = get()
     if (!currentOffering) return
     const selectedComponents = components
-    const previewRequestKey = componentSignature(environments, selectedComponents)
+    const selectedComponentAssets = componentAssetMap(selectedComponents, selectedAssets)
+    const previewRequestKey = componentSignature(environments, selectedComponents, selectedComponentAssets)
     const updates: Partial<Offering> = {
       status: 'active',
       environments,
       selectedComponents,
+      selectedComponentAssets,
       componentPins: [],
       activeAnnotationFilters: selectedComponents,
       renderComplete: false,
@@ -380,9 +423,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
     if (isGuestSession() && selectedComponents.length > 0) {
       const sessionId = await getGuestSessionId()
       const componentAssets = Object.fromEntries(
-        KONE_COMPONENTS
-          .filter(component => selectedComponents.includes(component.key))
-          .map(component => [component.key, component.imageUrl])
+        Object.entries(selectedComponentAssets)
       )
       await apiClient.post('/guest/components', {
         is_guest: true,
@@ -398,6 +439,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       await apiClient.patch(`/offerings/${currentOffering.id}`, {
         environments,
         selectedComponents,
+        selectedComponentAssets,
         componentPins: [],
         activeAnnotationFilters: selectedComponents,
         renderComplete: false,
@@ -420,9 +462,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
           environment: environments[0] ?? '',
         })
         const componentAssets = Object.fromEntries(
-          KONE_COMPONENTS
-            .filter(component => selectedComponents.includes(component.key))
-            .map(component => [component.key, component.imageUrl])
+          Object.entries(selectedComponentAssets)
         )
         await apiClient.post('/video/select-components', {
           imageId,
@@ -502,6 +542,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
         ...(currentOffering.selectedComponents.length ? currentOffering.selectedComponents : []),
         transform.componentKey,
       ]))
+      const selectedComponentAssets = componentAssetMap(selectedComponents, currentOffering.selectedComponentAssets)
       const confirmedRepinTransforms = {
         ...(currentOffering.repinTransforms ?? {}),
         [transform.componentKey]: transform,
@@ -519,9 +560,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       if (isGuestSession()) {
         const sessionId = await getGuestSessionId()
         const componentAssets = Object.fromEntries(
-          KONE_COMPONENTS
-            .filter(component => selectedComponents.includes(component.key))
-            .map(component => [component.key, component.imageUrl])
+          Object.entries(selectedComponentAssets)
         )
         await apiClient.post('/guest/repin', {
           is_guest: true,
@@ -539,9 +578,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
         const imageId = imageIdFromOffering(currentOffering)
         if (!imageId) throw new Error('Uploaded image is not ready for repin')
         const componentAssets = Object.fromEntries(
-          KONE_COMPONENTS
-            .filter(component => selectedComponents.includes(component.key))
-            .map(component => [component.key, component.imageUrl])
+          Object.entries(selectedComponentAssets)
         )
         await apiClient.post('/video/repin', {
           imageId,
@@ -561,6 +598,71 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
         : null
       const message = response?.data?.message || response?.data?.error
       throw new Error(message || (error instanceof Error ? error.message : 'Could not start repin preview'))
+    }
+  },
+
+
+  eraseRepinBackground: async (transform, maskDataUrl, sourceVersion, sourceBaseMode) => {
+    const { currentOffering } = get()
+    if (!currentOffering) throw new Error('Offering is not ready')
+    set({ isProcessing: true })
+    try {
+      let result: { repinBackgroundUrl: string; repinBackgroundDisplayUrl: string }
+      if (isGuestSession()) {
+        const sessionId = await getGuestSessionId()
+        const { data } = await apiClient.post('/guest/repin/erase', {
+          is_guest: true,
+          session_id: sessionId,
+          project_id: currentOffering.projectId,
+          project_name: currentOffering.name,
+          source_version: sourceVersion,
+          source_base_mode: sourceBaseMode,
+          mask_data_url: maskDataUrl,
+          transform,
+        }, { timeout: 0 })
+        result = {
+          repinBackgroundUrl: data.repinBackgroundUrl,
+          repinBackgroundDisplayUrl: data.repinBackgroundDisplayUrl ?? data.repinBackgroundUrl,
+        }
+      } else {
+        const imageId = imageIdFromOffering(currentOffering)
+        if (!imageId) throw new Error('Uploaded image is not ready for Magic Eraser')
+        const { data } = await apiClient.post('/video/repin/erase', {
+          imageId,
+          offeringId: currentOffering.id,
+          sourceVersion,
+          sourceBaseMode,
+          maskDataUrl,
+          transform,
+        }, { timeout: 0 })
+        result = {
+          repinBackgroundUrl: data.repinBackgroundUrl,
+          repinBackgroundDisplayUrl: data.repinBackgroundDisplayUrl ?? data.repinBackgroundUrl,
+        }
+      }
+      const nextEntry = {
+        repinBackgroundUrl: result.repinBackgroundUrl,
+        repinBackgroundDisplayUrl: result.repinBackgroundDisplayUrl,
+      }
+      const eraserHistory = transform.eraserHistory?.length ? transform.eraserHistory : [eraserEntryFromTransform(transform)]
+      const nextTransform = transformWithEraserEntry(transform, nextEntry, [...eraserHistory, nextEntry], [])
+      const repinTransforms = {
+        ...(currentOffering.repinTransforms ?? {}),
+        [transform.componentKey]: nextTransform,
+      }
+      const updated = patchOffering(currentOffering, { repinTransforms })
+      set(state => ({ ...writeOfferingState(state, updated), isProcessing: false }))
+      if (!isGuestSession()) {
+        apiClient.patch(`/offerings/${currentOffering.id}`, { repinTransforms }).catch(() => {})
+      }
+      return nextTransform
+    } catch (error) {
+      set({ isProcessing: false })
+      const response = error && typeof error === 'object' && 'response' in error
+        ? (error as { response?: { data?: { message?: string; error?: string } } }).response
+        : null
+      const message = response?.data?.message || response?.data?.error
+      throw new Error(message || (error instanceof Error ? error.message : 'Magic Eraser failed'))
     }
   },
 

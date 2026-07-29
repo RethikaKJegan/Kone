@@ -10,6 +10,7 @@ router.post('/upload', upload.single('image'), guestController.uploadImage);
 router.post('/precheck', guestController.precheck);
 router.post('/components', guestController.runComponents);
 router.post('/repin', guestController.runRepin);
+router.post('/repin/erase', guestController.runRepinEraser);
 router.get('/status', guestController.status);
 router.post('/video', guestController.generateVideo);
 router.post('/finalize', guestController.finalize);

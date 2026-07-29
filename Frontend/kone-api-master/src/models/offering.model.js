@@ -95,6 +95,10 @@ const offeringSchema = mongoose.Schema(
       type: [String],
       default: [],
     },
+    selectedComponentAssets: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
+    },
     componentPins: {
       type: [componentPinSchema],
       default: [],

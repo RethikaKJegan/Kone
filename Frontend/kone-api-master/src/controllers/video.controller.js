@@ -1047,6 +1047,7 @@ const selectComponents = async (req, res) => {
     await Offering.findByIdAndUpdate(offeringId, {
       environments: effectiveEnvironments,
       selectedComponents: components,
+      selectedComponentAssets: componentAssets,
       componentPins: [],
       activeAnnotationFilters: components,
       outputImageUrl: null,
@@ -1121,6 +1122,7 @@ const repinPreview = async (req, res) => {
 
     await Offering.findByIdAndUpdate(offeringId, {
       selectedComponents: components.length ? components : offering.selectedComponents,
+      selectedComponentAssets: Object.keys(componentAssets || {}).length ? componentAssets : offering.selectedComponentAssets,
       environments: environments.length ? environments : offering.environments,
       outputVideoUrl: null,
       outputVideoPath: null,
@@ -1144,6 +1146,62 @@ const repinPreview = async (req, res) => {
     });
 
     return res.status(200).json({ success: true, status: 'processing', preview_request_key: previewRequestKey });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+
+const repinEraser = async (req, res) => {
+  try {
+    const {
+      imageId,
+      offeringId,
+      sourceVersion,
+      sourceBaseMode = 'version',
+      maskDataUrl,
+      transform,
+    } = req.body;
+
+    const job = await getOrRecoverJob(imageId, req.user.id);
+    if (!job) return res.status(404).json({ success: false, message: 'Invalid imageId' });
+    if (job.userId !== req.user.id) return res.status(403).json({ success: false, message: 'Forbidden' });
+    const offering = await getOwnedOffering(offeringId, req.user.id);
+    if (!offering) return res.status(404).json({ success: false, message: 'Invalid offeringId' });
+
+    const storageDir = getLogicStorageDir(req.user.id, imageId);
+    const uploadsDir = path.join(storageDir, 'uploads');
+    const previewDir = path.join(storageDir, 'preview');
+    const outputDir = getOutputDir(imageId);
+    await Promise.all([uploadsDir, previewDir, outputDir].map((dir) => fsPromises.mkdir(dir, { recursive: true })));
+
+    const fallbackInput = getUploadInputPath(imageId);
+    const sourcePath = sourceBaseMode === 'original'
+      ? fallbackInput
+      : (Number(sourceVersion) > 1
+          ? path.join(outputDir, `final_output_v${sourceVersion}.png`)
+          : path.join(outputDir, 'final_output.png'));
+    const sourceImage = (await fileExists(sourcePath)) ? sourcePath : ((await fileExists(path.join(outputDir, 'final_output.png'))) ? path.join(outputDir, 'final_output.png') : fallbackInput);
+    await fsPromises.copyFile(sourceImage, path.join(uploadsDir, `repin_source_v${sourceVersion}.png`));
+
+    const { data } = await axios.post(`${LOGIC_URL}/repin-erase`, {
+      session_id: `auth_${req.user.id}`,
+      project_id: imageId,
+      project_name: imageId,
+      storage_dir: storageDir,
+      source_version: sourceVersion,
+      source_base_mode: sourceBaseMode,
+      mask_data_url: maskDataUrl,
+      transform: withLocalRepinFiles(transform),
+    }, { timeout: 0 });
+
+    if (!data?.ok) throw new Error(data?.error || 'Magic Eraser failed');
+    return res.status(200).json({
+      success: true,
+      repinBackgroundUrl: storagePublicUrl(path.join(storageDir, data.repin_background_url || data.preview_url)),
+      repinBackgroundDisplayUrl: storagePublicUrl(path.join(storageDir, data.preview_url || data.repin_background_url)),
+      maskUrl: storagePublicUrl(path.join(storageDir, data.mask_url || '')),
+    });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
   }
@@ -1258,5 +1316,6 @@ module.exports = {
   selectEnvironment,
   selectComponents,
   repinPreview,
+  repinEraser,
   generateVideo,
 };

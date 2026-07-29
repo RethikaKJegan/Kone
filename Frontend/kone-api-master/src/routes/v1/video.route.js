@@ -45,6 +45,7 @@ router.post(
 );
 
 router.post('/repin', auth(), limiter, validate(videoValidation.repinPreview), videoController.repinPreview);
+router.post('/repin/erase', auth(), limiter, validate(videoValidation.repinEraser), videoController.repinEraser);
 
 // STEP 4
 router.post('/generate', auth(), limiter, validate(videoValidation.imageIdBody), videoController.generateVideo);

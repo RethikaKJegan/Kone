@@ -5,12 +5,14 @@ import { useOfferingStore } from '../../../store/offeringStore'
 import { KONE_COMPONENTS, ENVIRONMENTS } from '../../../lib/constants'
 import { cn } from '../../../lib/utils'
 import { toast } from '../../../hooks/useToast'
-import type { Environment, ComponentKey } from '../../../types'
+import type { Environment, ComponentKey, ComponentVariant } from '../../../types'
 
 const ENV_COMPONENTS: Record<Environment, ComponentKey[]> = {
   car: ['cop'],
   lobby: ['lci', 'door', 'ceiling'],
 }
+
+type ComponentAssetMap = Partial<Record<ComponentKey, string>>
 
 function getAvailableComponents(envs: Environment[]): ComponentKey[] {
   if (envs.length === 0) return []
@@ -27,18 +29,53 @@ function withoutDoorCeilingConflict(components: ComponentKey[]): ComponentKey[] 
     : components
 }
 
+function componentByKey(key: ComponentKey) {
+  return KONE_COMPONENTS.find(component => component.key === key)
+}
+
+function variantsFor(key: ComponentKey): ComponentVariant[] {
+  const component = componentByKey(key)
+  if (component?.variants?.length) return component.variants
+  return component?.imageUrl ? [{ id: `${key}-default`, label: component.label, imageUrl: component.imageUrl }] : []
+}
+
+function defaultAssetFor(key: ComponentKey) {
+  return variantsFor(key)[0]?.imageUrl ?? componentByKey(key)?.imageUrl ?? null
+}
+
+function selectedVariantFor(key: ComponentKey, assets: ComponentAssetMap) {
+  const variants = variantsFor(key)
+  return variants.find(variant => variant.imageUrl === assets[key]) ?? variants[0] ?? null
+}
+
+function normalizeAssetMap(components: ComponentKey[], assets: ComponentAssetMap): ComponentAssetMap {
+  return Object.fromEntries(
+    components
+      .map(key => [key, assets[key] ?? defaultAssetFor(key)] as const)
+      .filter(([, value]) => Boolean(value))
+  ) as ComponentAssetMap
+}
+
 export default function Step2Components() {
   const { projectId, offeringId } = useParams()
   const navigate = useNavigate()
   const { currentOffering, setComponents, goToStep } = useOfferingStore()
 
+  const initialComponents = withoutDoorCeilingConflict(currentOffering?.selectedComponents ?? [])
   const [envs, setEnvs] = useState<Environment[]>(normalizeEnvironments(currentOffering?.environments ?? []))
-  const [comps, setComps] = useState<ComponentKey[]>(currentOffering?.selectedComponents ?? [])
+  const [comps, setComps] = useState<ComponentKey[]>(initialComponents)
+  const [componentAssets, setComponentAssets] = useState<ComponentAssetMap>(
+    normalizeAssetMap(initialComponents, currentOffering?.selectedComponentAssets ?? {})
+  )
+  const [activeComp, setActiveComp] = useState<ComponentKey | null>(initialComponents[0] ?? null)
 
   useEffect(() => {
     if (currentOffering) {
+      const nextComponents = withoutDoorCeilingConflict(currentOffering.selectedComponents)
       setEnvs(normalizeEnvironments(currentOffering.environments))
-      setComps(withoutDoorCeilingConflict(currentOffering.selectedComponents))
+      setComps(nextComponents)
+      setComponentAssets(normalizeAssetMap(nextComponents, currentOffering.selectedComponentAssets ?? {}))
+      setActiveComp(current => current && nextComponents.includes(current) ? current : nextComponents[0] ?? null)
     }
   }, [currentOffering?.id])
 
@@ -55,14 +92,13 @@ export default function Step2Components() {
     const newComps = withoutDoorCeilingConflict(comps.filter(c => newAvailable.includes(c)))
     setEnvs(newEnvs)
     setComps(newComps)
-    //void setComponents(newEnvs, newComps)
+    setComponentAssets(prev => normalizeAssetMap(newComps, prev))
+    setActiveComp(current => current && newComps.includes(current) ? current : newComps[0] ?? null)
   }
 
   const toggleComp = (k: ComponentKey) => {
     const nextComps = (() => {
-      if (comps.includes(k)) {
-        return comps.filter(c => c !== k)
-      }
+      if (comps.includes(k)) return comps.filter(c => c !== k)
       const next = k === 'door'
         ? comps.filter(c => c !== 'ceiling')
         : k === 'ceiling'
@@ -71,7 +107,15 @@ export default function Step2Components() {
       return [...next, k]
     })()
     setComps(nextComps)
-    //void setComponents(envs, nextComps)
+    setComponentAssets(prev => normalizeAssetMap(nextComps, prev))
+    setActiveComp(nextComps.includes(k) ? k : nextComps[0] ?? null)
+  }
+
+  const selectVariant = (componentKey: ComponentKey, variant: ComponentVariant) => {
+    const nextComps = comps.includes(componentKey) ? comps : [...comps, componentKey]
+    setComps(nextComps)
+    setComponentAssets(prev => normalizeAssetMap(nextComps, { ...prev, [componentKey]: variant.imageUrl }))
+    setActiveComp(componentKey)
   }
 
   const canContinue = envs.length > 0 && comps.length > 0
@@ -88,7 +132,7 @@ export default function Step2Components() {
       goToStep(1)
       return
     }
-    await setComponents(envs, comps)
+    await setComponents(envs, comps, normalizeAssetMap(comps, componentAssets))
     goToStep(3)
     navigate(`/projects/${projectId}/offerings/${offeringId}/step/3`)
   }
@@ -107,6 +151,8 @@ export default function Step2Components() {
           ? 'LCI, Door, and Elevator Interior are available for Lobby'
           : 'Select at least one environment'
 
+  const activeVariants = activeComp && comps.includes(activeComp) ? variantsFor(activeComp) : []
+
   return (
     <div className="rounded-xl border border-[#E9ECEF] bg-white p-8 shadow-sm">
       <div className="mb-1 flex items-start justify-between">
@@ -122,8 +168,6 @@ export default function Step2Components() {
       </div>
 
       <div className="mt-7 space-y-9">
-
-        {/* Environment selection */}
         <div>
           <p className="label-caps mb-3">Where will this be used?</p>
           <div className="flex flex-wrap gap-2">
@@ -149,13 +193,14 @@ export default function Step2Components() {
           <p className="mt-2 text-[12px] text-[#9CA3AF]">{envHint}</p>
         </div>
 
-        {/* Component selection — image cards */}
         <div>
           <p className="label-caps mb-4">Which components are needed?</p>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             {KONE_COMPONENTS.map(comp => {
               const isAvailable = selectableComponents.includes(comp.key)
               const isSelected = comps.includes(comp.key)
+              const selectedVariant = selectedVariantFor(comp.key, componentAssets)
+              const cardImage = selectedVariant?.imageUrl ?? comp.imageUrl
               return (
                 <button
                   key={comp.key}
@@ -171,12 +216,11 @@ export default function Step2Components() {
                         : 'border-[#E9ECEF] hover:border-[#1450F5]/40 hover:shadow-sm'
                   )}
                 >
-                  {/* Component image */}
                   <div className="relative aspect-[4/3] overflow-hidden bg-[#F5F6F8]">
-                    {comp.imageUrl ? (
+                    {cardImage ? (
                       <img
-                        src={comp.imageUrl}
-                        alt={comp.label}
+                        src={cardImage}
+                        alt={selectedVariant?.label ?? comp.label}
                         className={cn(
                           'h-full w-full object-cover transition-transform duration-300',
                           !isAvailable ? 'grayscale' : 'group-hover:scale-105'
@@ -186,13 +230,7 @@ export default function Step2Components() {
                     ) : (
                       <div className="h-full w-full bg-[#E9ECEF]" />
                     )}
-
-                    {/* Selected tint */}
-                    {isSelected && (
-                      <div className="absolute inset-0 bg-[#1450F5]/8" />
-                    )}
-
-                    {/* Checkmark badge */}
+                    {isSelected && <div className="absolute inset-0 bg-[#1450F5]/8" />}
                     {isSelected && (
                       <div className="absolute right-2 top-2 flex h-[22px] w-[22px] items-center justify-center rounded-full bg-[#1450F5] shadow-sm">
                         <Check style={{ width: 12, height: 12, color: '#fff', strokeWidth: 3 }} />
@@ -200,18 +238,12 @@ export default function Step2Components() {
                     )}
                   </div>
 
-                  {/* Label area */}
                   <div className="px-3 py-2.5">
-                    <p
-                      className={cn(
-                        'text-heading text-[13px] font-semibold leading-tight',
-                        isSelected ? 'text-[#1450F5]' : 'text-[#111827]'
-                      )}
-                    >
+                    <p className={cn('text-heading text-[13px] font-semibold leading-tight', isSelected ? 'text-[#1450F5]' : 'text-[#111827]')}>
                       {comp.label}
                     </p>
-                    <p className="mt-0.5 text-[11px] leading-tight text-[#9CA3AF]">
-                      {comp.description}
+                    <p className="mt-0.5 truncate text-[11px] leading-tight text-[#9CA3AF]">
+                      {isSelected && selectedVariant ? selectedVariant.label : comp.description}
                     </p>
                   </div>
                 </button>
@@ -225,26 +257,65 @@ export default function Step2Components() {
           ) : null}
         </div>
 
-        {/* Selected summary chips */}
+        {activeComp && activeVariants.length > 0 && (
+          <div>
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <p className="label-caps">{componentByKey(activeComp)?.label} options</p>
+              <span className="text-[11px] font-medium text-[#9CA3AF]">{activeVariants.length} available</span>
+            </div>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+              {activeVariants.map(variant => {
+                const isSelected = componentAssets[activeComp] === variant.imageUrl
+                return (
+                  <button
+                    key={variant.id}
+                    onClick={() => selectVariant(activeComp, variant)}
+                    aria-pressed={isSelected}
+                    className={cn(
+                      'group overflow-hidden rounded-lg border-2 bg-white text-left transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1450F5] focus-visible:ring-offset-2',
+                      isSelected ? 'border-[#1450F5] shadow-md shadow-[#1450F5]/10' : 'border-[#E9ECEF] hover:border-[#1450F5]/40 hover:shadow-sm'
+                    )}
+                  >
+                    <div className="relative aspect-[4/3] bg-[#F5F6F8]">
+                      <img src={variant.imageUrl} alt={variant.label} className="h-full w-full object-contain p-2 transition-transform duration-300 group-hover:scale-[1.03]" loading="lazy" />
+                      {isSelected && (
+                        <div className="absolute right-2 top-2 flex h-[22px] w-[22px] items-center justify-center rounded-full bg-[#1450F5] shadow-sm">
+                          <Check style={{ width: 12, height: 12, color: '#fff', strokeWidth: 3 }} />
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex h-[42px] items-center px-3">
+                      <p className={cn('line-clamp-2 text-[12px] font-semibold leading-4', isSelected ? 'text-[#1450F5]' : 'text-[#111827]')}>
+                        {variant.label}
+                      </p>
+                    </div>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
         {comps.length > 0 && (
           <div>
             <p className="label-caps mb-3">Selected</p>
             <div className="flex flex-wrap gap-2">
-              {KONE_COMPONENTS.filter(c => comps.includes(c.key)).map(c => (
-                <div
-                  key={c.key}
-                  className="flex items-center gap-2 rounded-lg border border-[#1450F5]/20 bg-[#1450F5]/5 px-3 py-1.5"
-                >
-                  {c.imageUrl && (
-                    <img
-                      src={c.imageUrl}
-                      alt={c.label}
-                      className="h-5 w-5 rounded-sm object-cover"
-                    />
-                  )}
-                  <span className="text-heading text-[12px] font-semibold text-[#1450F5]">{c.label}</span>
-                </div>
-              ))}
+              {KONE_COMPONENTS.filter(c => comps.includes(c.key)).map(c => {
+                const variant = selectedVariantFor(c.key, componentAssets)
+                return (
+                  <button
+                    key={c.key}
+                    onClick={() => setActiveComp(c.key)}
+                    className={cn(
+                      'flex items-center gap-2 rounded-lg border px-3 py-1.5 transition-colors duration-[120ms]',
+                      activeComp === c.key ? 'border-[#1450F5] bg-[#1450F5]/5' : 'border-[#1450F5]/20 bg-white hover:bg-[#1450F5]/5'
+                    )}
+                  >
+                    {variant?.imageUrl && <img src={variant.imageUrl} alt={variant.label} className="h-5 w-5 rounded-sm object-cover" />}
+                    <span className="text-heading text-[12px] font-semibold text-[#1450F5]">{variant?.label ?? c.label}</span>
+                  </button>
+                )
+              })}
             </div>
           </div>
         )}

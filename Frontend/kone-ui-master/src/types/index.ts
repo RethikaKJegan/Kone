@@ -70,12 +70,20 @@ export interface RepinTransform {
   rotation: number
   skewX: number
   skewY: number
+  points?: [
+    { x: number; y: number },
+    { x: number; y: number },
+    { x: number; y: number },
+    { x: number; y: number },
+  ]
   coordinateSpace?: 'pixels' | 'percent'
   imageWidth?: number
   imageHeight?: number
   editableLayerUrl?: string | null
   repinBackgroundUrl?: string | null
   repinBackgroundDisplayUrl?: string | null
+  eraserHistory?: { repinBackgroundUrl: string | null; repinBackgroundDisplayUrl: string | null }[]
+  eraserRedoStack?: { repinBackgroundUrl: string | null; repinBackgroundDisplayUrl: string | null }[]
   editableLayerPath?: string | null
   repinBackgroundPath?: string | null
   feedbackOption?: RepinFeedbackOption | null

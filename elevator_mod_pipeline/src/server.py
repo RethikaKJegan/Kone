@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import io
 import json
 import os
 import shutil
@@ -32,6 +34,9 @@ class ProjectPayload(BaseModel):
     video_options: dict[str, Any] | None = None
     transform: dict[str, Any] | None = None
     transforms: list[dict[str, Any]] | None = None
+    mask_data_url: str | None = None
+    source_version: int | None = None
+    source_base_mode: str | None = None
 
 
 def write_status(storage_dir: str, data: dict[str, Any]) -> None:
@@ -79,6 +84,52 @@ def selected_component_asset_paths(component_assets: dict[str, str] | None) -> d
     return resolved
 
 
+def _load_pipeline_config(pipeline_dir: Path | None = None) -> dict[str, Any]:
+    cfg_path = (pipeline_dir / "config.yaml") if pipeline_dir else None
+    if cfg_path and cfg_path.exists():
+        return yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    return yaml.safe_load((repo_root() / "config.yaml").read_text(encoding="utf-8"))
+
+
+def _decode_mask_data_url(mask_data_url: str, image_size: tuple[int, int]) -> np.ndarray:
+    if not mask_data_url or not isinstance(mask_data_url, str):
+        raise ValueError("Magic eraser mask is required")
+    payload = mask_data_url.split(",", 1)[1] if "," in mask_data_url else mask_data_url
+    try:
+        raw = base64.b64decode(payload)
+    except Exception as exc:
+        raise ValueError("Magic eraser mask is not valid base64") from exc
+    mask_image = Image.open(io.BytesIO(raw)).convert("L")
+    if mask_image.size != image_size:
+        mask_image = mask_image.resize(image_size, Image.Resampling.NEAREST)
+    mask = np.asarray(mask_image, dtype=np.uint8)
+    mask = np.where(mask > 12, 255, 0).astype(np.uint8)
+    if int(np.count_nonzero(mask)) < 8:
+        raise ValueError("Paint over the object before running Magic Eraser")
+    return mask
+
+
+def _source_image_for_repin(storage: Path, preview_dir: Path, source_version: int, source_base_mode: str) -> Path:
+    if source_base_mode == "original":
+        source_candidates = [
+            storage / "uploads" / "input.jpg",
+            storage / "uploads" / f"repin_source_v{source_version}.png",
+            preview_dir / f"final_output_v{source_version}.png",
+            preview_dir / "final_output.png",
+        ]
+    else:
+        source_candidates = [
+            storage / "uploads" / f"repin_source_v{source_version}.png",
+            preview_dir / f"final_output_v{source_version}.png",
+            preview_dir / "final_output.png",
+            storage / "uploads" / "input.jpg",
+        ]
+    source_image_path = next((candidate for candidate in source_candidates if candidate.exists()), None)
+    if source_image_path is None:
+        raise FileNotFoundError(f"Repin source Version {source_version} was not found")
+    return source_image_path
+
+
 
 def _clamp_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -88,6 +139,48 @@ def _clamp_float(value: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
 
+
+
+def _transform_points_px(transform: dict[str, Any], image_size: tuple[int, int]) -> list[tuple[float, float]] | None:
+    points = transform.get("points")
+    if not isinstance(points, list) or len(points) != 4:
+        return None
+
+    width, height = image_size
+    coordinate_space = str(transform.get("coordinateSpace") or "").lower()
+    if coordinate_space == "pixels" or transform.get("imageWidth") or transform.get("imageHeight"):
+        source_width = _clamp_float(transform.get("imageWidth"), width)
+        source_height = _clamp_float(transform.get("imageHeight"), height)
+        scale_x = width / max(1.0, source_width)
+        scale_y = height / max(1.0, source_height)
+    else:
+        scale_x = width / 100.0
+        scale_y = height / 100.0
+
+    px_points: list[tuple[float, float]] = []
+    for point in points:
+        if not isinstance(point, dict):
+            return None
+        x = _clamp_float(point.get("x")) * scale_x
+        y = _clamp_float(point.get("y")) * scale_y
+        px_points.append((float(np.clip(x, 0, width)), float(np.clip(y, 0, height))))
+
+    xs = [point[0] for point in px_points]
+    ys = [point[1] for point in px_points]
+    if max(xs) - min(xs) < 1 or max(ys) - min(ys) < 1:
+        return None
+    return px_points
+
+
+def _points_bbox_px(points: list[tuple[float, float]], image_size: tuple[int, int]) -> tuple[int, int, int, int]:
+    width, height = image_size
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    x1 = max(0, min(width - 1, int(np.floor(min(xs)))))
+    y1 = max(0, min(height - 1, int(np.floor(min(ys)))))
+    x2 = max(x1 + 1, min(width, int(np.ceil(max(xs)))))
+    y2 = max(y1 + 1, min(height, int(np.ceil(max(ys)))))
+    return x1, y1, x2, y2
 
 def _transform_box_px(transform: dict[str, Any], image_size: tuple[int, int]) -> tuple[int, int, int, int]:
     width, height = image_size
@@ -114,13 +207,13 @@ def _transform_box_px(transform: dict[str, Any], image_size: tuple[int, int]) ->
 
 
 def _component_image_for_transform(transform: dict[str, Any], component_assets: dict[str, str] | None) -> Path:
-    editable_layer = transform.get("editableLayerPath")
-    if editable_layer and Path(str(editable_layer)).exists():
-        return Path(str(editable_layer))
     component_key = str(transform.get("componentKey") or transform.get("componentType") or "component").lower()
     asset_path = selected_component_asset_paths(component_assets).get(component_key)
     if asset_path and Path(asset_path).exists():
         return Path(asset_path)
+    editable_layer = transform.get("editableLayerPath")
+    if editable_layer and Path(str(editable_layer)).exists():
+        return Path(str(editable_layer))
     raise ValueError(
         f"Repin requires an editable layer or component asset for {component_key}. "
         "Regenerate the automatic preview once so the selected component can be repinned directly."
@@ -128,6 +221,37 @@ def _component_image_for_transform(transform: dict[str, Any], component_assets: 
 
 
 def _warp_component(component: Image.Image, transform: dict[str, Any], image_size: tuple[int, int]) -> tuple[Image.Image, tuple[int, int, int, int]]:
+    quad_points = _transform_points_px(transform, image_size)
+    if quad_points is not None:
+        x1, y1, x2, y2 = _points_bbox_px(quad_points, image_size)
+        target_w, target_h = x2 - x1, y2 - y1
+        if target_w <= 1 or target_h <= 1:
+            raise ValueError("Repin transform points are too small")
+        component_rgba = component.convert("RGBA")
+        src_points = np.array(
+            [
+                [0, 0],
+                [component_rgba.width, 0],
+                [component_rgba.width, component_rgba.height],
+                [0, component_rgba.height],
+            ],
+            dtype=np.float32,
+        )
+        dst_points = np.array(
+            [[point[0] - x1, point[1] - y1] for point in quad_points],
+            dtype=np.float32,
+        )
+        matrix = cv2.getPerspectiveTransform(src_points, dst_points)
+        warped_array = cv2.warpPerspective(
+            np.asarray(component_rgba),
+            matrix,
+            (target_w, target_h),
+            flags=cv2.INTER_CUBIC,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0, 0),
+        )
+        return Image.fromarray(warped_array, "RGBA"), (x1, y1, x2, y2)
+
     x1, y1, x2, y2 = _transform_box_px(transform, image_size)
     target_w, target_h = x2 - x1, y2 - y1
     slot = component.convert("RGBA").resize((target_w, target_h), Image.Resampling.LANCZOS)
@@ -886,25 +1010,11 @@ def repin_components(payload: ProjectPayload):
             raise ValueError("Version limit reached. Choose the best saved version to continue.")
 
         source_base_mode = str(target_transform.get("sourceBaseMode") or "version").lower()
-        if source_base_mode == "original":
-            source_candidates = [
-                storage / "uploads" / "input.jpg",
-                storage / "uploads" / f"repin_source_v{source_version}.png",
-                preview_dir / f"final_output_v{source_version}.png",
-                preview_dir / "final_output.png",
-            ]
+        repin_background_path = target_transform.get("repinBackgroundPath")
+        if repin_background_path and Path(str(repin_background_path)).exists():
+            source_image_path = Path(str(repin_background_path))
         else:
-            source_candidates = [
-                storage / "uploads" / f"repin_source_v{source_version}.png",
-                preview_dir / f"final_output_v{source_version}.png",
-                preview_dir / "final_output.png",
-                storage / "uploads" / "input.jpg",
-            ]
-        source_image_path = next((candidate for candidate in source_candidates if candidate.exists()), None)
-        if source_image_path is None:
-            raise FileNotFoundError(
-                f"Repin source Version {source_version} was not found"
-            )
+            source_image_path = _source_image_for_repin(storage, preview_dir, source_version, source_base_mode)
 
         transforms = [target_transform]
         placed_image = Image.open(source_image_path).convert("RGB")
@@ -997,6 +1107,66 @@ def repin_components(payload: ProjectPayload):
     except Exception as exc:
         write_status(payload.storage_dir, public_status("failed", str(exc)))
         return {"ok": False, "status": "failed", "error": str(exc)}
+
+@app.post("/repin-erase")
+def repin_erase(payload: ProjectPayload):
+    storage = Path(payload.storage_dir)
+    preview_dir = storage / "preview"
+    pipeline_dir = storage / "pipeline"
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    pipeline_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        transform = payload.transform or {}
+        source_version = int(payload.source_version or transform.get("sourceVersion") or 1)
+        source_base_mode = str(payload.source_base_mode or transform.get("sourceBaseMode") or "version").lower()
+        repin_background_path = transform.get("repinBackgroundPath")
+        if repin_background_path and Path(str(repin_background_path)).exists():
+            source_image_path = Path(str(repin_background_path))
+        else:
+            source_image_path = _source_image_for_repin(storage, preview_dir, source_version, source_base_mode)
+        source_image = Image.open(source_image_path).convert("RGB")
+        mask = _decode_mask_data_url(payload.mask_data_url or "", source_image.size)
+        mask = cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=1)
+
+        mask_path = pipeline_dir / f"repin_erase_mask_v{source_version}_{int(time.time())}.png"
+        output_path = preview_dir / f"repin_erased_v{source_version}_{int(time.time())}.png"
+        cv2.imwrite(str(mask_path), mask)
+
+        repo_path = str(repo_root())
+        if repo_path not in sys.path:
+            sys.path.insert(0, repo_path)
+        try:
+            from src.inpaint import inpaint_background
+        except Exception:
+            from inpaint import inpaint_background
+
+        cfg = _load_pipeline_config(pipeline_dir)
+        cfg.setdefault("inpainting", {})
+        cfg.setdefault("removal", {})
+        cfg["inpainting"]["engine"] = cfg["inpainting"].get("engine") or "lama"
+        cfg["inpainting"]["fallback_to_opencv"] = True
+        inpaint_background(source_image_path, mask, cfg, output_path)
+
+        status = public_status("preview_ready")
+        status.update({
+            "preview_url": str(output_path.relative_to(storage)),
+            "current_preview_url": str(output_path.relative_to(storage)),
+            "repin_erased_url": str(output_path.relative_to(storage)),
+            "repin_erase_mask_url": str(mask_path.relative_to(storage)),
+        })
+        write_status(payload.storage_dir, status)
+        return {
+            "ok": True,
+            "status": "preview_ready",
+            "preview_url": status["preview_url"],
+            "repin_background_url": status["repin_erased_url"],
+            "mask_url": status["repin_erase_mask_url"],
+        }
+    except Exception as exc:
+        write_status(payload.storage_dir, public_status("failed", str(exc)))
+        return {"ok": False, "status": "failed", "error": str(exc)}
+
 
 @app.post("/generate-video")
 def generate_video(payload: ProjectPayload):

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Check, ChevronDown, Eye, RotateCcw, Wand2 } from 'lucide-react'
+import { Check, ChevronDown, Eraser, Eye, Redo2, RotateCcw, Undo2, Wand2 } from 'lucide-react'
 import apiClient from '../../../api/client'
 import { getGuestSessionId, isGuestSession } from '../../../api/guestWorkflow'
 import { useOfferingStore } from '../../../store/offeringStore'
@@ -12,6 +12,10 @@ import type { ComponentKey, ComponentPin, PreviewVersion, RepinFeedbackOption, R
 
 const COMP_LABELS = Object.fromEntries(KONE_COMPONENTS.map(c => [c.key, c.label])) as Record<ComponentKey, string>
 const COMP_IMAGES = Object.fromEntries(KONE_COMPONENTS.map(c => [c.key, c.imageUrl ?? null])) as Record<ComponentKey, string | null>
+
+function componentImageFor(offering: { selectedComponentAssets?: Partial<Record<ComponentKey, string>> } | null | undefined, component: ComponentKey) {
+  return offering?.selectedComponentAssets?.[component] ?? COMP_IMAGES[component] ?? null
+}
 const FEEDBACK_OPTIONS: { value: RepinFeedbackOption; label: string }[] = [
   { value: 'edge_alignment', label: 'Sharper edge alignment' },
   { value: 'perspective_depth', label: 'Better perspective depth' },
@@ -24,10 +28,49 @@ function versionUrl(version: PreviewVersion | undefined, fallback: string | null
   return version?.url ?? fallback ?? null
 }
 
+
+function eraserEntryFromTransform(transform: RepinTransform) {
+  return {
+    repinBackgroundUrl: transform.repinBackgroundUrl ?? null,
+    repinBackgroundDisplayUrl: transform.repinBackgroundDisplayUrl ?? transform.repinBackgroundUrl ?? null,
+  }
+}
+
+function transformWithEraserEntry(transform: RepinTransform, entry: ReturnType<typeof eraserEntryFromTransform>, eraserHistory: ReturnType<typeof eraserEntryFromTransform>[], eraserRedoStack: ReturnType<typeof eraserEntryFromTransform>[] = []): RepinTransform {
+  return {
+    ...transform,
+    repinBackgroundUrl: entry.repinBackgroundUrl,
+    repinBackgroundDisplayUrl: entry.repinBackgroundDisplayUrl,
+    eraserHistory,
+    eraserRedoStack,
+  }
+}
+
+function quadFromRect(transform: RepinTransform): RepinTransform['points'] {
+  const x = Number(transform.x || 0)
+  const y = Number(transform.y || 0)
+  const width = Number(transform.width || 0)
+  const height = Number(transform.height || 0)
+  return [
+    { x, y },
+    { x: x + width, y },
+    { x: x + width, y: y + height },
+    { x, y: y + height },
+  ]
+}
+
+function transformWithNumericField(transform: RepinTransform, field: keyof Pick<RepinTransform, 'x' | 'y' | 'width' | 'height' | 'rotation' | 'skewX' | 'skewY'>, value: number): RepinTransform {
+  const next = { ...transform, [field]: value }
+  if (field === 'x' || field === 'y' || field === 'width' || field === 'height') {
+    return { ...next, points: quadFromRect(next) }
+  }
+  return next
+}
+
 export default function Step4Repin() {
   const { projectId, offeringId } = useParams()
   const navigate = useNavigate()
-  const { currentOffering, setCurrentOffering, setRepinTransforms, submitRepinPreview, goToStep, isProcessing } = useOfferingStore()
+  const { currentOffering, setCurrentOffering, setRepinTransforms, submitRepinPreview, eraseRepinBackground, goToStep, isProcessing } = useOfferingStore()
   const offering = currentOffering
   const selectedComponents = offering?.selectedComponents ?? []
   const components = selectedComponents.length ? selectedComponents : KONE_COMPONENTS.map(component => component.key)
@@ -49,6 +92,8 @@ export default function Step4Repin() {
   const [inspectedVersion, setInspectedVersion] = useState<PreviewVersion | null>(null)
   const [canvasConfirmed, setCanvasConfirmed] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [eraserMode, setEraserMode] = useState(false)
+  const [eraserBrushSize, setEraserBrushSize] = useState(48)
 
   useEffect(() => {
     if (!latestVersion) return
@@ -81,6 +126,7 @@ export default function Step4Repin() {
 
   useEffect(() => {
     setCanvasConfirmed(false)
+    setEraserMode(false)
   }, [selectedComp, sourceVersion])
 
   useEffect(() => {
@@ -167,23 +213,81 @@ export default function Step4Repin() {
   const sourceVersionComponent = selectedSourcePreview?.transform?.componentKey ?? null
   const shouldUseOriginalForPlacement = sourceVersion === 1
   const sourceBaseMode: 'original' | 'version' = shouldUseOriginalForPlacement ? 'original' : 'version'
-  const editingBackgroundUrl = shouldUseOriginalForPlacement ? (originalImageUrl ?? previewImageUrl) : (previewImageUrl ?? originalImageUrl)
   const defaultTransformFor = (component: ComponentKey) => repinTransformFromPin(component, sourceVersion, targetVersion, pins.find((p: ComponentPin) => p.componentKey === component))
 
+  const selectedComponentImageUrl = selectedComp ? componentImageFor(offering, selectedComp) : null
   const transform = selectedComp ? repinTransforms[selectedComp] ?? defaultTransformFor(selectedComp) : null
+  const canUndoEraser = Boolean(transform?.eraserHistory && transform.eraserHistory.length > 1)
+  const canRedoEraser = Boolean(transform?.eraserRedoStack && transform.eraserRedoStack.length > 0)
+  const baseEditingBackgroundUrl = shouldUseOriginalForPlacement ? (originalImageUrl ?? previewImageUrl) : (previewImageUrl ?? originalImageUrl)
+  const editingBackgroundUrl = transform?.repinBackgroundDisplayUrl ?? transform?.repinBackgroundUrl ?? baseEditingBackgroundUrl
 
   const persistTransforms = (nextTransforms: Partial<Record<ComponentKey, RepinTransform>>) => {
     setLocalRepinTransforms(nextTransforms)
     setRepinTransforms(nextTransforms)
   }
 
+  const handleSelectComponent = (component: ComponentKey) => {
+    const nextTransform = repinTransforms[component] ?? defaultTransformFor(component)
+    setSelectedComp(component)
+    setInspectedVersion(null)
+    setCanvasConfirmed(false)
+    if (!repinTransforms[component]) {
+      persistTransforms({ ...repinTransforms, [component]: nextTransform })
+    }
+  }
+
   const handleTransformChange = (next: RepinTransform) => {
     persistTransforms({ ...repinTransforms, [next.componentKey]: next })
   }
 
+
+  const handleEraseMask = async (maskDataUrl: string) => {
+    if (!transform || !selectedComp || isProcessing) return
+    try {
+      const nextTransform = await eraseRepinBackground(transform, maskDataUrl, sourceVersion, sourceBaseMode)
+      persistTransforms({ ...repinTransforms, [selectedComp]: nextTransform })
+      setCanvasConfirmed(false)
+      setEraserMode(false)
+      toast('Magic Eraser cleaned the selected area')
+    } catch (error) {
+      toast(error instanceof Error ? error.message : 'Magic Eraser failed', 'destructive')
+    }
+  }
+
+
+  const handleUndoEraser = () => {
+    if (!transform || !selectedComp || !canUndoEraser) return
+    const history = transform.eraserHistory ?? []
+    const currentEntry = history[history.length - 1]
+    const previousEntry = history[history.length - 2]
+    const nextTransform = transformWithEraserEntry(
+      transform,
+      previousEntry,
+      history.slice(0, -1),
+      [currentEntry, ...(transform.eraserRedoStack ?? [])]
+    )
+    persistTransforms({ ...repinTransforms, [selectedComp]: nextTransform })
+    setCanvasConfirmed(false)
+  }
+
+  const handleRedoEraser = () => {
+    if (!transform || !selectedComp || !canRedoEraser) return
+    const [redoEntry, ...remainingRedo] = transform.eraserRedoStack ?? []
+    const history = transform.eraserHistory?.length ? transform.eraserHistory : [eraserEntryFromTransform(transform)]
+    const nextTransform = transformWithEraserEntry(
+      transform,
+      redoEntry,
+      [...history, redoEntry],
+      remainingRedo
+    )
+    persistTransforms({ ...repinTransforms, [selectedComp]: nextTransform })
+    setCanvasConfirmed(false)
+  }
+
   const handleNumericChange = (field: keyof Pick<RepinTransform, 'x' | 'y' | 'width' | 'height' | 'rotation' | 'skewX' | 'skewY'>, value: number) => {
     if (!transform || !selectedComp) return
-    persistTransforms({ ...repinTransforms, [selectedComp]: { ...transform, [field]: value } })
+    persistTransforms({ ...repinTransforms, [selectedComp]: transformWithNumericField(transform, field, value) })
   }
 
   const handleReset = () => {
@@ -216,7 +320,7 @@ export default function Step4Repin() {
       ? feedbackOptions.filter(item => item !== option)
       : [...feedbackOptions, option]
     if (!nextOptions.length) {
-      toast('Select at least one FireRed correction.', 'destructive')
+      toast('Select at least one   correction.', 'destructive')
       return
     }
     setFeedbackOptions(nextOptions)
@@ -238,7 +342,7 @@ export default function Step4Repin() {
       return
     }
     if (!feedbackOptions.length) {
-      toast('Select at least one FireRed correction.', 'destructive')
+      toast('Select at least one   correction.', 'destructive')
       return
     }
     const payload = {
@@ -250,7 +354,7 @@ export default function Step4Repin() {
       rotation: transform.rotation || 0,
       skewX: transform.skewX || 0,
       skewY: transform.skewY || 0,
-      editableLayerUrl: transform.editableLayerUrl ?? null,
+      editableLayerUrl: null,
       repinBackgroundUrl: transform.repinBackgroundUrl ?? null,
       repinBackgroundDisplayUrl: transform.repinBackgroundDisplayUrl ?? null,
       feedbackOption: feedbackOptions[0] ?? null,
@@ -260,7 +364,7 @@ export default function Step4Repin() {
     }
     try {
       await submitRepinPreview(payload)
-      toast('Generating repin preview with FireRed realism')
+      toast('Generating repin preview ')
     } catch (error) {
       toast(error instanceof Error ? error.message : 'Could not start repin preview', 'destructive')
     }
@@ -300,7 +404,7 @@ export default function Step4Repin() {
       <div className="flex items-start justify-between px-8 pb-2 pt-8">
         <div>
           <h2 className="text-heading text-[15px] font-semibold text-[#111827]">4 &nbsp; Repin</h2>
-          <p className="mt-1 text-[12px] text-[#9CA3AF]">Adjust component geometry, then generate a realistic FireRed preview.</p>
+          <p className="mt-1 text-[12px] text-[#9CA3AF]">Adjust component geometry, then generate a realistic preview.</p>
         </div>
         <button onClick={handleBack} className="text-xs font-medium text-[#9CA3AF] transition-colors duration-[120ms] hover:text-[#6B7280]">Back</button>
       </div>
@@ -312,7 +416,7 @@ export default function Step4Repin() {
               {components.map(comp => (
                 <button
                   key={comp}
-                  onClick={() => { setSelectedComp(comp); setInspectedVersion(null) }}
+                  onClick={() => handleSelectComponent(comp)}
                   className={cn(
                     'min-w-[128px] rounded-[5px] border px-3 py-2 text-left text-xs font-medium transition-colors duration-[120ms]',
                     selectedComp === comp ? 'border-[#1450F5] bg-[#EFF6FF] text-[#1450F5]' : 'border-[#E4E4E4] text-[#525252] hover:border-[#BFDBFE]'
@@ -337,10 +441,14 @@ export default function Step4Repin() {
               </div>
             ) : (
               <RepinTransformCanvas
+                key={`${selectedComp}:${sourceVersion}:${selectedComponentImageUrl ?? 'asset'}`}
                 imageUrl={editingBackgroundUrl}
                 transform={transform}
                 label={COMP_LABELS[selectedComp]}
-                componentImageUrl={transform.editableLayerUrl ?? COMP_IMAGES[selectedComp] ?? null}
+                componentImageUrl={selectedComponentImageUrl ?? transform.editableLayerUrl ?? null}
+                eraserEnabled={eraserMode}
+                eraserBrushSize={eraserBrushSize}
+                onErase={handleEraseMask}
                 onChange={handleTransformChange}
               />
             )
@@ -348,7 +456,7 @@ export default function Step4Repin() {
             <div className="flex min-h-[360px] items-center justify-center rounded-lg border border-[#E4E4E4] text-sm text-[#6B7280]">Select a component to repin.</div>
           )}
           {transform && selectedComp && !canvasConfirmed && !inspectedVersion && (
-            <p className="mt-3 text-xs text-[#6B7280]">Drag the component on the image, then confirm placement before generating the FireRed preview.</p>
+            <p className="mt-3 text-xs text-[#6B7280]">{eraserMode ? 'Paint over the object to erase. Release to run Magic Eraser cleanup.' : 'Drag the component or any single corner, then confirm placement before generating the preview.'}</p>
           )}
         </div>
 
@@ -363,8 +471,61 @@ export default function Step4Repin() {
           <div className="rounded-[6px] border border-[#E4E4E4] bg-[#FAFAFA] p-3">
             <p className="text-xs font-semibold text-[#111827]">{selectedComp ? COMP_LABELS[selectedComp] : 'Component'}</p>
             <p className="mt-1 text-[11px] leading-4 text-[#6B7280]">
-              Move, resize, rotate, or skew the overlay on the active editing image.
+              Move the overlay or drag any corner independently to fit the camera perspective.
             </p>
+          </div>
+
+          <div className="mt-4 rounded-[6px] border border-[#E4E4E4] bg-white p-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEraserMode(value => !value)}
+                  disabled={!transform || isProcessing}
+                  className={cn(
+                    'flex h-8 items-center gap-1.5 rounded-[5px] border px-3 text-xs font-medium transition-colors duration-[120ms] disabled:cursor-not-allowed disabled:opacity-40',
+                    eraserMode ? 'border-[#1450F5] bg-[#EFF6FF] text-[#1450F5]' : 'border-[#E4E4E4] text-[#525252] hover:border-[#BFDBFE]'
+                  )}
+                >
+                  <Eraser style={{ width: 13, height: 13 }} /> Magic Eraser
+                </button>
+                <button
+                  type="button"
+                  onClick={handleUndoEraser}
+                  disabled={!canUndoEraser || isProcessing}
+                  className="flex h-8 w-8 items-center justify-center rounded-[5px] border border-[#E4E4E4] text-[#525252] transition-colors duration-[120ms] hover:border-[#BFDBFE] hover:text-[#1450F5] disabled:cursor-not-allowed disabled:opacity-40"
+                  aria-label="Undo Magic Eraser"
+                  title="Undo Magic Eraser"
+                >
+                  <Undo2 style={{ width: 14, height: 14 }} />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRedoEraser}
+                  disabled={!canRedoEraser || isProcessing}
+                  className="flex h-8 w-8 items-center justify-center rounded-[5px] border border-[#E4E4E4] text-[#525252] transition-colors duration-[120ms] hover:border-[#BFDBFE] hover:text-[#1450F5] disabled:cursor-not-allowed disabled:opacity-40"
+                  aria-label="Redo Magic Eraser"
+                  title="Redo Magic Eraser"
+                >
+                  <Redo2 style={{ width: 14, height: 14 }} />
+                </button>
+              </div>
+              {eraserMode && <span className="text-[10px] font-medium text-[#6B7280]">Brush {eraserBrushSize}px</span>}
+            </div>
+            {eraserMode && (
+              <label className="mt-3 block text-[11px] font-medium text-[#6B7280]">
+                Brush size
+                <input
+                  type="range"
+                  min={12}
+                  max={240}
+                  step={4}
+                  value={eraserBrushSize}
+                  onChange={event => setEraserBrushSize(Number(event.target.value))}
+                  className="mt-2 w-full accent-[#1450F5]"
+                />
+              </label>
+            )}
           </div>
 
           {transform && (
@@ -413,7 +574,7 @@ export default function Step4Repin() {
               )}
             >
               {canvasConfirmed ? <Wand2 style={{ width: 13, height: 13 }} /> : <Check style={{ width: 13, height: 13 }} />}
-              {isProcessing ? 'Generating...' : canvasConfirmed ? 'Generate FireRed Preview' : 'Confirm Component '}
+              {isProcessing ? 'Generating...' : canvasConfirmed ? 'Generate Preview' : 'Confirm Component '}
             </button>
             <button onClick={handleReset} disabled={!transform} className="flex h-9 items-center gap-1.5 rounded-[5px] border border-[#E4E4E4] px-3 text-xs font-medium text-[#525252] hover:border-[#A3A3A3] disabled:cursor-not-allowed disabled:opacity-40">
               <RotateCcw style={{ width: 13, height: 13 }} /> Reset
