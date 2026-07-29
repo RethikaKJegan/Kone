@@ -128,8 +128,8 @@ export default function Step3Place() {
   const hasMissingPlacements = components.length > 0 && !allPlaced
 
   const handleContinue = () => {
-    goToStep(4)
-    navigate(`/projects/${projectId}/offerings/${offeringId}/step/4`)
+    goToStep(5)
+    navigate(`/projects/${projectId}/offerings/${offeringId}/step/5`)
   }
 
   const handleRepin = () => {
@@ -264,11 +264,12 @@ export default function Step3Place() {
         </div>
       </div>
 
-      <div className="flex items-center justify-between border-t border-[#E4E4E4] px-8 py-5">
+      <div className="flex items-center justify-between gap-3 border-t border-[#E4E4E4] px-8 py-5">
         <button
           onClick={handleRepin}
-          className="flex items-center gap-1.5 rounded-[5px] border border-[#E4E4E4] px-4 text-sm font-medium text-[#525252] transition-colors duration-[120ms] hover:border-[#1450F5] hover:text-[#1450F5]"
-          style={{ height: 34 }}
+          disabled={!allPlaced}
+          className="flex items-center gap-1.5 rounded-[5px] bg-[#0A0A0A] px-5 text-sm font-medium text-white transition-colors duration-[120ms] hover:bg-[#262626] disabled:cursor-not-allowed disabled:opacity-40"
+          style={{ height: 36 }}
         >
           <Move style={{ width: 14, height: 14 }} />
           Repin
@@ -276,10 +277,10 @@ export default function Step3Place() {
         <button
           onClick={handleContinue}
           disabled={!allPlaced}
-          className="rounded-[5px] bg-[#0A0A0A] px-5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
-          style={{ height: 34 }}
+          className="rounded-[5px] bg-[#0A0A0A] px-5 text-sm font-medium text-white transition-colors duration-[120ms] hover:bg-[#262626] disabled:cursor-not-allowed disabled:opacity-40"
+          style={{ height: 36 }}
         >
-          Continue to Repin →
+          Continue to Video →
         </button>
       </div>
     </div>

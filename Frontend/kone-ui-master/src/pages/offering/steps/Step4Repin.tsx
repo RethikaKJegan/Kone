@@ -413,7 +413,7 @@ export default function Step4Repin() {
               )}
             >
               {canvasConfirmed ? <Wand2 style={{ width: 13, height: 13 }} /> : <Check style={{ width: 13, height: 13 }} />}
-              {isProcessing ? 'Generating...' : canvasConfirmed ? 'Generate FireRed Preview' : 'Confirm Placement'}
+              {isProcessing ? 'Generating...' : canvasConfirmed ? 'Generate FireRed Preview' : 'Confirm Component '}
             </button>
             <button onClick={handleReset} disabled={!transform} className="flex h-9 items-center gap-1.5 rounded-[5px] border border-[#E4E4E4] px-3 text-xs font-medium text-[#525252] hover:border-[#A3A3A3] disabled:cursor-not-allowed disabled:opacity-40">
               <RotateCcw style={{ width: 13, height: 13 }} /> Reset
