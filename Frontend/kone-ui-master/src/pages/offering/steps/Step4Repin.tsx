@@ -188,8 +188,13 @@ export default function Step4Repin() {
   }
 
   const handleInspectVersion = (version: PreviewVersion) => {
-    setCanvasConfirmed(false)
     setInspectedVersion(version)
+  }
+
+  const handleFeedbackChange = (option: RepinFeedbackOption) => {
+    setFeedbackOption(option)
+    if (!selectedComp || !transform) return
+    persistTransforms({ ...repinTransforms, [selectedComp]: { ...transform, feedbackOption: option } })
   }
 
   const handleGenerate = async () => {
@@ -270,7 +275,7 @@ export default function Step4Repin() {
               {components.map(comp => (
                 <button
                   key={comp}
-                  onClick={() => setSelectedComp(comp)}
+                  onClick={() => { setSelectedComp(comp); setInspectedVersion(null) }}
                   className={cn(
                     'min-w-[128px] rounded-[5px] border px-3 py-2 text-left text-xs font-medium transition-colors duration-[120ms]',
                     selectedComp === comp ? 'border-[#1450F5] bg-[#EFF6FF] text-[#1450F5]' : 'border-[#E4E4E4] text-[#525252] hover:border-[#BFDBFE]'
@@ -284,9 +289,11 @@ export default function Step4Repin() {
           </div>
 
           {transform && selectedComp ? (
-            inspectedVersion && !canvasConfirmed ? (
+            inspectedVersion ? (
               <div className="relative flex min-h-[360px] items-center justify-center overflow-hidden rounded-lg border border-[#E4E4E4] bg-[#0A0A0A]">
-                <img src={inspectedVersion.url} alt={`Version ${inspectedVersion.version}`} className="h-full max-h-[520px] w-full object-contain" />
+                <img src={inspectedVersion.url} alt={`Version ${inspectedVersion.version}`} className="max-h-[520px] w-full object-contain" />
+                <div className="absolute left-3 top-3 rounded-[4px] bg-black/70 px-2 py-1 text-[11px] font-semibold text-white">Version {inspectedVersion.version}</div>
+                <button onClick={() => setInspectedVersion(null)} className="absolute right-3 top-3 rounded-[4px] bg-white px-2 py-1 text-[11px] font-semibold text-[#111827] shadow-sm hover:text-[#1450F5]">Edit placement</button>
               </div>
             ) : (
               <RepinTransformCanvas
@@ -302,15 +309,6 @@ export default function Step4Repin() {
           )}
           {transform && selectedComp && !canvasConfirmed && !inspectedVersion && (
             <p className="mt-3 text-xs text-[#6B7280]">Drag the component on the image, then confirm placement before generating the FireRed preview.</p>
-          )}
-          {inspectedVersion && canvasConfirmed && (
-            <div className="mt-4 rounded-lg border border-[#E4E4E4] bg-white p-3">
-              <div className="mb-2 flex items-center justify-between">
-                <p className="text-xs font-semibold text-[#111827]">Version {inspectedVersion.version}</p>
-                <button onClick={() => handleUseVersion(inspectedVersion)} className="text-xs font-medium text-[#1450F5] hover:text-[#0B3BBF]">Use for video</button>
-              </div>
-              <img src={inspectedVersion.url} alt={`Version ${inspectedVersion.version}`} className="max-h-[360px] w-full rounded-[6px] bg-[#0A0A0A] object-contain" />
-            </div>
           )}
         </div>
 
@@ -358,7 +356,7 @@ export default function Step4Repin() {
               <legend className="text-[11px] font-semibold text-[#525252]">Feedback</legend>
               {FEEDBACK_OPTIONS.map(option => (
                 <label key={option.value} className="flex items-center gap-2 text-xs text-[#525252]">
-                  <input type="radio" name="repin-feedback" checked={feedbackOption === option.value} onChange={() => setFeedbackOption(option.value)} />
+                  <input type="radio" name="repin-feedback" checked={feedbackOption === option.value} onChange={() => handleFeedbackChange(option.value)} />
                   {option.label}
                 </label>
               ))}
