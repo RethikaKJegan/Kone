@@ -153,6 +153,7 @@ export default function Step4Repin() {
   }, [projectId, offeringId, offering?.previewRequestKey, offering?.pipelineStatus])
 
   const previewImageUrl = useMemo(() => versionUrl(versions.find(v => v.version === sourceVersion), offering?.outputImageUrl), [versions, sourceVersion, offering?.outputImageUrl])
+  const editingBackgroundUrl = offering?.uploadedFileUrl ?? offering?.inputImagePath ?? previewImageUrl
 
   const defaultTransformFor = (component: ComponentKey) => repinTransformFromPin(component, sourceVersion, targetVersion, pins.find((p: ComponentPin) => p.componentKey === component))
 
@@ -289,7 +290,7 @@ export default function Step4Repin() {
               </div>
             ) : (
               <RepinTransformCanvas
-                imageUrl={transform.repinBackgroundDisplayUrl ?? transform.repinBackgroundUrl ?? inspectedVersion?.url ?? previewImageUrl}
+                imageUrl={editingBackgroundUrl}
                 transform={transform}
                 label={COMP_LABELS[selectedComp]}
                 componentImageUrl={transform.editableLayerUrl ?? null}
