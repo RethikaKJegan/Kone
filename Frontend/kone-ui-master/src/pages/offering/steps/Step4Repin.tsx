@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Check, Eye, RotateCcw, Wand2 } from 'lucide-react'
+import { Check, ChevronDown, Eye, RotateCcw, Wand2 } from 'lucide-react'
 import apiClient from '../../../api/client'
 import { getGuestSessionId, isGuestSession } from '../../../api/guestWorkflow'
 import { useOfferingStore } from '../../../store/offeringStore'
@@ -46,6 +46,7 @@ export default function Step4Repin() {
   const [feedbackOption, setFeedbackOption] = useState<RepinFeedbackOption>('wrong_placement')
   const [inspectedVersion, setInspectedVersion] = useState<PreviewVersion | null>(null)
   const [canvasConfirmed, setCanvasConfirmed] = useState(false)
+  const [advancedOpen, setAdvancedOpen] = useState(false)
 
   useEffect(() => {
     const component = selectedComp && components.includes(selectedComp) ? selectedComp : components[0]
@@ -222,6 +223,14 @@ export default function Step4Repin() {
     }
   }
 
+  const handlePrimaryAction = async () => {
+    if (!canvasConfirmed) {
+      handleConfirmCanvas()
+      return
+    }
+    await handleGenerate()
+  }
+
   const handleUseVersion = (version: PreviewVersion) => {
     if (!offering) return
     setCurrentOffering({ ...offering, outputImageUrl: version.url, previewImagePath: version.url, outputVideoUrl: null, videoGenerated: false, downloadUrl: null })
@@ -255,8 +264,30 @@ export default function Step4Repin() {
 
       <div className="mt-4 flex gap-0 border-t border-[#E9ECEF]">
         <div className="relative flex-[3] p-6 pr-3">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap gap-2">
+              {components.map(comp => (
+                <button
+                  key={comp}
+                  onClick={() => setSelectedComp(comp)}
+                  className={cn(
+                    'min-w-[128px] rounded-[5px] border px-3 py-2 text-left text-xs font-medium transition-colors duration-[120ms]',
+                    selectedComp === comp ? 'border-[#1450F5] bg-[#EFF6FF] text-[#1450F5]' : 'border-[#E4E4E4] text-[#525252] hover:border-[#BFDBFE]'
+                  )}
+                >
+                  <span className="block truncate">{COMP_LABELS[comp]}</span>
+                </button>
+              ))}
+            </div>
+            <span className="text-[11px] font-medium text-[#9CA3AF]">Version {sourceVersion} to {targetVersion}</span>
+          </div>
+
           {transform && selectedComp ? (
-            canvasConfirmed ? (
+            inspectedVersion && !canvasConfirmed ? (
+              <div className="relative flex min-h-[360px] items-center justify-center overflow-hidden rounded-lg border border-[#E4E4E4] bg-[#0A0A0A]">
+                <img src={inspectedVersion.url} alt={`Version ${inspectedVersion.version}`} className="h-full max-h-[520px] w-full object-contain" />
+              </div>
+            ) : (
               <RepinTransformCanvas
                 imageUrl={transform.repinBackgroundDisplayUrl ?? transform.repinBackgroundUrl ?? inspectedVersion?.url ?? previewImageUrl}
                 transform={transform}
@@ -264,15 +295,12 @@ export default function Step4Repin() {
                 componentImageUrl={transform.editableLayerUrl ?? null}
                 onChange={handleTransformChange}
               />
-            ) : inspectedVersion ? (
-              <div className="relative flex min-h-[360px] items-center justify-center overflow-hidden rounded-lg border border-[#E4E4E4] bg-[#0A0A0A]">
-                <img src={inspectedVersion.url} alt={`Version ${inspectedVersion.version}`} className="h-full max-h-[460px] w-full object-contain" />
-              </div>
-            ) : (
-              <div className="flex min-h-[360px] items-center justify-center rounded-lg border border-[#E4E4E4] text-sm text-[#6B7280]">Confirm a component to open the repin canvas.</div>
             )
           ) : (
             <div className="flex min-h-[360px] items-center justify-center rounded-lg border border-[#E4E4E4] text-sm text-[#6B7280]">Select a component to repin.</div>
+          )}
+          {transform && selectedComp && !canvasConfirmed && !inspectedVersion && (
+            <p className="mt-3 text-xs text-[#6B7280]">Drag the component on the image, then confirm placement before generating the FireRed preview.</p>
           )}
           {inspectedVersion && canvasConfirmed && (
             <div className="mt-4 rounded-lg border border-[#E4E4E4] bg-white p-3">
@@ -288,44 +316,44 @@ export default function Step4Repin() {
         <div className="flex flex-[2] flex-col border-l border-[#E9ECEF] p-6 pl-4">
           <div className="mb-4 flex items-center justify-between">
             <p className="label-caps">Repin Controls</p>
-            <span className="text-[11px] text-[#9CA3AF]">Version {sourceVersion} to {targetVersion}</span>
+            <span className={cn('rounded-full px-2 py-1 text-[10px] font-semibold', canvasConfirmed ? 'bg-[#ECFDF5] text-[#047857]' : 'bg-[#FEF3C7] text-[#92400E]')}>
+              {canvasConfirmed ? 'Placement confirmed' : 'Needs confirmation'}
+            </span>
           </div>
 
-          <div className="mb-4 grid grid-cols-2 gap-2">
-            {components.map(comp => (
-              <button
-                key={comp}
-                onClick={() => setSelectedComp(comp)}
-                className={cn(
-                  'min-w-0 rounded-[5px] border px-3 py-2 text-left text-xs font-medium transition-colors duration-[120ms]',
-                  selectedComp === comp ? 'border-[#1450F5] bg-[#EFF6FF] text-[#1450F5]' : 'border-[#E4E4E4] text-[#525252] hover:border-[#BFDBFE]'
-                )}
-              >
-                <span className="block truncate">{COMP_LABELS[comp]}</span>
-              </button>
-            ))}
+          <div className="rounded-[6px] border border-[#E4E4E4] bg-[#FAFAFA] p-3">
+            <p className="text-xs font-semibold text-[#111827]">{selectedComp ? COMP_LABELS[selectedComp] : 'Component'}</p>
+            <p className="mt-1 text-[11px] leading-4 text-[#6B7280]">
+              Move, resize, rotate, or skew the overlay directly on the preview.
+            </p>
           </div>
 
           {transform && (
-            <div className="grid grid-cols-2 gap-2">
-              {[
-                ['x', 'X Position'], ['y', 'Y Position'], ['width', 'Width'], ['height', 'Height'], ['rotation', 'Rotation'], ['skewX', 'Skew X'], ['skewY', 'Skew Y'],
-              ].map(([field, label]) => (
-                <label key={field} className="text-[11px] font-medium text-[#6B7280]">
-                  {label}
-                  <input
-                    type="number"
-                    value={transform[field as keyof RepinTransform] as number}
-                    onChange={event => handleNumericChange(field as keyof Pick<RepinTransform, 'x' | 'y' | 'width' | 'height' | 'rotation' | 'skewX' | 'skewY'>, Number(event.target.value))}
-                    className="mt-1 h-8 w-full rounded-[4px] border border-[#E4E4E4] px-2 text-xs text-[#111827]"
-                  />
-                </label>
-              ))}
-            </div>
+            <details open={advancedOpen} onToggle={event => setAdvancedOpen(event.currentTarget.open)} className="mt-4 rounded-[6px] border border-[#E4E4E4]">
+              <summary className="flex cursor-pointer list-none items-center justify-between px-3 py-2 text-xs font-semibold text-[#525252]">
+                Advanced Geometry
+                <ChevronDown className={cn('h-3.5 w-3.5 transition-transform duration-[120ms]', advancedOpen && 'rotate-180')} />
+              </summary>
+              <div className="grid grid-cols-2 gap-2 border-t border-[#E4E4E4] p-3">
+                {[
+                  ['x', 'X Position'], ['y', 'Y Position'], ['width', 'Width'], ['height', 'Height'], ['rotation', 'Rotation'], ['skewX', 'Skew X'], ['skewY', 'Skew Y'],
+                ].map(([field, label]) => (
+                  <label key={field} className="text-[11px] font-medium text-[#6B7280]">
+                    {label}
+                    <input
+                      type="number"
+                      value={transform[field as keyof RepinTransform] as number}
+                      onChange={event => handleNumericChange(field as keyof Pick<RepinTransform, 'x' | 'y' | 'width' | 'height' | 'rotation' | 'skewX' | 'skewY'>, Number(event.target.value))}
+                      className="mt-1 h-8 w-full rounded-[4px] border border-[#E4E4E4] px-2 text-xs text-[#111827]"
+                    />
+                  </label>
+                ))}
+              </div>
+            </details>
           )}
 
-          {targetVersion >= 3 && !generationLimitReached && (
-            <fieldset className="mt-4 space-y-2">
+          {latestVersion > 1 && !generationLimitReached && (
+            <fieldset className="mt-4 space-y-2 rounded-[6px] border border-[#E4E4E4] p-3">
               <legend className="text-[11px] font-semibold text-[#525252]">Feedback</legend>
               {FEEDBACK_OPTIONS.map(option => (
                 <label key={option.value} className="flex items-center gap-2 text-xs text-[#525252]">
@@ -337,21 +365,19 @@ export default function Step4Repin() {
           )}
 
           <div className="mt-5 flex items-center gap-2">
-            {canvasConfirmed ? (
-              <button onClick={handleReset} className="flex h-9 items-center gap-1.5 rounded-[5px] border border-[#E4E4E4] px-3 text-xs font-medium text-[#525252] hover:border-[#A3A3A3]">
-                <RotateCcw style={{ width: 13, height: 13 }} /> Reset
-              </button>
-            ) : (
-              <button onClick={handleConfirmCanvas} disabled={!selectedComp || !transform} className="flex h-9 items-center gap-1.5 rounded-[5px] border border-[#1450F5] px-3 text-xs font-medium text-[#1450F5] hover:bg-[#EFF6FF] disabled:cursor-not-allowed disabled:opacity-40">
-                <Check style={{ width: 13, height: 13 }} /> Confirm
-              </button>
-            )}
             <button
-              onClick={handleGenerate}
-              disabled={isProcessing || generationLimitReached || !transform || !canvasConfirmed}
-              className="flex h-9 items-center gap-1.5 rounded-[5px] bg-[#0A0A0A] px-4 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+              onClick={handlePrimaryAction}
+              disabled={isProcessing || generationLimitReached || !transform}
+              className={cn(
+                'flex h-9 flex-1 items-center justify-center gap-1.5 rounded-[5px] px-4 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40',
+                canvasConfirmed ? 'bg-[#0A0A0A]' : 'bg-[#1450F5]'
+              )}
             >
-              <Wand2 style={{ width: 13, height: 13 }} /> {isProcessing ? 'Generating...' : 'Generate New Preview'}
+              {canvasConfirmed ? <Wand2 style={{ width: 13, height: 13 }} /> : <Check style={{ width: 13, height: 13 }} />}
+              {isProcessing ? 'Generating...' : canvasConfirmed ? 'Generate FireRed Preview' : 'Confirm Placement'}
+            </button>
+            <button onClick={handleReset} disabled={!transform} className="flex h-9 items-center gap-1.5 rounded-[5px] border border-[#E4E4E4] px-3 text-xs font-medium text-[#525252] hover:border-[#A3A3A3] disabled:cursor-not-allowed disabled:opacity-40">
+              <RotateCcw style={{ width: 13, height: 13 }} /> Reset
             </button>
           </div>
 
@@ -360,20 +386,24 @@ export default function Step4Repin() {
           <div className="mt-5 space-y-2 border-t border-[#E4E4E4] pt-4">
             <p className="label-caps">Saved Versions</p>
             {versions.map(version => (
-              <div key={version.version} className="flex w-full items-center gap-2 rounded-[5px] border border-[#E4E4E4] px-2 py-2 text-xs text-[#525252]">
+              <div key={version.version} className="flex w-full items-center gap-3 rounded-[5px] border border-[#E4E4E4] p-2 text-xs text-[#525252]">
                 <button
                   onClick={() => handleInspectVersion(version)}
                   className={cn(
-                    'flex h-7 w-7 shrink-0 items-center justify-center rounded-[4px] border transition-colors duration-[120ms]',
-                    inspectedVersion?.version === version.version ? 'border-[#1450F5] text-[#1450F5]' : 'border-[#E4E4E4] text-[#6B7280] hover:border-[#1450F5] hover:text-[#1450F5]'
+                    'relative h-12 w-16 shrink-0 overflow-hidden rounded-[4px] border bg-[#0A0A0A] transition-colors duration-[120ms]',
+                    inspectedVersion?.version === version.version ? 'border-[#1450F5]' : 'border-[#E4E4E4] hover:border-[#1450F5]'
                   )}
                   aria-label={`Preview Version ${version.version}`}
                   title={`Preview Version ${version.version}`}
                 >
-                  <Eye style={{ width: 14, height: 14 }} />
+                  <img src={version.url} alt="" className="h-full w-full object-cover" />
+                  <span className="absolute inset-0 flex items-center justify-center bg-black/0 text-white opacity-0 transition-opacity duration-[120ms] hover:bg-black/35 hover:opacity-100">
+                    <Eye style={{ width: 14, height: 14 }} />
+                  </span>
                 </button>
-                <button onClick={() => handleInspectVersion(version)} className="min-w-0 flex-1 truncate text-left font-medium hover:text-[#1450F5]">
-                  Version {version.version}
+                <button onClick={() => handleInspectVersion(version)} className="min-w-0 flex-1 text-left hover:text-[#1450F5]">
+                  <span className="block font-semibold text-[#111827]">Version {version.version}</span>
+                  <span className="mt-0.5 block truncate text-[11px] text-[#9CA3AF]">{version.sourceVersion ? `From Version ${version.sourceVersion}` : 'Original preview'}</span>
                 </button>
                 <button onClick={() => handleUseVersion(version)} className="shrink-0 font-medium text-[#525252] hover:text-[#1450F5]">Use for video</button>
               </div>
