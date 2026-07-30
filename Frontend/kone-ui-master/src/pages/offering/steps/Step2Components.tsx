@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Check, Eye } from 'lucide-react'
+import { Check, Eye, Search } from 'lucide-react'
 import { useOfferingStore } from '../../../store/offeringStore'
 import { KONE_COMPONENTS, ENVIRONMENTS } from '../../../lib/constants'
 import { cn } from '../../../lib/utils'
@@ -41,8 +41,14 @@ function variantsFor(key: ComponentKey): ComponentVariant[] {
   return component?.imageUrl ? [{ id: `${key}-default`, label: component.label, imageUrl: component.imageUrl }] : []
 }
 
+function componentThumbnailFor(key: ComponentKey) {
+  if (key === 'ceiling') return '/components/ceiling.jpg'
+  if (key === 'door') return '/components/door.jpg'
+  return componentByKey(key)?.imageUrl ?? `/components/${key}.png`
+}
+
 function defaultAssetFor(key: ComponentKey) {
-  return variantsFor(key)[0]?.imageUrl ?? componentByKey(key)?.imageUrl ?? null
+  return variantsFor(key)[0]?.imageUrl ?? componentThumbnailFor(key)
 }
 
 function selectedVariantFor(key: ComponentKey, assets: ComponentAssetMap) {
@@ -71,6 +77,7 @@ export default function Step2Components() {
   )
   const [activeComp, setActiveComp] = useState<ComponentKey | null>(initialComponents[0] ?? null)
   const [previewImage, setPreviewImage] = useState<PreviewImage | null>(null)
+  const [optionQuery, setOptionQuery] = useState('')
 
   useEffect(() => {
     if (currentOffering) {
@@ -112,6 +119,7 @@ export default function Step2Components() {
     setComps(nextComps)
     setComponentAssets(prev => normalizeAssetMap(nextComps, prev))
     setActiveComp(nextComps.includes(k) ? k : nextComps[0] ?? null)
+    setOptionQuery('')
   }
 
   const selectVariant = (componentKey: ComponentKey, variant: ComponentVariant) => {
@@ -155,6 +163,9 @@ export default function Step2Components() {
           : 'Select at least one environment'
 
   const activeVariants = activeComp && comps.includes(activeComp) ? variantsFor(activeComp) : []
+  const filteredActiveVariants = activeVariants.filter(variant =>
+    variant.label.toLowerCase().includes(optionQuery.trim().toLowerCase())
+  )
 
   return (
     <>
@@ -174,203 +185,256 @@ export default function Step2Components() {
         </DialogContent>
       </Dialog>
 
-      <div className="rounded-xl border border-[#E9ECEF] bg-white p-8 shadow-sm">
-      <div className="mb-1 flex items-start justify-between">
-        <h2 className="text-heading text-[15px] font-semibold text-[#111827]">
-          2 &nbsp; Use Case & Components
-        </h2>
-        <button
-          onClick={handleBack}
-          className="text-xs font-medium text-[#9CA3AF] transition-colors duration-[120ms] hover:text-[#6B7280]"
-        >
-          Back
-        </button>
-      </div>
-
-      <div className="mt-7 space-y-9">
-        <div>
-          <p className="label-caps mb-3">Where will this be used?</p>
-          <div className="flex flex-wrap gap-2">
-            {ENVIRONMENTS.map(env => {
-              const isSelected = envs.includes(env.key)
-              return (
-                <button
-                  key={env.key}
-                  onClick={() => toggleEnv(env.key)}
-                  aria-pressed={isSelected}
-                  className={cn(
-                    'inline-flex h-9 items-center gap-2 rounded-lg border px-5 text-sm font-semibold transition-all duration-[150ms] select-none',
-                    isSelected
-                      ? 'border-[#1450F5] bg-[#1450F5] text-white shadow-sm'
-                      : 'border-[#E4E4E4] bg-white text-[#374151] hover:border-[#1450F5]/40 hover:text-[#1450F5]'
-                  )}
-                >
-                  {env.label}
-                </button>
-              )
-            })}
+      <div className="overflow-hidden rounded-xl border border-[#E9ECEF] bg-white shadow-sm">
+        <div className="flex items-start justify-between border-b border-[#EEF0F3] px-5 py-4 sm:px-6">
+          <div>
+            <h2 className="text-heading text-[15px] font-semibold text-[#111827]">
+              2 &nbsp; Use Case & Components
+            </h2>
+            <p className="mt-1 text-[12px] text-[#8A9BB5]">Choose a component group, then select the exact option.</p>
           </div>
-          <p className="mt-2 text-[12px] text-[#9CA3AF]">{envHint}</p>
+          <button
+            onClick={handleBack}
+            className="text-xs font-medium text-[#9CA3AF] transition-colors duration-[120ms] hover:text-[#6B7280]"
+          >
+            Back
+          </button>
         </div>
 
-        <div>
-          <p className="label-caps mb-4">Which components are needed?</p>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            {KONE_COMPONENTS.map(comp => {
-              const isAvailable = selectableComponents.includes(comp.key)
-              const isSelected = comps.includes(comp.key)
-              const selectedVariant = selectedVariantFor(comp.key, componentAssets)
-              const cardImage = selectedVariant?.imageUrl ?? comp.imageUrl
-              return (
-                <button
-                  key={comp.key}
-                  onClick={() => isAvailable && toggleComp(comp.key)}
-                  aria-pressed={isSelected}
-                  disabled={!isAvailable}
-                  className={cn(
-                    'group relative overflow-hidden rounded-xl border-2 text-left transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1450F5] focus-visible:ring-offset-2',
-                    !isAvailable
-                      ? 'cursor-not-allowed border-[#E9ECEF] opacity-35'
-                      : isSelected
-                        ? 'border-[#1450F5] shadow-md shadow-[#1450F5]/10'
-                        : 'border-[#E9ECEF] hover:border-[#1450F5]/40 hover:shadow-sm'
-                  )}
-                >
-                  <div className="relative aspect-[4/3] overflow-hidden bg-[#F5F6F8]">
-                    {cardImage ? (
-                      <img
-                        src={cardImage}
-                        alt={selectedVariant?.label ?? comp.label}
-                        className={cn(
-                          'h-full w-full object-cover transition-transform duration-300',
-                          !isAvailable ? 'grayscale' : 'group-hover:scale-105'
-                        )}
-                        loading="lazy"
-                      />
-                    ) : (
-                      <div className="h-full w-full bg-[#E9ECEF]" />
-                    )}
-                    {isSelected && <div className="absolute inset-0 bg-[#1450F5]/8" />}
-                    {isSelected && (
-                      <div className="absolute right-2 top-2 flex h-[22px] w-[22px] items-center justify-center rounded-full bg-[#1450F5] shadow-sm">
-                        <Check style={{ width: 12, height: 12, color: '#fff', strokeWidth: 3 }} />
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="px-3 py-2.5">
-                    <p className={cn('text-heading text-[13px] font-semibold leading-tight', isSelected ? 'text-[#1450F5]' : 'text-[#111827]')}>
-                      {comp.label}
-                    </p>
-                    <p className="mt-0.5 truncate text-[11px] leading-tight text-[#9CA3AF]">
-                      {isSelected && selectedVariant ? selectedVariant.label : comp.description}
-                    </p>
-                  </div>
-                </button>
-              )
-            })}
-          </div>
-          {envs.length === 0 ? (
-            <p className="mt-3 text-[12px] text-[#9CA3AF]">Select an environment first to unlock components</p>
-          ) : comps.length === 0 ? (
-            <p className="mt-3 text-[12px] text-[#9CA3AF]">Select at least one component to continue</p>
-          ) : null}
-        </div>
-
-        {activeComp && activeVariants.length > 0 && (
-          <div>
-            <div className="mb-4 flex items-center justify-between gap-3">
-              <p className="label-caps">{componentByKey(activeComp)?.label} options</p>
-              <span className="text-[11px] font-medium text-[#9CA3AF]">{activeVariants.length} available</span>
-            </div>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-              {activeVariants.map(variant => {
-                const isSelected = componentAssets[activeComp] === variant.imageUrl
-                return (
-                  <div
-                    key={variant.id}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => selectVariant(activeComp, variant)}
-                    onKeyDown={event => {
-                      if (event.key === 'Enter' || event.key === ' ') {
-                        event.preventDefault()
-                        selectVariant(activeComp, variant)
-                      }
-                    }}
-                    aria-pressed={isSelected}
-                    className={cn(
-                      'group overflow-hidden rounded-lg border-2 bg-white text-left transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1450F5] focus-visible:ring-offset-2',
-                      isSelected ? 'border-[#1450F5] shadow-md shadow-[#1450F5]/10' : 'border-[#E9ECEF] hover:border-[#1450F5]/40 hover:shadow-sm'
-                    )}
-                  >
-                    <div className="relative aspect-[4/3] bg-[#F5F6F8]">
-                      <img src={variant.imageUrl} alt={variant.label} className="h-full w-full object-contain p-2 transition-transform duration-300 group-hover:scale-[1.03]" loading="lazy" />
-                      <button
-                        type="button"
-                        onClick={event => {
-                          event.stopPropagation()
-                          setPreviewImage({ title: variant.label, subtitle: componentByKey(activeComp)?.label ?? 'Component option', imageUrl: variant.imageUrl })
-                        }}
-                        className="absolute left-2 top-2 flex h-8 w-8 items-center justify-center rounded-full bg-black/65 text-white opacity-0 shadow-sm transition-opacity duration-[120ms] hover:bg-black/80 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-[#1450F5] focus:ring-offset-2 group-hover:opacity-100"
-                        aria-label={'Preview ' + variant.label}
-                        title={'Preview ' + variant.label}
-                      >
-                        <Eye style={{ width: 15, height: 15 }} />
-                      </button>
-                      {isSelected && (
-                        <div className="absolute right-2 top-2 flex h-[22px] w-[22px] items-center justify-center rounded-full bg-[#1450F5] shadow-sm">
-                          <Check style={{ width: 12, height: 12, color: '#fff', strokeWidth: 3 }} />
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex h-[42px] items-center px-3">
-                      <p className={cn('line-clamp-2 text-[12px] font-semibold leading-4', isSelected ? 'text-[#1450F5]' : 'text-[#111827]')}>
-                        {variant.label}
-                      </p>
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )}
-
-        {comps.length > 0 && (
-          <div>
-            <p className="label-caps mb-3">Selected</p>
-            <div className="flex flex-wrap gap-2">
-              {KONE_COMPONENTS.filter(c => comps.includes(c.key)).map(c => {
-                const variant = selectedVariantFor(c.key, componentAssets)
+        <div className="grid min-h-[620px] lg:grid-cols-[300px_minmax(0,1fr)]">
+          <aside className="border-b border-[#EEF0F3] bg-[#FAFBFC] p-4 sm:p-5 lg:border-b-0 lg:border-r">
+            <p className="label-caps mb-3">Where will this be used?</p>
+            <div className="grid grid-cols-2 gap-2">
+              {ENVIRONMENTS.map(env => {
+                const isSelected = envs.includes(env.key)
                 return (
                   <button
-                    key={c.key}
-                    onClick={() => setActiveComp(c.key)}
+                    key={env.key}
+                    onClick={() => toggleEnv(env.key)}
+                    aria-pressed={isSelected}
                     className={cn(
-                      'flex items-center gap-2 rounded-lg border px-3 py-1.5 transition-colors duration-[120ms]',
-                      activeComp === c.key ? 'border-[#1450F5] bg-[#1450F5]/5' : 'border-[#1450F5]/20 bg-white hover:bg-[#1450F5]/5'
+                      'inline-flex h-10 items-center justify-center rounded-lg border text-sm font-semibold transition-all duration-[150ms] select-none',
+                      isSelected
+                        ? 'border-[#1450F5] bg-[#1450F5] text-white shadow-sm'
+                        : 'border-[#E4E4E4] bg-white text-[#374151] hover:border-[#1450F5]/40 hover:text-[#1450F5]'
                     )}
                   >
-                    {variant?.imageUrl && <img src={variant.imageUrl} alt={variant.label} className="h-5 w-5 rounded-sm object-cover" />}
-                    <span className="text-heading text-[12px] font-semibold text-[#1450F5]">{variant?.label ?? c.label}</span>
+                    {env.label}
                   </button>
                 )
               })}
             </div>
-          </div>
-        )}
-      </div>
+            <p className="mt-2 min-h-[32px] text-[12px] leading-4 text-[#8A9BB5]">{envHint}</p>
 
-      <div className="mt-9 flex justify-end">
-        <button
-          onClick={handleContinue}
-          disabled={!canContinue}
-          className="rounded-lg bg-[#1450F5] px-6 text-[13px] font-semibold text-white transition-all duration-[150ms] hover:bg-[#1040D0] hover:shadow-md hover:shadow-[#1450F5]/25 disabled:cursor-not-allowed disabled:opacity-40"
-          style={{ height: 38 }}
-        >
-          Continue
-        </button>
-      </div>
+            <div className="mt-6">
+              <p className="label-caps mb-3">Components</p>
+              <div className="space-y-2">
+                {KONE_COMPONENTS.map(comp => {
+                  const isAvailable = selectableComponents.includes(comp.key)
+                  const isSelected = comps.includes(comp.key)
+                  const isActive = activeComp === comp.key
+                  const selectedVariant = selectedVariantFor(comp.key, componentAssets)
+                  const cardImage = componentThumbnailFor(comp.key)
+                  return (
+                    <button
+                      key={comp.key}
+                      onClick={() => {
+                        if (!isAvailable) return
+                        toggleComp(comp.key)
+                      }}
+                      aria-pressed={isSelected}
+                      disabled={!isAvailable}
+                      className={cn(
+                        'flex min-h-[74px] w-full items-center gap-3 rounded-lg border bg-white p-2 text-left transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1450F5] focus-visible:ring-offset-2',
+                        !isAvailable
+                          ? 'cursor-not-allowed opacity-40'
+                          : isActive
+                            ? 'border-[#1450F5] shadow-sm shadow-[#1450F5]/10'
+                            : 'border-[#E4E7EB] hover:border-[#1450F5]/40',
+                        isSelected && !isActive ? 'border-[#BFD0FF]' : ''
+                      )}
+                    >
+                      <span className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-md bg-[#F1F3F6]">
+                        {cardImage ? (
+                          <img
+                            src={cardImage}
+                            alt={comp.label}
+                            className="h-full w-full object-contain p-1.5"
+                            loading="lazy"
+                            onError={event => {
+                              event.currentTarget.src = componentByKey(comp.key)?.imageUrl ?? `/components/${comp.key}.png`
+                            }}
+                          />
+                        ) : null}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className={cn('block text-[13px] font-semibold leading-4', isSelected ? 'text-[#1450F5]' : 'text-[#111827]')}>
+                          {comp.label}
+                        </span>
+                        <span className="mt-0.5 block truncate text-[11px] text-[#8A9BB5]">
+                          {isSelected && selectedVariant ? selectedVariant.label : isAvailable ? comp.description : 'Unavailable'}
+                        </span>
+                      </span>
+                      {isSelected && (
+                        <span className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-full bg-[#1450F5]">
+                          <Check style={{ width: 12, height: 12, color: '#fff', strokeWidth: 3 }} />
+                        </span>
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+              {envs.length === 0 ? (
+                <p className="mt-3 text-[12px] text-[#9CA3AF]">Select an environment first to unlock components</p>
+              ) : comps.length === 0 ? (
+                <p className="mt-3 text-[12px] text-[#9CA3AF]">Select at least one component to continue</p>
+              ) : null}
+            </div>
+          </aside>
+
+          <section className="flex min-w-0 flex-col">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#EEF0F3] px-4 py-4 sm:px-6">
+              <div>
+                <p className="label-caps">{activeComp ? `${componentByKey(activeComp)?.label} options` : 'Component options'}</p>
+                <p className="mt-1 text-[12px] text-[#8A9BB5]">
+                  {activeComp ? `${filteredActiveVariants.length} of ${activeVariants.length} available` : 'Select a component group to view options'}
+                </p>
+              </div>
+              {activeComp && activeVariants.length > 1 && (
+                <label className="relative order-last w-full sm:order-none sm:ml-auto sm:w-[230px]">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#8A9BB5]" />
+                  <input
+                    value={optionQuery}
+                    onChange={event => setOptionQuery(event.target.value)}
+                    placeholder="Search options"
+                    className="h-9 w-full rounded-lg border border-[#DDE3EA] bg-white pl-9 pr-3 text-[13px] font-medium text-[#111827] outline-none transition-colors duration-150 placeholder:text-[#A7B2C3] focus:border-[#1450F5] focus:ring-2 focus:ring-[#1450F5]/10"
+                  />
+                </label>
+              )}
+              {comps.length > 0 && (
+                <div className="flex max-w-full flex-wrap gap-2">
+                  {KONE_COMPONENTS.filter(c => comps.includes(c.key)).map(c => {
+                    const variant = selectedVariantFor(c.key, componentAssets)
+                    return (
+                      <button
+                        key={c.key}
+                        onClick={() => {
+                          setActiveComp(c.key)
+                          setOptionQuery('')
+                        }}
+                        className={cn(
+                          'flex h-8 max-w-[220px] items-center gap-2 rounded-lg border px-2.5 transition-colors duration-[120ms]',
+                          activeComp === c.key ? 'border-[#1450F5] bg-[#1450F5]/5' : 'border-[#D7E0FF] bg-white hover:bg-[#1450F5]/5'
+                        )}
+                      >
+                        {variant?.imageUrl && <img src={variant.imageUrl} alt={variant.label} className="h-5 w-5 rounded-sm object-cover" />}
+                        <span className="truncate text-[12px] font-semibold text-[#1450F5]">{variant?.label ?? c.label}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+
+            {activeComp && activeVariants.length > 0 ? (
+              filteredActiveVariants.length > 0 ? (
+              <div className={cn(
+                'max-h-none overflow-y-auto p-4 sm:p-5 lg:max-h-[560px]',
+                activeComp === 'ceiling' ? 'grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3' : 'grid grid-cols-3 gap-2 sm:grid-cols-4 xl:grid-cols-5'
+              )}>
+                {filteredActiveVariants.map(variant => {
+                  const isSelected = componentAssets[activeComp] === variant.imageUrl
+                  return (
+                    <div
+                      key={variant.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => selectVariant(activeComp, variant)}
+                      onKeyDown={event => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault()
+                          selectVariant(activeComp, variant)
+                        }
+                      }}
+                      aria-pressed={isSelected}
+                      className={cn(
+                        'group flex flex-col overflow-hidden rounded-lg border-2 bg-white text-left transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1450F5] focus-visible:ring-offset-2',
+                        activeComp === 'ceiling' ? 'h-[188px]' : 'h-[104px]',
+                        isSelected ? 'border-[#1450F5] shadow-md shadow-[#1450F5]/10' : 'border-[#E9ECEF] hover:border-[#1450F5]/40 hover:shadow-sm'
+                      )}
+                    >
+                      <div className={cn(
+                        'relative flex items-center justify-center overflow-hidden bg-[#F5F6F8]',
+                        activeComp === 'ceiling' ? 'h-[158px]' : 'h-[78px]'
+                      )}>
+                        <img src={variant.imageUrl} alt={variant.label} className="max-h-full max-w-full object-contain p-2 transition-transform duration-300 group-hover:scale-[1.03]" loading="lazy" />
+                        <button
+                          type="button"
+                          onClick={event => {
+                            event.stopPropagation()
+                            setPreviewImage({ title: variant.label, subtitle: componentByKey(activeComp)?.label ?? 'Component option', imageUrl: variant.imageUrl })
+                          }}
+                          className="absolute left-2 top-2 flex h-8 w-8 items-center justify-center rounded-full bg-black/65 text-white opacity-0 shadow-sm transition-opacity duration-[120ms] hover:bg-black/80 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-[#1450F5] focus:ring-offset-2 group-hover:opacity-100"
+                          aria-label={'Preview ' + variant.label}
+                          title={'Preview ' + variant.label}
+                        >
+                          <Eye style={{ width: 15, height: 15 }} />
+                        </button>
+                        {isSelected && (
+                          <div className="absolute right-2 top-2 flex h-[22px] w-[22px] items-center justify-center rounded-full bg-[#1450F5] shadow-sm">
+                            <Check style={{ width: 12, height: 12, color: '#fff', strokeWidth: 3 }} />
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex h-6 shrink-0 items-center border-t border-[#E1E6ED] bg-white px-2">
+                        <p className={cn('truncate text-[10px] font-semibold leading-3', isSelected ? 'text-[#1450F5]' : 'text-[#111827]')} title={variant.label}>
+                          {variant.label}
+                        </p>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+              ) : (
+                <div className="flex min-h-[360px] items-center justify-center p-8 text-center">
+                  <div>
+                    <p className="text-heading text-[14px] font-semibold text-[#111827]">No options found</p>
+                    <p className="mt-1 text-[12px] text-[#8A9BB5]">Try a different search term.</p>
+                  </div>
+                </div>
+              )
+            ) : (
+              <div className="flex min-h-[360px] items-center justify-center p-8 text-center">
+                <div>
+                  <p className="text-heading text-[14px] font-semibold text-[#111827]">No component selected</p>
+                  <p className="mt-1 text-[12px] text-[#8A9BB5]">Choose an available component from the left panel.</p>
+                </div>
+              </div>
+            )}
+          </section>
+        </div>
+
+        <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-3 border-t border-[#E9ECEF] bg-white/95 px-5 py-4 backdrop-blur sm:px-6">
+          <p className="text-[12px] font-medium text-[#8A9BB5]">
+            <span className="font-semibold text-[#111827]">{comps.length}</span> selected
+            {comps.length > 0 ? ` for ${envs[0] ?? 'this use case'}` : ''}
+          </p>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleBack}
+              className="h-9 rounded-lg border border-[#E4E4E4] bg-white px-4 text-[13px] font-semibold text-[#374151] transition-colors duration-[120ms] hover:border-[#BFC7D4]"
+            >
+              Back
+            </button>
+            <button
+              onClick={handleContinue}
+              disabled={!canContinue}
+              className="h-9 rounded-lg bg-[#1450F5] px-6 text-[13px] font-semibold text-white transition-all duration-[150ms] hover:bg-[#1040D0] hover:shadow-md hover:shadow-[#1450F5]/25 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Continue
+            </button>
+          </div>
+        </div>
       </div>
     </>
   )
