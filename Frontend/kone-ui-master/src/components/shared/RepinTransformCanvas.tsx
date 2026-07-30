@@ -8,7 +8,9 @@ interface Props {
   componentImageUrl?: string | null
   eraserEnabled?: boolean
   eraserBrushSize?: number
+  previewOnly?: boolean
   onErase?: (maskDataUrl: string) => void
+  onEditStart?: (transform: RepinTransform) => void
   onChange: (transform: RepinTransform) => void
 }
 
@@ -171,7 +173,7 @@ export function repinTransformFromPin(
   return { ...base, points: pointsFromRect(base) }
 }
 
-export function RepinTransformCanvas({ imageUrl, transform, label, componentImageUrl, eraserEnabled = false, eraserBrushSize = 32, onErase, onChange }: Props) {
+export function RepinTransformCanvas({ imageUrl, transform, label, componentImageUrl, eraserEnabled = false, eraserBrushSize = 32, previewOnly = false, onErase, onEditStart, onChange }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const eraserCanvasRef = useRef<HTMLCanvasElement>(null)
   const eraserDrawingRef = useRef(false)
@@ -324,11 +326,12 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
   }
 
   const beginDrag = (event: React.PointerEvent, mode: DragMode) => {
-    if (eraserEnabled) return
+    if (eraserEnabled || previewOnly) return
     const point = pointFromEvent(event)
     if (!point) return
     event.preventDefault()
     event.stopPropagation()
+    onEditStart?.(normalized)
     dragRef.current = { mode, startX: point.x, startY: point.y, start: normalized }
     ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
   }
@@ -414,7 +417,7 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
 
   return (
     <div className="relative w-full overflow-hidden rounded-lg bg-transparent" style={{ aspectRatio: `${imageSize.width} / ${imageSize.height}` }}>
-      <div ref={containerRef} className="relative h-full w-full touch-none select-none" style={{ cursor: eraserEnabled ? ERASER_CURSOR : undefined }}>
+      <div ref={containerRef} className="relative h-full w-full touch-none select-none" style={{ cursor: eraserEnabled ? ERASER_CURSOR : previewOnly ? 'default' : undefined }}>
         {imageUrl ? (
           <img
             src={imageUrl}
@@ -468,6 +471,7 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
           </div>
         ) : null}
 
+        {!previewOnly && (
         <svg className="absolute inset-0 h-full w-full overflow-visible" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label={`${label} perspective quad`}>
           <polygon points={polygonPoints} fill="rgba(20,80,245,0.08)" stroke="white" strokeWidth="0.45" vectorEffect="non-scaling-stroke" />
           <polygon
@@ -480,8 +484,9 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
             onPointerDown={event => beginDrag(event, 'move')}
           />
         </svg>
+        )}
 
-        {eraserEnabled ? (
+        {eraserEnabled && !previewOnly ? (
           <canvas
             ref={eraserCanvasRef}
             className="absolute inset-0 z-20 h-full w-full opacity-35 mix-blend-screen"
@@ -494,14 +499,16 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
           />
         ) : null}
 
+        {!previewOnly && (
         <div
           className="pointer-events-none absolute rounded-[3px] bg-[#0A0A0A]/85 px-1.5 py-0.5 text-[10px] font-medium text-white"
           style={{ left: `${(center.x / imageSize.width) * 100}%`, top: `${(center.y / imageSize.height) * 100}%`, transform: 'translate(-50%, -50%)' }}
         >
           {label}
         </div>
+        )}
 
-        {!eraserEnabled ? (
+        {!eraserEnabled && !previewOnly ? (
           <>
             <button
               type="button"
@@ -532,7 +539,7 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
           </>
         ) : null}
 
-        {!eraserEnabled && points.map((corner, index) => (
+        {!eraserEnabled && !previewOnly && points.map((corner, index) => (
           <button
             key={CORNERS[index].label}
             type="button"

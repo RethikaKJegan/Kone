@@ -1,0 +1,42 @@
+{
+  "engine": "comfy_i2v",
+  "requested_engine": "comfy_i2v",
+  "workflow_path": "/root/Kone/vdotest/workflows/wan22_14b_i2v.json",
+  "patched_workflow": "/root/Kone/vdotest/debug_outputs/_comfy_generation/7ac3d1f4ab0f/patched_workflow.json",
+  "prompt_id": "bd55aa02-eb20-4de7-8cb9-10532faaa353",
+  "input_image": "/root/Kone/vdotest/ComfyUI/input/kone_da0119a06b65_input.png",
+  "output_video": "/root/Kone/vdotest/debug_outputs/exact_old_zoom_seed0.mp4",
+  "comfy_output_video": "/root/Kone/vdotest/ComfyUI/output/kone_i2v_7ac3d1f4ab0f_00001_.mp4",
+  "prompt_key": "lci_right_arc",
+  "prompt": "The scene is completely still and frozen except for a single slow smooth camera push forward. No humans, no people, no figures, no silhouettes, no shadows of any person appear anywhere in this video at any point. No one enters the frame. No one is reflected in the elevator doors. The elevator doors are fully closed and remain completely shut and motionless for the entire 5 seconds. No door movement, no door opening, no door sliding, no door animation of any kind. Only the camera moves, everything else in the scene is completely frozen and static. The zoom is very gradual and ends before any component reaches the edge of the frame. All components visible in the input image \u2014 elevator doors, call panel, buttons, walls, floor, ceiling \u2014 remain fully inside the frame from first frame to last frame. No new objects, panels, text, or signage created. Constant stable indoor lighting, no flickering, no exposure change, no texture shimmer on any surface, photorealistic, temporally consistent, 5 second clip.",
+  "negative_prompt": "cartoon, animation, CGI, 3d render, fake render, warped elevator, distorted doors, bending metal, changing wall panels, duplicated elevator doors, extra panels, flickering display, unreadable display, blurry, low quality, heavy camera shake, fast pan, jump cut, sudden zoom, sudden lighting change, people, watermark, logo, added text, opening elevator doors, closing elevator doors, sliding elevator doors, elevator door motion, moving door panels, cabin reveal, changing elevator door state",
+  "quality": "best",
+  "quality_mode": "best",
+  "width": 720,
+  "height": 960,
+  "length": 81,
+  "fps": 16,
+  "seed": 0,
+  "models": {},
+  "patch_debug": {
+    "patched_nodes": [],
+    "converted_from_ui_workflow": true,
+    "expanded_subgraph": true
+  },
+  "video_validation": {
+    "path": "/root/Kone/vdotest/debug_outputs/exact_old_zoom_seed0.mp4",
+    "engine": "comfy_i2v",
+    "expected_fps": 16,
+    "expected_min_frames": 79,
+    "expected_min_duration_seconds": 4.9375,
+    "min_size_bytes": 100000,
+    "file_size_bytes": 607490,
+    "fps": 16.0,
+    "frame_count": 81,
+    "duration_seconds": 5.0625,
+    "width": 720,
+    "height": 960,
+    "status": "passed"
+  },
+  "video_validation_status": "passed"
+}

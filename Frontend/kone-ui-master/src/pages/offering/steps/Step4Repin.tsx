@@ -67,6 +67,27 @@ function transformWithNumericField(transform: RepinTransform, field: keyof Pick<
   return next
 }
 
+function transformHistoryKey(component: ComponentKey, sourceVersion: number) {
+  return `${component}:${sourceVersion}`
+}
+
+function transformSnapshot(transform: RepinTransform) {
+  return JSON.stringify({
+    x: transform.x,
+    y: transform.y,
+    width: transform.width,
+    height: transform.height,
+    rotation: transform.rotation || 0,
+    skewX: transform.skewX || 0,
+    skewY: transform.skewY || 0,
+    points: transform.points ?? null,
+    sourceVersion: transform.sourceVersion,
+    targetVersion: transform.targetVersion,
+    repinBackgroundUrl: transform.repinBackgroundUrl ?? null,
+    repinBackgroundDisplayUrl: transform.repinBackgroundDisplayUrl ?? null,
+  })
+}
+
 export default function Step4Repin() {
   const { projectId, offeringId } = useParams()
   const navigate = useNavigate()
@@ -86,13 +107,14 @@ export default function Step4Repin() {
   const targetVersion = Math.min(latestVersion + 1, 5)
   const generationLimitReached = latestVersion >= 5
   const [selectedComp, setSelectedComp] = useState<ComponentKey | null>(selectedComponents[0] ?? components[0] ?? null)
-  const selectedPin = pins.find((p: ComponentPin) => p.componentKey === selectedComp)
   const [repinTransforms, setLocalRepinTransforms] = useState<Partial<Record<ComponentKey, RepinTransform>>>(offering?.repinTransforms ?? {})
+  const [transformHistory, setTransformHistory] = useState<Record<string, RepinTransform[]>>({})
   const [feedbackOptions, setFeedbackOptions] = useState<RepinFeedbackOption[]>(['seamless_blending'])
   const [inspectedVersion, setInspectedVersion] = useState<PreviewVersion | null>(null)
   const [canvasConfirmed, setCanvasConfirmed] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [eraserMode, setEraserMode] = useState(false)
+  const [placementPreview, setPlacementPreview] = useState(false)
   const [eraserBrushSize, setEraserBrushSize] = useState(48)
 
   useEffect(() => {
@@ -127,6 +149,7 @@ export default function Step4Repin() {
   useEffect(() => {
     setCanvasConfirmed(false)
     setEraserMode(false)
+    setPlacementPreview(false)
   }, [selectedComp, sourceVersion])
 
   useEffect(() => {
@@ -211,20 +234,30 @@ export default function Step4Repin() {
   const previewImageUrl = useMemo(() => versionUrl(selectedSourcePreview, offering?.outputImageUrl), [selectedSourcePreview, offering?.outputImageUrl])
   const originalImageUrl = offering?.uploadedFileUrl ?? offering?.inputImagePath ?? null
   const sourceVersionComponent = selectedSourcePreview?.transform?.componentKey ?? null
-  const shouldUseOriginalForPlacement = sourceVersion === 1
-  const sourceBaseMode: 'original' | 'version' = shouldUseOriginalForPlacement ? 'original' : 'version'
+  const sourceBaseMode: 'original' | 'version' = sourceVersion === 1 ? 'original' : 'version'
   const defaultTransformFor = (component: ComponentKey) => repinTransformFromPin(component, sourceVersion, targetVersion, pins.find((p: ComponentPin) => p.componentKey === component))
 
   const selectedComponentImageUrl = selectedComp ? componentImageFor(offering, selectedComp) : null
   const transform = selectedComp ? repinTransforms[selectedComp] ?? defaultTransformFor(selectedComp) : null
+  const selectedHistoryKey = selectedComp ? transformHistoryKey(selectedComp, sourceVersion) : null
+  const canUndoGeometry = Boolean(selectedHistoryKey && transformHistory[selectedHistoryKey]?.length)
   const canUndoEraser = Boolean(transform?.eraserHistory && transform.eraserHistory.length > 1)
   const canRedoEraser = Boolean(transform?.eraserRedoStack && transform.eraserRedoStack.length > 0)
-  const baseEditingBackgroundUrl = shouldUseOriginalForPlacement ? (originalImageUrl ?? previewImageUrl) : (previewImageUrl ?? originalImageUrl)
-  const editingBackgroundUrl = transform?.repinBackgroundDisplayUrl ?? transform?.repinBackgroundUrl ?? baseEditingBackgroundUrl
+  const canvasBaseBackgroundUrl = sourceVersion === 1 ? (originalImageUrl ?? previewImageUrl) : (previewImageUrl ?? originalImageUrl)
+  const editingBackgroundUrl = transform?.repinBackgroundDisplayUrl ?? transform?.repinBackgroundUrl ?? canvasBaseBackgroundUrl
 
   const persistTransforms = (nextTransforms: Partial<Record<ComponentKey, RepinTransform>>) => {
     setLocalRepinTransforms(nextTransforms)
     setRepinTransforms(nextTransforms)
+  }
+
+  const rememberTransform = (snapshot: RepinTransform) => {
+    const key = transformHistoryKey(snapshot.componentKey, snapshot.sourceVersion)
+    setTransformHistory(prev => {
+      const history = prev[key] ?? []
+      if (history.length && transformSnapshot(history[history.length - 1]) === transformSnapshot(snapshot)) return prev
+      return { ...prev, [key]: [...history, snapshot] }
+    })
   }
 
   const handleSelectComponent = (component: ComponentKey) => {
@@ -232,12 +265,23 @@ export default function Step4Repin() {
     setSelectedComp(component)
     setInspectedVersion(null)
     setCanvasConfirmed(false)
+    setPlacementPreview(false)
     if (!repinTransforms[component]) {
       persistTransforms({ ...repinTransforms, [component]: nextTransform })
     }
   }
 
+  const handleTransformEditStart = (snapshot: RepinTransform) => {
+    rememberTransform(snapshot)
+  }
+
   const handleTransformChange = (next: RepinTransform) => {
+    const current = repinTransforms[next.componentKey]
+    if (current && transformSnapshot(current) !== transformSnapshot(next)) {
+      rememberTransform(current)
+    }
+    setPlacementPreview(false)
+    setCanvasConfirmed(false)
     persistTransforms({ ...repinTransforms, [next.componentKey]: next })
   }
 
@@ -249,6 +293,7 @@ export default function Step4Repin() {
       persistTransforms({ ...repinTransforms, [selectedComp]: nextTransform })
       setCanvasConfirmed(false)
       setEraserMode(false)
+      setPlacementPreview(false)
       toast('Magic Eraser cleaned the selected area')
     } catch (error) {
       toast(error instanceof Error ? error.message : 'Magic Eraser failed', 'destructive')
@@ -287,12 +332,21 @@ export default function Step4Repin() {
 
   const handleNumericChange = (field: keyof Pick<RepinTransform, 'x' | 'y' | 'width' | 'height' | 'rotation' | 'skewX' | 'skewY'>, value: number) => {
     if (!transform || !selectedComp) return
+    rememberTransform(transform)
+    setCanvasConfirmed(false)
+    setPlacementPreview(false)
     persistTransforms({ ...repinTransforms, [selectedComp]: transformWithNumericField(transform, field, value) })
   }
 
   const handleReset = () => {
-    if (!selectedComp) return
-    persistTransforms({ ...repinTransforms, [selectedComp]: repinTransformFromPin(selectedComp, sourceVersion, targetVersion, selectedPin) })
+    if (!selectedComp || !selectedHistoryKey || !canUndoGeometry) return
+    const history = transformHistory[selectedHistoryKey] ?? []
+    const previousTransform = history[history.length - 1]
+    if (!previousTransform) return
+    setTransformHistory(prev => ({ ...prev, [selectedHistoryKey]: history.slice(0, -1) }))
+    setCanvasConfirmed(false)
+    setPlacementPreview(false)
+    persistTransforms({ ...repinTransforms, [selectedComp]: previousTransform })
   }
 
   const handleConfirmCanvas = () => {
@@ -301,6 +355,7 @@ export default function Step4Repin() {
       persistTransforms({ ...repinTransforms, [selectedComp]: transform })
     }
     setInspectedVersion(null)
+    setPlacementPreview(false)
     setCanvasConfirmed(true)
   }
 
@@ -332,20 +387,24 @@ export default function Step4Repin() {
     toast(`Editing from Version ${version.version}`)
   }
 
-  const handleFeedbackChange = (option: RepinFeedbackOption) => {
-    const nextOptions = feedbackOptions.includes(option)
-      ? feedbackOptions.filter(item => item !== option)
-      : [...feedbackOptions, option]
-    if (!nextOptions.length) {
-      toast('Select at least one   correction.', 'destructive')
-      return
-    }
+  const persistFeedbackOptions = (nextOptions: RepinFeedbackOption[]) => {
     setFeedbackOptions(nextOptions)
     if (!selectedComp || !transform) return
     persistTransforms({
       ...repinTransforms,
-      [selectedComp]: { ...transform, feedbackOption: nextOptions[0], feedbackOptions: nextOptions },
+      [selectedComp]: { ...transform, feedbackOption: nextOptions[0] ?? null, feedbackOptions: nextOptions },
     })
+  }
+
+  const handleFeedbackChange = (option: RepinFeedbackOption) => {
+    const nextOptions = feedbackOptions.includes(option)
+      ? feedbackOptions.filter(item => item !== option)
+      : [...feedbackOptions, option]
+    persistFeedbackOptions(nextOptions)
+  }
+
+  const handleNoFeedback = () => {
+    persistFeedbackOptions([])
   }
 
   const handleGenerate = async () => {
@@ -356,10 +415,6 @@ export default function Step4Repin() {
     }
     if (generationLimitReached) {
       toast('Version limit reached. Choose the best saved version to continue to video.', 'destructive')
-      return
-    }
-    if (!feedbackOptions.length) {
-      toast('Select at least one   correction.', 'destructive')
       return
     }
     const payload = {
@@ -463,9 +518,11 @@ export default function Step4Repin() {
                 transform={transform}
                 label={COMP_LABELS[selectedComp]}
                 componentImageUrl={selectedComponentImageUrl ?? transform.editableLayerUrl ?? null}
-                eraserEnabled={eraserMode}
+                eraserEnabled={eraserMode && !placementPreview}
                 eraserBrushSize={eraserBrushSize}
+                previewOnly={placementPreview}
                 onErase={handleEraseMask}
+                onEditStart={handleTransformEditStart}
                 onChange={handleTransformChange}
               />
             )
@@ -497,7 +554,10 @@ export default function Step4Repin() {
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setEraserMode(value => !value)}
+                  onClick={() => {
+                    setPlacementPreview(false)
+                    setEraserMode(value => !value)
+                  }}
                   disabled={!transform || isProcessing}
                   className={cn(
                     'flex h-8 items-center gap-1.5 rounded-[5px] border px-3 text-xs font-medium transition-colors duration-[120ms] disabled:cursor-not-allowed disabled:opacity-40',
@@ -572,6 +632,10 @@ export default function Step4Repin() {
           {versions.length > 1 && !generationLimitReached && (
             <fieldset className="mt-4 space-y-2 rounded-[6px] border border-[#E4E4E4] p-3">
               <legend className="text-[11px] font-semibold text-[#525252]">Feedback</legend>
+              <label className="flex items-center gap-2 text-xs font-semibold text-[#525252]">
+                <input type="checkbox" checked={feedbackOptions.length === 0} onChange={handleNoFeedback} />
+                No feedback
+              </label>
               {FEEDBACK_OPTIONS.map(option => (
                 <label key={option.value} className="flex items-center gap-2 text-xs text-[#525252]">
                   <input type="checkbox" checked={feedbackOptions.includes(option.value)} onChange={() => handleFeedbackChange(option.value)} />
@@ -583,6 +647,20 @@ export default function Step4Repin() {
 
           <div className="mt-5 flex items-center gap-2">
             <button
+              type="button"
+              onClick={() => {
+                setEraserMode(false)
+                setPlacementPreview(value => !value)
+              }}
+              disabled={!transform || isProcessing || Boolean(inspectedVersion)}
+              className={cn(
+                'flex h-9 items-center gap-1.5 rounded-[5px] border px-3 text-xs font-semibold transition-colors duration-[120ms] disabled:cursor-not-allowed disabled:opacity-40',
+                placementPreview ? 'border-[#DC2626] bg-[#FEE2E2] text-[#B91C1C]' : 'border-[#DC2626] bg-[#DC2626] text-white hover:bg-[#B91C1C]'
+              )}
+            >
+              <Eye style={{ width: 13, height: 13 }} /> {placementPreview ? 'Edit' : 'Preview'}
+            </button>
+            <button
               onClick={handlePrimaryAction}
               disabled={isProcessing || generationLimitReached || !transform}
               className={cn(
@@ -593,7 +671,7 @@ export default function Step4Repin() {
               {canvasConfirmed ? <Wand2 style={{ width: 13, height: 13 }} /> : <Check style={{ width: 13, height: 13 }} />}
               {isProcessing ? 'Generating...' : canvasConfirmed ? 'Generate Preview' : 'Confirm Component '}
             </button>
-            <button onClick={handleReset} disabled={!transform} className="flex h-9 items-center gap-1.5 rounded-[5px] border border-[#E4E4E4] px-3 text-xs font-medium text-[#525252] hover:border-[#A3A3A3] disabled:cursor-not-allowed disabled:opacity-40">
+            <button onClick={handleReset} disabled={!canUndoGeometry} className="flex h-9 items-center gap-1.5 rounded-[5px] border border-[#E4E4E4] px-3 text-xs font-medium text-[#525252] hover:border-[#A3A3A3] disabled:cursor-not-allowed disabled:opacity-40" title="Undo last geometry change">
               <RotateCcw style={{ width: 13, height: 13 }} /> Reset
             </button>
           </div>

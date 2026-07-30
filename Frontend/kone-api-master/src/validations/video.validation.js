@@ -49,7 +49,7 @@ const repinTransform = Joi.object().keys({
   editableLayerPath: Joi.string().allow(null, ''),
   repinBackgroundPath: Joi.string().allow(null, ''),
   feedbackOption: Joi.string().valid('edge_alignment', 'perspective_depth', 'lighting_shadow', 'material_reflections', 'seamless_blending').allow(null),
-  feedbackOptions: Joi.array().items(Joi.string().valid('edge_alignment', 'perspective_depth', 'lighting_shadow', 'material_reflections', 'seamless_blending')).min(1).default(['seamless_blending']),
+  feedbackOptions: Joi.array().items(Joi.string().valid('edge_alignment', 'perspective_depth', 'lighting_shadow', 'material_reflections', 'seamless_blending')).default([]),
   sourceBaseMode: Joi.string().valid('original', 'version').default('version'),
   sourceVersionComponent: Joi.string().valid('ceiling', 'lci', 'door', 'cop').allow(null, ''),
 });
