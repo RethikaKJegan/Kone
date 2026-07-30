@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Check } from 'lucide-react'
+import { Check, Eye } from 'lucide-react'
 import { useOfferingStore } from '../../../store/offeringStore'
 import { KONE_COMPONENTS, ENVIRONMENTS } from '../../../lib/constants'
 import { cn } from '../../../lib/utils'
 import { toast } from '../../../hooks/useToast'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../../components/ui/dialog'
 import type { Environment, ComponentKey, ComponentVariant } from '../../../types'
 
 const ENV_COMPONENTS: Record<Environment, ComponentKey[]> = {
@@ -13,6 +14,7 @@ const ENV_COMPONENTS: Record<Environment, ComponentKey[]> = {
 }
 
 type ComponentAssetMap = Partial<Record<ComponentKey, string>>
+type PreviewImage = { title: string; subtitle: string; imageUrl: string }
 
 function getAvailableComponents(envs: Environment[]): ComponentKey[] {
   if (envs.length === 0) return []
@@ -68,6 +70,7 @@ export default function Step2Components() {
     normalizeAssetMap(initialComponents, currentOffering?.selectedComponentAssets ?? {})
   )
   const [activeComp, setActiveComp] = useState<ComponentKey | null>(initialComponents[0] ?? null)
+  const [previewImage, setPreviewImage] = useState<PreviewImage | null>(null)
 
   useEffect(() => {
     if (currentOffering) {
@@ -154,7 +157,24 @@ export default function Step2Components() {
   const activeVariants = activeComp && comps.includes(activeComp) ? variantsFor(activeComp) : []
 
   return (
-    <div className="rounded-xl border border-[#E9ECEF] bg-white p-8 shadow-sm">
+    <>
+      <Dialog open={Boolean(previewImage)} onOpenChange={open => !open && setPreviewImage(null)}>
+        <DialogContent className="max-w-[min(92vw,920px)] gap-4 p-4 sm:p-5">
+          {previewImage && (
+            <>
+              <DialogHeader className="pr-8">
+                <DialogTitle>{previewImage.title}</DialogTitle>
+                <DialogDescription>{previewImage.subtitle}</DialogDescription>
+              </DialogHeader>
+              <div className="flex max-h-[72vh] items-center justify-center overflow-hidden rounded-lg border border-[#E4E4E4] bg-[#F5F6F8] p-3">
+                <img src={previewImage.imageUrl} alt={previewImage.title} className="max-h-[68vh] w-full object-contain" />
+              </div>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <div className="rounded-xl border border-[#E9ECEF] bg-white p-8 shadow-sm">
       <div className="mb-1 flex items-start justify-between">
         <h2 className="text-heading text-[15px] font-semibold text-[#111827]">
           2 &nbsp; Use Case & Components
@@ -267,9 +287,17 @@ export default function Step2Components() {
               {activeVariants.map(variant => {
                 const isSelected = componentAssets[activeComp] === variant.imageUrl
                 return (
-                  <button
+                  <div
                     key={variant.id}
+                    role="button"
+                    tabIndex={0}
                     onClick={() => selectVariant(activeComp, variant)}
+                    onKeyDown={event => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault()
+                        selectVariant(activeComp, variant)
+                      }
+                    }}
                     aria-pressed={isSelected}
                     className={cn(
                       'group overflow-hidden rounded-lg border-2 bg-white text-left transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1450F5] focus-visible:ring-offset-2',
@@ -278,6 +306,18 @@ export default function Step2Components() {
                   >
                     <div className="relative aspect-[4/3] bg-[#F5F6F8]">
                       <img src={variant.imageUrl} alt={variant.label} className="h-full w-full object-contain p-2 transition-transform duration-300 group-hover:scale-[1.03]" loading="lazy" />
+                      <button
+                        type="button"
+                        onClick={event => {
+                          event.stopPropagation()
+                          setPreviewImage({ title: variant.label, subtitle: componentByKey(activeComp)?.label ?? 'Component option', imageUrl: variant.imageUrl })
+                        }}
+                        className="absolute left-2 top-2 flex h-8 w-8 items-center justify-center rounded-full bg-black/65 text-white opacity-0 shadow-sm transition-opacity duration-[120ms] hover:bg-black/80 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-[#1450F5] focus:ring-offset-2 group-hover:opacity-100"
+                        aria-label={'Preview ' + variant.label}
+                        title={'Preview ' + variant.label}
+                      >
+                        <Eye style={{ width: 15, height: 15 }} />
+                      </button>
                       {isSelected && (
                         <div className="absolute right-2 top-2 flex h-[22px] w-[22px] items-center justify-center rounded-full bg-[#1450F5] shadow-sm">
                           <Check style={{ width: 12, height: 12, color: '#fff', strokeWidth: 3 }} />
@@ -289,7 +329,7 @@ export default function Step2Components() {
                         {variant.label}
                       </p>
                     </div>
-                  </button>
+                  </div>
                 )
               })}
             </div>
@@ -331,6 +371,7 @@ export default function Step2Components() {
           Continue
         </button>
       </div>
-    </div>
+      </div>
+    </>
   )
 }
