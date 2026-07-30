@@ -312,6 +312,23 @@ export default function Step4Repin() {
     setSelectedSourceVersion(version.version)
     setInspectedVersion(null)
     setCanvasConfirmed(false)
+    setEraserMode(false)
+    if (selectedComp) {
+      const nextTargetVersion = Math.min(version.version + 1, 5)
+      const existing = repinTransforms[selectedComp]
+      const nextTransform = {
+        ...(existing ?? defaultTransformFor(selectedComp)),
+        componentKey: selectedComp,
+        componentType: selectedComp,
+        sourceVersion: version.version,
+        targetVersion: nextTargetVersion,
+        repinBackgroundUrl: null,
+        repinBackgroundDisplayUrl: null,
+        eraserHistory: [],
+        eraserRedoStack: [],
+      }
+      persistTransforms({ ...repinTransforms, [selectedComp]: nextTransform })
+    }
     toast(`Editing from Version ${version.version}`)
   }
 
