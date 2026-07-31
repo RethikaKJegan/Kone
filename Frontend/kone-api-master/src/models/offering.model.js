@@ -113,7 +113,7 @@ const offeringSchema = mongoose.Schema(
     },
     videoMotionStyle: {
       type: String,
-      enum: ['zoom-in', 'pan-lr', 'pan-rl', 'door-functionality'],
+      enum: ['zoom-in', 'pan', 'door-functionality'],
       default: 'zoom-in',
     },
     videoSpeed: {

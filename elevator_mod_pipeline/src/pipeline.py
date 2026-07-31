@@ -489,7 +489,7 @@ def _wan22_video_config() -> dict[str, Any]:
     return {
         "engine": "wan2.2",
         "mode": "motion",
-        "motion_style": "pan_l_r",
+        "motion_style": "pan",
         "fps": 16,
         "duration_seconds": 5,
         "wan": {

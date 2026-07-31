@@ -23,8 +23,7 @@ let comfyStartPromise = null;
 
 const VIDEO_PROMPTS = {
   'zoom-in': 'Photorealistic premium commercial video of the exact same elevator scene. Camera motion only: a slow smooth push-in toward the elevator entrance and selected components. The elevator doors stay fully closed and fixed for the entire clip. Preserve exact architecture, wall panels, lighting, reflections, proportions, product placement, and door state. Stable geometry, natural indoor light, realistic commercial camera movement, no people, no added text.',
-  'pan-lr': 'Photorealistic premium commercial video of the exact same elevator scene. Camera motion only: a slow controlled pan from left to right across the elevator entrance. The elevator doors stay fully closed and fixed for the entire clip; no opening, no closing, no sliding door motion, no cabin reveal. Preserve exact geometry, materials, reflections, lighting, wall panels, and product placement. Smooth lateral camera movement, no people, no added text.',
-  'pan-rl': 'Photorealistic premium commercial video of the exact same elevator scene. Camera motion only: a slow controlled pan from right to left across the elevator entrance. The elevator doors stay fully closed and fixed for the entire clip; no opening, no closing, no sliding door motion, no cabin reveal. Preserve exact geometry, materials, reflections, lighting, wall panels, and product placement. Smooth lateral camera movement, no people, no added text.',
+  'pan': 'Photorealistic premium commercial video of the exact same elevator scene. Camera motion only: a slow controlled cinematic pan across the elevator entrance. The elevator doors stay fully closed and fixed for the entire clip; no opening, no closing, no sliding door motion, no cabin reveal. Preserve exact geometry, materials, reflections, lighting, wall panels, and product placement. Smooth lateral camera movement, no people, no added text.',
   'door-functionality': 'Photorealistic premium commercial product demo of the exact same elevator scene showing elevator door functionality. The camera stays locked off and stable while the elevator doors gently open and close once with realistic metal reflections. The surrounding lobby, panels, lighting, and installed components remain stable and unchanged. No people, no added text.',
 };
 
@@ -104,9 +103,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function normalizeVideoMotion(value) {
   const normalized = String(value || '').trim().toLowerCase().replace(/_/g, '-');
   if (normalized === 'door-functionality') return 'door-functionality';
-  if (normalized === 'pan-l-r' || normalized === 'pan-left-right') return 'pan-lr';
-  if (normalized === 'pan-r-l' || normalized === 'pan-right-left') return 'pan-rl';
-  if (['zoom-in', 'pan-lr', 'pan-rl'].includes(normalized)) return normalized;
+  if (['pan', 'pan-lr', 'pan-rl', 'pan-l-r', 'pan-r-l', 'pan-left-right', 'pan-right-left'].includes(normalized)) return 'pan';
+  if (['zoom-in'].includes(normalized)) return normalized;
   return null;
 }
 

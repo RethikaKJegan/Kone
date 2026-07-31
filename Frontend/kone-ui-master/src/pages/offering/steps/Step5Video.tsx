@@ -19,8 +19,10 @@ const ESTIMATED_VIDEO_SECONDS: Record<Quality, number> = {
   '1080p': 900,
 }
 
-function availableMotionStyle(value: MotionStyle | undefined): MotionStyle {
-  return value ?? 'zoom-in'
+function availableMotionStyle(value: string | undefined): MotionStyle {
+  if (value === 'pan-lr' || value === 'pan-rl') return 'pan'
+  if (value === 'pan' || value === 'door-functionality' || value === 'zoom-in') return value
+  return 'zoom-in'
 }
 
 function imageIdFromOffering(offering: Offering | null) {
@@ -397,8 +399,6 @@ export default function Step5Video() {
 
       <style>{`
         @keyframes salesnxt-zoom { from { transform: scale(1); } to { transform: scale(1.3); } }
-        @keyframes salesnxt-pan-lr { from { transform: translateX(-10%); } to { transform: translateX(10%); } }
-        @keyframes salesnxt-pan-rl { from { transform: translateX(10%); } to { transform: translateX(-10%); } }
       `}</style>
     </div>
   )

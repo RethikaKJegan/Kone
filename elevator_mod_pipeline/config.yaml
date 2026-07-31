@@ -159,7 +159,7 @@ refinement:
 video:
   enabled: true
   engine: opencv
-  motion_style: pan_l_r
+  motion_style: pan
   quality: 720p
   quality_mode: best
   duration_seconds: 5

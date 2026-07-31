@@ -17,23 +17,24 @@ ACTION_SECONDS = {"open": 1.25, "close": 1.75}
 MID_HOLD_SECONDS = 0.7
 END_HOLD_SECONDS = 0.9
 LOGGER = logging.getLogger(__name__)
-MOTION_STYLES = {"zoom_in", "pan_l_r", "pan_r_l", "pan_t_b", "pan_b_t"}
+MOTION_STYLES = {"zoom_in", "pan", "pan_l_r", "pan_r_l", "pan_t_b", "pan_b_t"}
 MOTION_STYLE_ALIASES = {
     "zoom": "zoom_in",
     "zoom-in": "zoom_in",
     "zoom_in": "zoom_in",
-    "pan-lr": "pan_l_r",
-    "pan_lr": "pan_l_r",
-    "pan-l-r": "pan_l_r",
-    "pan_l_r": "pan_l_r",
-    "pan-rl": "pan_r_l",
-    "pan_rl": "pan_r_l",
-    "pan-r-l": "pan_r_l",
-    "pan_r_l": "pan_r_l",
-    "left": "pan_r_l",
-    "right": "pan_l_r",
-    "pan_left": "pan_r_l",
-    "pan_right": "pan_l_r",
+    "pan": "pan",
+    "pan-lr": "pan",
+    "pan_lr": "pan",
+    "pan-l-r": "pan",
+    "pan_l_r": "pan",
+    "pan-rl": "pan",
+    "pan_rl": "pan",
+    "pan-r-l": "pan",
+    "pan_r_l": "pan",
+    "left": "pan",
+    "right": "pan",
+    "pan_left": "pan",
+    "pan_right": "pan",
 }
 DOOR_FUNCTIONALITY = {"open", "close"}
 QUALITY_SIZES = {
@@ -501,11 +502,8 @@ def render_motion_style_video(
     motion_style = mode_request["requested_motion_style"]
     if motion_style == "zoom_in":
         LOGGER.info("[VIDEO] Generating centered zoom-in from final output image")
-    elif motion_style == "pan_l_r":
-        LOGGER.info("[VIDEO] Generating panorama pan L-R from final output image")
-        LOGGER.info("[VIDEO] Pan uses crop-window viewport; no blank borders")
-    elif motion_style == "pan_r_l":
-        LOGGER.info("[VIDEO] Generating panorama pan R-L from final output image")
+    elif motion_style in {"pan", "pan_l_r", "pan_r_l"}:
+        LOGGER.info("[VIDEO] Generating panorama pan from final output image")
         LOGGER.info("[VIDEO] Pan uses crop-window viewport; no blank borders")
     elif motion_style == "pan_t_b":
         LOGGER.info("[VIDEO] Generating vertical panorama pan T-B from final output image")
@@ -515,7 +513,7 @@ def render_motion_style_video(
         LOGGER.info("[VIDEO] Pan uses crop-window viewport; no blank borders")
     pan_axis, pan_direction = pan_metadata(motion_style)
     frame_count = max(2, int(round(fps * duration)))
-    if motion_style in {"zoom_in", "pan_l_r", "pan_r_l"}:
+    if motion_style in {"zoom_in", "pan", "pan_l_r", "pan_r_l"}:
         ffmpeg_debug = render_ffmpeg_camera_motion(
             img_rgb,
             Path(image_path),
@@ -596,7 +594,7 @@ def render_ffmpeg_camera_motion(
 
         base = build_ffmpeg_pan_base(img_rgb, target_w, target_h, axis="x", cfg=cfg)
         ease = ffmpeg_smoothstep_expr(frame_count, "n")
-        if motion_style == "pan_l_r":
+        if motion_style in {"pan", "pan_l_r"}:
             x_expr = f"(iw-ow)*({ease})"
         else:
             x_expr = f"(iw-ow)*(1-({ease}))"
@@ -882,7 +880,7 @@ def render_motion_style_frame(
 ) -> np.ndarray:
     if motion_style == "zoom_in":
         return render_zoom_in_frame(img_rgb, target_w, target_h, t)
-    if motion_style in {"pan_l_r", "pan_r_l", "pan_t_b", "pan_b_t"}:
+    if motion_style in {"pan", "pan_l_r", "pan_r_l", "pan_t_b", "pan_b_t"}:
         return render_pan_frame(img_rgb, target_w, target_h, motion_style, t)
     raise ValueError(f"Unsupported motion_style: {motion_style}")
 
@@ -908,11 +906,11 @@ def render_pan_frame(img_rgb: np.ndarray, target_w: int, target_h: int, motion_s
     resized_h = max(target_h + 2, int(round(h * scale)))
     resized = cv2.resize(img_rgb, (resized_w, resized_h), interpolation=cv2.INTER_AREA)
     pan = ease_in_out_cubic(t)
-    if motion_style in {"pan_l_r", "pan_r_l"}:
+    if motion_style in {"pan", "pan_l_r", "pan_r_l"}:
         y1 = int(np.clip(round((resized_h - target_h) * 0.5), 0, max(0, resized_h - target_h)))
         travel = max(0, resized_w - target_w)
-        x_start = 0 if motion_style == "pan_l_r" else travel
-        x_end = travel if motion_style == "pan_l_r" else 0
+        x_start = 0 if motion_style in {"pan", "pan_l_r"} else travel
+        x_end = travel if motion_style in {"pan", "pan_l_r"} else 0
         x1 = int(round(x_start + (x_end - x_start) * pan))
     else:
         x1 = int(np.clip(round((resized_w - target_w) * 0.5), 0, max(0, resized_w - target_w)))
@@ -928,6 +926,7 @@ def render_pan_frame(img_rgb: np.ndarray, target_w: int, target_h: int, motion_s
 
 def pan_metadata(motion_style: str | None) -> tuple[str | None, str | None]:
     return {
+        "pan": ("x", "auto"),
         "pan_l_r": ("x", "left_to_right"),
         "pan_r_l": ("x", "right_to_left"),
         "pan_t_b": ("y", "top_to_bottom"),

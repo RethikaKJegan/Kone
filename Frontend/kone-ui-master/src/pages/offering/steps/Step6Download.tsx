@@ -711,7 +711,7 @@ export default function Step6Download() {
     {
       icon: Video,
       title: 'Video Export',
-      subtitle: `${offering?.videoQuality} · ${offering?.videoMotionStyle === 'zoom-in' ? 'Zoom In' : offering?.videoMotionStyle === 'pan-lr' ? 'Pan L–R' : 'Pan R–L'}`,
+      subtitle: `${offering?.videoQuality} · ${offering?.videoMotionStyle === 'zoom-in' ? 'Zoom In' : offering?.videoMotionStyle === 'door-functionality' ? 'Door Functionality' : 'Pan'}`,
       url: isGuest ? downloadUrl : offering?.outputVideoUrl ?? null,
       file: 'elevator_animation.mp4',
       type: 'video' as const,

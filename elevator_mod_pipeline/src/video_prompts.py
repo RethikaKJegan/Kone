@@ -58,6 +58,7 @@ WAN_PROMPT_ALIASES = {
     "zoom": "lci_right_arc",
     "zoom-in": "lci_right_arc",
     "zoom_in": "lci_right_arc",
+    "pan": "lci_right_arc",
     "pan_l_r": "lci_right_arc",
     "pan-l-r": "lci_right_arc",
     "pan_lr": "lci_right_arc",

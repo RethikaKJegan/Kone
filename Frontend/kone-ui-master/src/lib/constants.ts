@@ -54,9 +54,12 @@ export const KONE_COMPONENTS: ComponentItem[] = [
     key: 'cop',
     label: 'COP',
     description: 'Car Operating Panel',
-    imageUrl: '/components/cop.png',
+    imageUrl: '/components/cop/Flush COP.png',
     variants: [
-      { id: 'cop-default', label: 'COP', imageUrl: '/components/cop.png' },
+      { id: 'flush-cop', label: 'Flush COP', imageUrl: '/components/cop/Flush COP.png' },
+      { id: 'swing-cop', label: 'Swing COP', imageUrl: '/components/cop/Swing COP.png' },
+      { id: 'swing-keypad-cop', label: 'Swing Keypad COP', imageUrl: '/components/cop/Swing Keypad COP.png' },
+      { id: 'swing-emergency-communications-cop', label: 'Swing Emergency Communications COP', imageUrl: '/components/cop/Swing Emergency Communications COP.png' },
     ],
   },
 ]
@@ -79,8 +82,7 @@ export const OPTIONAL_STEPS: OfferingStep[] = [4]
 
 export const VIDEO_MOTION_STYLES = [
   { value: 'zoom-in', label: 'Zoom In' },
-  { value: 'pan-lr', label: 'Pan L–R' },
-  { value: 'pan-rl', label: 'Pan R–L' },
+  { value: 'pan', label: 'Pan' },
   { value: 'door-functionality', label: 'Door Functionality' },
 ] as const
 
