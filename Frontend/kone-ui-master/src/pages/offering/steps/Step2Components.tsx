@@ -340,7 +340,7 @@ export default function Step2Components() {
               filteredActiveVariants.length > 0 ? (
               <div className={cn(
                 'max-h-none overflow-y-auto p-4 sm:p-5 lg:max-h-[560px]',
-                activeComp === 'ceiling' ? 'grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3' : 'grid grid-cols-3 gap-2 sm:grid-cols-4 xl:grid-cols-5'
+                activeComp === 'ceiling' ? 'grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3' : activeComp === 'cop' || activeComp === 'door' ? 'grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3' : 'grid grid-cols-3 gap-2 sm:grid-cols-4 xl:grid-cols-5'
               )}>
                 {filteredActiveVariants.map(variant => {
                   const isSelected = componentAssets[activeComp] === variant.imageUrl
@@ -359,13 +359,13 @@ export default function Step2Components() {
                       aria-pressed={isSelected}
                       className={cn(
                         'group flex flex-col overflow-hidden rounded-lg border-2 bg-white text-left transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1450F5] focus-visible:ring-offset-2',
-                        activeComp === 'ceiling' ? 'h-[188px]' : 'h-[104px]',
+                        activeComp === 'ceiling' ? 'h-[188px]' : activeComp === 'cop' || activeComp === 'door' ? 'h-[232px]' : 'h-[104px]',
                         isSelected ? 'border-[#1450F5] shadow-md shadow-[#1450F5]/10' : 'border-[#E9ECEF] hover:border-[#1450F5]/40 hover:shadow-sm'
                       )}
                     >
                       <div className={cn(
                         'relative flex items-center justify-center overflow-hidden bg-[#F5F6F8]',
-                        activeComp === 'ceiling' ? 'h-[158px]' : 'h-[78px]'
+                        activeComp === 'ceiling' ? 'h-[158px]' : activeComp === 'cop' || activeComp === 'door' ? 'h-[198px]' : 'h-[78px]'
                       )}>
                         <img src={variant.imageUrl} alt={variant.label} className="max-h-full max-w-full object-contain p-2 transition-transform duration-300 group-hover:scale-[1.03]" loading="lazy" />
                         <button

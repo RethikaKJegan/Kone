@@ -13,6 +13,7 @@ export const KONE_COMPONENTS: ComponentItem[] = [
       { id: 'monospace-dx', label: 'MonoSpace DX', imageUrl: '/components/elevator-interior/MonoSpace DX.png' },
       { id: 'monospace-dx1', label: 'MonoSpace DX1', imageUrl: '/components/elevator-interior/MonoSpace DX1.png' },
       { id: 'monospace-dx2', label: 'MonoSpace DX2', imageUrl: '/components/elevator-interior/MonoSpace DX2.png' },
+      { id: 'art-deco', label: 'Art Deco', imageUrl: '/components/elevator-interior/Art Deco.png' },
     ],
   },
   {
@@ -45,9 +46,14 @@ export const KONE_COMPONENTS: ComponentItem[] = [
     key: 'door',
     label: 'Door',
     description: 'KONE door system',
-    imageUrl: '/components/door/Door1.png',
+    imageUrl: '/components/door/Plain Stainless Steel Door.png',
     variants: [
-      { id: 'door-1', label: 'Door 1', imageUrl: '/components/door/Door1.png' },
+      { id: 'plain-stainless-steel-door', label: 'Plain Stainless Steel Door', imageUrl: '/components/door/Plain Stainless Steel Door.png' },
+      { id: 'stainless-steel-door', label: 'Stainless Steel Door', imageUrl: '/components/door/Solid Stainless Steel Door.png' },
+      { id: 'small-vision-glass-door', label: 'Small Vision Glass Door', imageUrl: '/components/door/Small vision glass door .png' },
+      { id: 'half-glass-door', label: 'Half Glass Door', imageUrl: '/components/door/Half glass door.png' },
+      { id: 'framed-full-glass-door', label: 'Framed Full Glass Door', imageUrl: '/components/door/Framed full glass door.png' },
+      { id: 'frameless-full-glass-door', label: 'Frameless Full Glass Door', imageUrl: '/components/door/Frameless full glass door.png' },
     ],
   },
   {

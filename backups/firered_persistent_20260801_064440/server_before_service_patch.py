@@ -65,9 +65,9 @@ def workspace_root() -> Path:
 def selected_component_asset_paths(component_assets: dict[str, str] | None) -> dict[str, str]:
     default_dir = workspace_root() / "Frontend" / "kone-ui-master" / "public" / "components"
     default_files = {
-        "ceiling": default_dir / "elevator-interior" / "Art Deco.png",
+        "ceiling": default_dir / "ceiling.jpg",
         "lci": default_dir / "lci.png",
-        "door": default_dir / "door" / "Plain Stainless Steel Door.png",
+        "door": default_dir / "door.jpg",
         "cop": default_dir / "cop" / "Flush COP.png",
     }
     resolved: dict[str, str] = {}
@@ -809,111 +809,28 @@ def _run_firered_if_available(input_path: Path, output_path: Path, transform: di
         fire_input = output_path.with_name(f"{output_path.stem}_firered_crop_input.png")
         fire_output = output_path.with_name(f"{output_path.stem}_firered_crop_output.png")
         source.crop(crop_box).save(fire_input)
-    firered_prompt = _firered_prompt(transform)
-    firered_steps = int(os.environ.get("FIRERED_STEPS", "36"))
-    firered_cfg = float(os.environ.get("FIRERED_TRUE_CFG_SCALE", "3.8"))
-    service_url = os.environ.get(
-        "FIRERED_SERVICE_URL",
-        "http://127.0.0.1:8010/edit",
-    )
-
-    service_succeeded = False
-
     try:
-        import json
-        import urllib.request
-
-        request_payload = json.dumps(
-            {
-                "image": str(fire_input),
-                "output": str(fire_output),
-                "prompt": firered_prompt,
-                "seed": int(os.environ.get("FIRERED_SEED", "777")),
-                "steps": firered_steps,
-                "true_cfg_scale": firered_cfg,
-                "use_blend_prompt": False,
-            }
-        ).encode("utf-8")
-
-        request = urllib.request.Request(
-            service_url,
-            data=request_payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
+        subprocess.run(
+            [
+                os.environ.get("FIRERED_PYTHON", "/root/Kone/vdotest/ComfyUI/.venv/bin/python"),
+                str(script_path),
+                "--image",
+                str(fire_input),
+                "--prompt",
+                _firered_prompt(transform),
+                "--output",
+                str(fire_output),
+                "--steps",
+                str(os.environ.get("FIRERED_STEPS", "36")),
+                "--true-cfg-scale",
+                str(os.environ.get("FIRERED_TRUE_CFG_SCALE", "3.8")),
+            ],
+            check=True,
+            env=env,
         )
-
-        print(
-            f"[FIRERED] Using persistent service: {service_url}",
-            flush=True,
-        )
-
-        with urllib.request.urlopen(
-            request,
-            timeout=float(
-                os.environ.get("FIRERED_SERVICE_TIMEOUT", "900")
-            ),
-        ) as response:
-            response_body = json.loads(
-                response.read().decode("utf-8")
-            )
-
-        if not response_body.get("ok"):
-            raise RuntimeError(
-                f"Persistent service returned failure: {response_body}"
-            )
-
-        if not fire_output.exists():
-            raise RuntimeError(
-                f"Persistent service did not create output: {fire_output}"
-            )
-
-        print(
-            "[FIRERED] Persistent service completed | "
-            f"inference={response_body.get('inference_seconds')}s | "
-            f"save={response_body.get('save_seconds')}s | "
-            f"total={response_body.get('total_seconds')}s",
-            flush=True,
-        )
-
-        service_succeeded = True
-
-    except Exception as service_exc:
-        print(
-            "[FIRERED] Persistent service unavailable; "
-            f"using subprocess fallback: {service_exc}",
-            file=sys.stderr,
-            flush=True,
-        )
-
-    if not service_succeeded:
-        try:
-            subprocess.run(
-                [
-                    os.environ.get(
-                        "FIRERED_PYTHON",
-                        "/root/Kone/vdotest/ComfyUI/.venv/bin/python",
-                    ),
-                    str(script_path),
-                    "--image",
-                    str(fire_input),
-                    "--prompt",
-                    firered_prompt,
-                    "--output",
-                    str(fire_output),
-                    "--steps",
-                    str(firered_steps),
-                    "--true-cfg-scale",
-                    str(firered_cfg),
-                ],
-                check=True,
-                env=env,
-            )
-        except Exception as exc:
-            print(
-                f"[FIRERED] unavailable or failed: {exc}",
-                file=sys.stderr,
-            )
-            return False
+    except Exception as exc:
+        print(f"[FIRERED] unavailable or failed: {exc}", file=sys.stderr)
+        return False
     if crop_box is not None:
         if not fire_output.exists():
             return False

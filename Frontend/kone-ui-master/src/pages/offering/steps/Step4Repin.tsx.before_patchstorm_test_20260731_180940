@@ -282,12 +282,7 @@ export default function Step4Repin() {
     }
     setPlacementPreview(false)
     setCanvasConfirmed(false)
-    // Keep intermediate canvas movements local so dragging remains smooth
-    // without sending an API request for every pointer movement.
-    setLocalRepinTransforms({
-      ...repinTransforms,
-      [next.componentKey]: next,
-    })
+    persistTransforms({ ...repinTransforms, [next.componentKey]: next })
   }
 
 
@@ -356,13 +351,9 @@ export default function Step4Repin() {
 
   const handleConfirmCanvas = () => {
     if (!selectedComp || !transform) return
-
-    // Persist only the final confirmed transform.
-    persistTransforms({
-      ...repinTransforms,
-      [selectedComp]: transform,
-    })
-
+    if (!repinTransforms[selectedComp]) {
+      persistTransforms({ ...repinTransforms, [selectedComp]: transform })
+    }
     setInspectedVersion(null)
     setPlacementPreview(false)
     setCanvasConfirmed(true)
