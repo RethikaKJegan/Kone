@@ -72,11 +72,20 @@ function localStoragePathFromUrl(url) {
   return resolved.startsWith(STORAGE_ROOT) ? resolved : null;
 }
 
+function hasManualEraserBackground(item = {}) {
+  return Array.isArray(item.eraserHistory) && item.eraserHistory.length > 1;
+}
+
+function isSameComponentReEdit(item = {}) {
+  return item.sourceVersionComponent && item.componentKey && String(item.sourceVersionComponent).toLowerCase() === String(item.componentKey).toLowerCase();
+}
+
 function withLocalRepinFiles(item = {}) {
+  const useRepinBackground = hasManualEraserBackground(item) || isSameComponentReEdit(item);
   return {
     ...item,
     editableLayerPath: item.editableLayerPath || localStoragePathFromUrl(item.editableLayerUrl),
-    repinBackgroundPath: item.repinBackgroundPath || localStoragePathFromUrl(item.repinBackgroundUrl),
+    repinBackgroundPath: useRepinBackground ? (item.repinBackgroundPath || localStoragePathFromUrl(item.repinBackgroundUrl)) : null,
   };
 }
 
@@ -519,8 +528,22 @@ const status = catchAsync(async (req, res) => {
   const root = projectDir(sessionId, projectId);
   const current = await readStatus(root);
   const componentPins = await componentPinsFromPlacement(root, (filePath) => publicStorageUrl(sessionId, projectId, filePath));
+  const publicVersionUrl = (value) => {
+    if (!value || typeof value !== 'string') return value;
+    if (value.startsWith('/storage/') || value.startsWith('/output/') || value.startsWith('http://') || value.startsWith('https://')) return value;
+    return publicStorageUrl(sessionId, projectId, value);
+  };
   const previewVersions = Array.isArray(current.preview_versions)
-    ? current.preview_versions.map((version) => ({ ...version, url: publicStorageUrl(sessionId, projectId, version.url) }))
+    ? current.preview_versions.map((version) => ({
+        ...version,
+        url: publicVersionUrl(version.url),
+        transform: version.transform ? {
+          ...version.transform,
+          editableLayerUrl: publicVersionUrl(version.transform.editableLayerUrl),
+          repinBackgroundUrl: publicVersionUrl(version.transform.repinBackgroundUrl),
+          repinBackgroundDisplayUrl: publicVersionUrl(version.transform.repinBackgroundDisplayUrl),
+        } : version.transform,
+      }))
     : undefined;
   res.send({
     ...current,

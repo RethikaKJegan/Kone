@@ -275,11 +275,17 @@ const localStoragePathFromUrl = (url) => {
   const resolved = path.resolve(storageRoot, pathname.replace('/storage/', ''));
   return resolved.startsWith(storageRoot) ? resolved : null;
 };
-const withLocalRepinFiles = (item = {}) => ({
-  ...item,
-  editableLayerPath: item.editableLayerPath || localStoragePathFromUrl(item.editableLayerUrl),
-  repinBackgroundPath: item.repinBackgroundPath || localStoragePathFromUrl(item.repinBackgroundUrl),
-});
+const hasManualEraserBackground = (item = {}) => Array.isArray(item.eraserHistory) && item.eraserHistory.length > 1;
+const isSameComponentReEdit = (item = {}) => item.sourceVersionComponent && item.componentKey && String(item.sourceVersionComponent).toLowerCase() === String(item.componentKey).toLowerCase();
+
+const withLocalRepinFiles = (item = {}) => {
+  const useRepinBackground = hasManualEraserBackground(item) || isSameComponentReEdit(item);
+  return {
+    ...item,
+    editableLayerPath: item.editableLayerPath || localStoragePathFromUrl(item.editableLayerUrl),
+    repinBackgroundPath: useRepinBackground ? (item.repinBackgroundPath || localStoragePathFromUrl(item.repinBackgroundUrl)) : null,
+  };
+};
 
 const localOutputPathFromUrl = (url) => {
   if (!url || typeof url !== 'string') return null;
@@ -503,11 +509,29 @@ const runLogicRepin = async ({ imageId, userId, transform, transforms = [], comp
   await fsPromises.copyFile(path.join(previewDir, 'final_output.png'), path.join(outputDir, 'final_output.png'));
   const webVersionCreated = await createWebPreview(path.join(outputDir, versionFile), path.join(outputDir, webVersionFile));
   const webCurrentCreated = await createWebPreview(path.join(outputDir, 'final_output.png'), path.join(outputDir, 'final_output_web.jpg'));
+  const publicLogicUrl = (value) => {
+    if (!value || typeof value !== 'string') return value;
+    if (value.startsWith('/storage/') || value.startsWith('/output/') || value.startsWith('http://') || value.startsWith('https://')) return value;
+    return storagePublicUrl(path.join(storageDir, value));
+  };
+  const logicPreviewVersion = Array.isArray(data.preview_versions)
+    ? data.preview_versions.find((version) => Number(version.version) === Number(logicTransform.targetVersion))
+    : null;
+  const logicTransformResult = logicPreviewVersion?.transform
+    ? {
+        ...logicPreviewVersion.transform,
+        editableLayerUrl: publicLogicUrl(logicPreviewVersion.transform.editableLayerUrl),
+        repinBackgroundUrl: publicLogicUrl(logicPreviewVersion.transform.repinBackgroundUrl),
+        repinBackgroundDisplayUrl: publicLogicUrl(logicPreviewVersion.transform.repinBackgroundDisplayUrl),
+      }
+    : null;
+
   return {
     storageDir,
     previewUrl: webVersionCreated ? `/output/${imageId}/${webVersionFile}` : `/output/${imageId}/${versionFile}`,
     currentPreviewUrl: webCurrentCreated ? `/output/${imageId}/final_output_web.jpg` : `/output/${imageId}/final_output.png`,
     fullPreviewUrl: `/output/${imageId}/${versionFile}`,
+    transform: logicTransformResult,
     pins: await componentPinsFromPlacement(storageDir),
   };
 };
@@ -528,7 +552,7 @@ const startRepinRun = ({ offeringId, imageId, userId, transform, transforms = []
         version: Number(transform.targetVersion),
         url: versionUrl,
         sourceVersion: Number(transform.sourceVersion),
-        transform,
+        transform: placement.transform || transform,
         feedbackOption: transform.feedbackOption || null,
         feedbackOptions: Array.isArray(transform.feedbackOptions) ? transform.feedbackOptions : (transform.feedbackOption ? [transform.feedbackOption] : []),
         createdAt: new Date(),
@@ -686,7 +710,7 @@ const VIDEO_PROMPTS = {
   'zoom-in':'A clearly visible continuous camera push forward toward the elevator for the entire 5-second clip. The camera begins at the exact viewpoint shown in the input image and steadily moves closer, ending noticeably closer than it started. The elevator doors and call panel become progressively larger in the frame from the first frame to the last frame, with realistic perspective change and gentle natural parallax. The forward camera movement must begin immediately in the first second, remain visible throughout the clip, and finish with a smooth slowdown. This is physical forward camera movement, not an abrupt digital zoom. Keep the elevator centered and preserve the original architectural layout, wall textures, call panel, buttons, floor, ceiling, signage, lighting, and reflections. The elevator doors remain fully closed, rigid, and motionless. No door opening or door movement. No people and no new objects, panels, text, buttons, or signs. No sideways pan, orbit, backward movement, or vertical movement. Stable indoor lighting, smooth cinematic motion, photorealistic, temporally consistent, 5-second clip.',
 
 
-  'pan': 'A clearly visible slow cinematic camera arc toward the existing elevator LCI call panel for the entire 5-second clip. First identify which side of the elevator contains the real LCI panel in the input image. If the LCI is on the right side, smoothly move and arc the camera toward the right. If the LCI is on the left side, smoothly move and arc the camera toward the left. The movement must begin during the first second and continue steadily throughout the clip, ending noticeably closer to the LCI side than it started. Follow a gentle shallow curved path with realistic lateral parallax while maintaining a comfortable distance from the wall. Keep both the elevator doors or visible elevator interior and the LCI panel clearly visible in the frame from beginning to end. The LCI becomes slightly more prominent, but do not move so close that it becomes a close-up or causes the elevator to leave the frame. The camera gently turns toward the elevator and LCI while moving, then slows smoothly at the end. This is camera movement only. Preserve the exact elevator, LCI panel, buttons, walls, floor, ceiling, signage, lighting, reflections, textures, and architectural geometry from the input image. The elevator doors retain their original state and remain completely motionless. No people and no new panels, displays, buttons, signs, text, objects, or architectural details. No movement away from the LCI, no movement toward the opposite wall, no abrupt zoom, no vertical movement, no camera shake, and no door movement. Smooth realistic arc movement, natural perspective change, photorealistic, temporally consistent, 5-second clip.',
+  'pan': 'A clearly visible slow cinematic camera arc toward the existing elevator LCI call panel for the entire 5-second clip. First identify which side of the elevator contains the real LCI panel in the input image. If the LCI is on the right side, smoothly move and arc the camera toward the right. If the LCI is on the left side, smoothly move and arc the camera toward the left. The movement must begin during the first second and continue steadily throughout the clip, ending noticeably closer to the LCI side than it started. Follow a gentle shallow curved path with realistic lateral parallax while maintaining a comfortable distance from the wall. The LCI becomes slightly more prominent, but do not move so close that it becomes a close-up or causes the elevator to leave the frame. The camera gently turns toward the elevator and LCI while moving, then slows smoothly at the end. This is camera movement only. Preserve the exact elevator, LCI panel, buttons, walls, floor, ceiling, signage, lighting, reflections, textures, and architectural geometry from the input image.   No movement away from the LCI, no movement toward the opposite wall, no abrupt zoom, no vertical movement, no camera shake, and no door movement. Smooth realistic arc movement, natural perspective change, photorealistic, temporally consistent, 5-second clip.',
 
   'door-functionality': 'The elevator doors perform a single smooth realistic action. If the doors are closed in the input image they slide open from center to fully open revealing the elevator interior. If the doors are open in the input image they slide closed from sides to fully shut. Camera position is completely fixed and does not move at all. All existing components — call panel, buttons, walls, floor, ceiling, lighting — remain exactly in place and unchanged. No new objects, panels, text, logos, or signage are created. Realistic metal door sliding mechanics, natural consistent reflections on stainless steel, constant stable indoor lighting, no flickering, no exposure change, no texture shimmer on any surface, photorealistic, temporally consistent, 5 second clip.'
 };

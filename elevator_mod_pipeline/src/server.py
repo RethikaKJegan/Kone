@@ -131,6 +131,41 @@ def _source_image_for_repin(storage: Path, preview_dir: Path, source_version: in
 
 
 
+def _restore_original_repin_footprint(base_image: Image.Image, storage: Path, transform: dict[str, Any]) -> Image.Image:
+    original_path = storage / "uploads" / "input.jpg"
+    original_bbox = transform.get("originalBbox")
+    if not original_path.exists() or not isinstance(original_bbox, list) or len(original_bbox) != 4:
+        return base_image
+
+    try:
+        bbox_values = [float(value) for value in original_bbox]
+    except (TypeError, ValueError):
+        return base_image
+
+    original_image = Image.open(original_path).convert("RGB")
+    if original_image.size != base_image.size:
+        original_image = original_image.resize(base_image.size, Image.Resampling.LANCZOS)
+
+    width, height = base_image.size
+    source_width = _clamp_float(transform.get("originalImageWidth"), width)
+    source_height = _clamp_float(transform.get("originalImageHeight"), height)
+    scale_x = width / max(1.0, source_width)
+    scale_y = height / max(1.0, source_height)
+
+    x1 = max(0, min(width - 1, int(np.floor(bbox_values[0] * scale_x))))
+    y1 = max(0, min(height - 1, int(np.floor(bbox_values[1] * scale_y))))
+    x2 = max(x1 + 1, min(width, int(np.ceil(bbox_values[2] * scale_x))))
+    y2 = max(y1 + 1, min(height, int(np.ceil(bbox_values[3] * scale_y))))
+
+    result = base_image.convert("RGB")
+    patch = original_image.crop((x1, y1, x2, y2))
+    mask = Image.new("L", patch.size, 255)
+    if min(patch.size) > 8:
+        mask = mask.filter(ImageFilter.GaussianBlur(radius=max(1, min(patch.size) // 80)))
+    result.paste(patch, (x1, y1), mask)
+    return result
+
+
 def _clamp_float(value: Any, default: float = 0.0) -> float:
     try:
         if value is None:
@@ -208,12 +243,12 @@ def _transform_box_px(transform: dict[str, Any], image_size: tuple[int, int]) ->
 
 def _component_image_for_transform(transform: dict[str, Any], component_assets: dict[str, str] | None) -> Path:
     component_key = str(transform.get("componentKey") or transform.get("componentType") or "component").lower()
-    asset_path = selected_component_asset_paths(component_assets).get(component_key)
-    if asset_path and Path(asset_path).exists():
-        return Path(asset_path)
     editable_layer = transform.get("editableLayerPath")
     if editable_layer and Path(str(editable_layer)).exists():
         return Path(str(editable_layer))
+    asset_path = selected_component_asset_paths(component_assets).get(component_key)
+    if asset_path and Path(asset_path).exists():
+        return Path(asset_path)
     raise ValueError(
         f"Repin requires an editable layer or component asset for {component_key}. "
         "Regenerate the automatic preview once so the selected component can be repinned directly."
@@ -945,6 +980,29 @@ def _run_firered_if_available(input_path: Path, output_path: Path, transform: di
     return output_path.exists()
 
 
+def _save_firered_editable_layer(output_path: Path, layer_path: Path, component_mask: Image.Image | None, bbox: list[int] | tuple[int, int, int, int] | None) -> bool:
+    if component_mask is None or bbox is None or not output_path.exists():
+        return False
+    x1, y1, x2, y2 = [int(value) for value in bbox]
+    if x2 <= x1 or y2 <= y1:
+        return False
+    final_image = Image.open(output_path).convert("RGBA")
+    alpha = component_mask.convert("L")
+    if alpha.size != final_image.size:
+        alpha = alpha.resize(final_image.size, Image.Resampling.LANCZOS)
+    x1 = max(0, min(final_image.width, x1))
+    y1 = max(0, min(final_image.height, y1))
+    x2 = max(0, min(final_image.width, x2))
+    y2 = max(0, min(final_image.height, y2))
+    if x2 <= x1 or y2 <= y1:
+        return False
+    layer = final_image.crop((x1, y1, x2, y2))
+    layer.putalpha(alpha.crop((x1, y1, x2, y2)))
+    layer_path.parent.mkdir(parents=True, exist_ok=True)
+    layer.save(layer_path)
+    return True
+
+
 def public_status(status: str, error: Any = None) -> dict[str, Any]:
     return {
         "status": status,
@@ -1101,6 +1159,7 @@ def repin_components(payload: ProjectPayload):
 
         transforms = [target_transform]
         placed_image = Image.open(source_image_path).convert("RGB")
+        placed_image = _restore_original_repin_footprint(placed_image, storage, target_transform)
         placements = []
         component_masks = []
         for transform in transforms:
@@ -1153,6 +1212,14 @@ def repin_components(payload: ProjectPayload):
         used_firered = _run_firered_if_available(placed_path, output_path, target_transform, target_bbox, target_mask)
         if not used_firered:
             placed_image.save(output_path)
+        editable_layer_url = target_transform.get("editableLayerUrl")
+        if used_firered and target_bbox is not None and target_mask is not None:
+            editable_layer_name = f"repin_v{target_version}_{target_key or 'component'}_editable_layer.png"
+            editable_layer_path = preview_dir / editable_layer_name
+            if _save_firered_editable_layer(output_path, editable_layer_path, target_mask, target_bbox):
+                editable_layer_url = f"preview/{editable_layer_name}"
+                target_transform = {**target_transform, "editableLayerUrl": editable_layer_url}
+                transforms = [target_transform]
         shutil.copy2(output_path, preview_dir / "final_output.png")
 
         for placement in placements:

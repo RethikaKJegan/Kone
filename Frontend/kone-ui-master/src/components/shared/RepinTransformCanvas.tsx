@@ -6,6 +6,7 @@ interface Props {
   transform: RepinTransform
   label: string
   componentImageUrl?: string | null
+  staticLayers?: { transform: RepinTransform; label: string; componentImageUrl: string | null }[]
   eraserEnabled?: boolean
   eraserBrushSize?: number
   previewOnly?: boolean
@@ -137,6 +138,9 @@ export function repinTransformFromPin(
       coordinateSpace: 'pixels' as const,
       imageWidth: imageSize.width,
       imageHeight: imageSize.height,
+      originalBbox: pin.bbox,
+      originalImageWidth: sourceWidth,
+      originalImageHeight: sourceHeight,
       editableLayerUrl: pin.editableLayerUrl ?? null,
       repinBackgroundUrl: pin.repinBackgroundUrl ?? null,
       repinBackgroundDisplayUrl: pin.repinBackgroundDisplayUrl ?? pin.repinBackgroundUrl ?? null,
@@ -165,6 +169,9 @@ export function repinTransformFromPin(
     coordinateSpace: 'pixels' as const,
     imageWidth: imageSize.width,
     imageHeight: imageSize.height,
+    originalBbox: pin?.bbox ?? null,
+    originalImageWidth: pin?.imageWidth ?? null,
+    originalImageHeight: pin?.imageHeight ?? null,
     editableLayerUrl: pin?.editableLayerUrl ?? null,
     repinBackgroundUrl: pin?.repinBackgroundUrl ?? null,
     repinBackgroundDisplayUrl: pin?.repinBackgroundDisplayUrl ?? pin?.repinBackgroundUrl ?? null,
@@ -173,7 +180,28 @@ export function repinTransformFromPin(
   return { ...base, points: pointsFromRect(base) }
 }
 
-export function RepinTransformCanvas({ imageUrl, transform, label, componentImageUrl, eraserEnabled = false, eraserBrushSize = 32, previewOnly = false, onErase, onEditStart, onChange }: Props) {
+function layerBox(transform: RepinTransform, imageSize: { width: number; height: number }) {
+  const scaleX = imageSize.width / Math.max(1, transform.imageWidth || imageSize.width)
+  const scaleY = imageSize.height / Math.max(1, transform.imageHeight || imageSize.height)
+  const points = validQuadPoints(transform.points)
+    ? transform.points.map(point => ({ x: round(point.x * scaleX), y: round(point.y * scaleY) })) as QuadPoints
+    : pointsFromRect({
+      x: round(transform.x * scaleX),
+      y: round(transform.y * scaleY),
+      width: round(transform.width * scaleX),
+      height: round(transform.height * scaleY),
+    })
+  const clampedPoints = clampPoints(points, imageSize)
+  const bbox = boundingBoxFromPoints(clampedPoints, imageSize)
+  const relativePolygon = clampedPoints.map(point => {
+    const x = bbox.width > 0 ? ((point.x - bbox.x) / bbox.width) * 100 : 0
+    const y = bbox.height > 0 ? ((point.y - bbox.y) / bbox.height) * 100 : 0
+    return String(round(x)) + '% ' + String(round(y)) + '%'
+  }).join(', ')
+  return { bbox, relativePolygon }
+}
+
+export function RepinTransformCanvas({ imageUrl, transform, label, componentImageUrl, staticLayers = [], eraserEnabled = false, eraserBrushSize = 32, previewOnly = false, onErase, onEditStart, onChange }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const eraserCanvasRef = useRef<HTMLCanvasElement>(null)
   const eraserDrawingRef = useRef(false)
@@ -455,6 +483,26 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
             }}
           />
         ) : <div className="h-full w-full bg-[#1A1A1A]" />}
+
+        {staticLayers.map(layer => {
+          if (!layer.componentImageUrl) return null
+          const box = layerBox(layer.transform, imageSize)
+          return (
+            <div
+              key={layer.transform.componentKey + ":" + layer.label}
+              className="pointer-events-none absolute overflow-hidden"
+              style={{
+                left: String((box.bbox.x / imageSize.width) * 100) + "%",
+                top: String((box.bbox.y / imageSize.height) * 100) + "%",
+                width: String((box.bbox.width / imageSize.width) * 100) + "%",
+                height: String((box.bbox.height / imageSize.height) * 100) + "%",
+                clipPath: "polygon(" + box.relativePolygon + ")",
+              }}
+            >
+              <img src={layer.componentImageUrl} alt={layer.label} className="h-full w-full object-fill" draggable={false} />
+            </div>
+          )
+        })}
 
         {componentImageUrl ? (
           <div

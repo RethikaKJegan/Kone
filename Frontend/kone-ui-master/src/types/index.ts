@@ -79,6 +79,9 @@ export interface RepinTransform {
   coordinateSpace?: 'pixels' | 'percent'
   imageWidth?: number
   imageHeight?: number
+  originalBbox?: [number, number, number, number] | null
+  originalImageWidth?: number | null
+  originalImageHeight?: number | null
   editableLayerUrl?: string | null
   repinBackgroundUrl?: string | null
   repinBackgroundDisplayUrl?: string | null
