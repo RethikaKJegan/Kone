@@ -236,13 +236,15 @@ def inpaint_background(image_path: str | Path, mask: np.ndarray, cfg: dict[str, 
     if engine == "auto":
         engine = cfg["inpainting"]["engine"].lower()
     used_main2_lama = False
+    print(f"[INPAINT] start engine={engine} image={image_path} out={out_path} mask_pixels={int(np.count_nonzero(mask))}", flush=True)
     if engine == "wall_patch":
         result = _wall_patch_cleanup(image, mask, cfg)
     elif engine == "lama":
         try:
             result = _run_lama(image, mask, cfg)
             used_main2_lama = True
-        except Exception:
+        except Exception as exc:
+            print(f"[INPAINT] lama_failed error={exc}", flush=True)
             if not cfg["inpainting"].get("fallback_to_opencv", True):
                 raise
             result = _track_patch_cleanup(image, mask, cfg) if _is_floor_track_cleanup(cfg) else _wall_patch_cleanup(image, mask, cfg)
@@ -251,6 +253,7 @@ def inpaint_background(image_path: str | Path, mask: np.ndarray, cfg: dict[str, 
     if not used_main2_lama:
         result = _masked_replace(image, result, mask, int(cfg["removal"].get("cleanup_feather_px", 2)))
     save_rgb(out_path, result)
+    print(f"[INPAINT] done used_lama={used_main2_lama} out={out_path}", flush=True)
     return result
 
 

@@ -99,7 +99,7 @@ class EditRequest(BaseModel):
     prompt: str
 
     seed: int = 777
-    steps: int = Field(default=36, ge=1, le=100)
+    steps: int = Field(default=30, ge=1, le=100)
     true_cfg_scale: float = Field(default=3.8, gt=0)
 
     use_blend_prompt: bool = False

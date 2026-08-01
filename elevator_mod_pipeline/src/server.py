@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -1267,20 +1268,27 @@ def repin_erase(payload: ProjectPayload):
     pipeline_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+        run_id = time.time_ns()
+        warnings.simplefilter("always", FutureWarning)
+        warnings.simplefilter("always", UserWarning)
         transform = payload.transform or {}
         source_version = int(payload.source_version or transform.get("sourceVersion") or 1)
         source_base_mode = str(payload.source_base_mode or transform.get("sourceBaseMode") or "version").lower()
+        component_key = str(transform.get("componentKey") or transform.get("componentType") or "component").lower()
+        print(f"[REPIN_ERASE] start run_id={run_id} component={component_key} source_version={source_version} source_base_mode={source_base_mode}", flush=True)
         repin_background_path = transform.get("repinBackgroundPath")
         if repin_background_path and Path(str(repin_background_path)).exists():
             source_image_path = Path(str(repin_background_path))
         else:
             source_image_path = _source_image_for_repin(storage, preview_dir, source_version, source_base_mode)
         source_image = Image.open(source_image_path).convert("RGB")
+        print(f"[REPIN_ERASE] source run_id={run_id} path={source_image_path}", flush=True)
         mask = _decode_mask_data_url(payload.mask_data_url or "", source_image.size)
         mask = cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=1)
+        print(f"[REPIN_ERASE] mask run_id={run_id} pixels={int(np.count_nonzero(mask))} size={source_image.size}", flush=True)
 
-        mask_path = pipeline_dir / f"repin_erase_mask_v{source_version}_{int(time.time())}.png"
-        output_path = preview_dir / f"repin_erased_v{source_version}_{int(time.time())}.png"
+        mask_path = pipeline_dir / f"repin_erase_mask_v{source_version}_{run_id}.png"
+        output_path = preview_dir / f"repin_erased_v{source_version}_{run_id}.png"
         cv2.imwrite(str(mask_path), mask)
 
         repo_path = str(repo_root())
@@ -1296,7 +1304,9 @@ def repin_erase(payload: ProjectPayload):
         cfg.setdefault("removal", {})
         cfg["inpainting"]["engine"] = cfg["inpainting"].get("engine") or "lama"
         cfg["inpainting"]["fallback_to_opencv"] = True
+        print(f"[REPIN_ERASE] inpaint run_id={run_id} output={output_path}", flush=True)
         inpaint_background(source_image_path, mask, cfg, output_path)
+        print(f"[REPIN_ERASE] done run_id={run_id} output={output_path}", flush=True)
 
         status = public_status("preview_ready")
         status.update({
@@ -1314,6 +1324,7 @@ def repin_erase(payload: ProjectPayload):
             "mask_url": status["repin_erase_mask_url"],
         }
     except Exception as exc:
+        print(f"[REPIN_ERASE] failed error={exc}", flush=True)
         write_status(payload.storage_dir, public_status("failed", str(exc)))
         return {"ok": False, "status": "failed", "error": str(exc)}
 

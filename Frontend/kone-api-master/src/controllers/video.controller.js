@@ -279,7 +279,7 @@ const hasManualEraserBackground = (item = {}) => Array.isArray(item.eraserHistor
 const isSameComponentReEdit = (item = {}) => item.sourceVersionComponent && item.componentKey && String(item.sourceVersionComponent).toLowerCase() === String(item.componentKey).toLowerCase();
 
 const withLocalRepinFiles = (item = {}) => {
-  const useRepinBackground = hasManualEraserBackground(item) || isSameComponentReEdit(item);
+  const useRepinBackground = Boolean(item.repinBackgroundPath || item.repinBackgroundUrl) || hasManualEraserBackground(item) || isSameComponentReEdit(item);
   return {
     ...item,
     editableLayerPath: item.editableLayerPath || localStoragePathFromUrl(item.editableLayerUrl),

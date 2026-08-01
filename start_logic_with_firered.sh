@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -e
+
+echo "Starting persistent FireRed service on GPU 1..."
+
+cd /root/Kone
+
+CUDA_VISIBLE_DEVICES=1 \
+FIRERED_IMAGE_EDIT_SCRIPT=/root/Kone/fire_red_image_edit.py \
+FIRERED_MODEL_PATH=/root/Kone/models/FireRed-Image-Edit-1.1 \
+HF_HOME=/root/Kone/firered_hf_cache \
+HF_HUB_CACHE=/root/Kone/firered_hf_cache/hub \
+HF_HUB_OFFLINE=1 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+/root/Kone/firered_venv/bin/python -m uvicorn \
+  firered_service:app \
+  --host 127.0.0.1 \
+  --port 8010 \
+  --workers 1 \
+  > /root/Kone/firered_service.log 2>&1 &
+
+FIRERED_PID=$!
+
+cleanup() {
+  echo
+  echo "Stopping persistent FireRed service..."
+  kill "$FIRERED_PID" 2>/dev/null || true
+}
+
+trap cleanup EXIT INT TERM
+
+echo "Waiting for FireRed service..."
+
+for i in $(seq 1 120); do
+  if curl -fsS http://127.0.0.1:8010/health >/dev/null 2>&1; then
+    echo "FireRed service is ready."
+    break
+  fi
+
+  if ! kill -0 "$FIRERED_PID" 2>/dev/null; then
+    echo "FireRed service failed to start."
+    tail -n 100 /root/Kone/firered_service.log
+    exit 1
+  fi
+
+  sleep 1
+done
+
+if ! curl -fsS http://127.0.0.1:8010/health >/dev/null 2>&1; then
+  echo "FireRed service did not become ready."
+  tail -n 100 /root/Kone/firered_service.log
+  exit 1
+fi
+
+echo "Starting main logic server on GPU 0..."
+
+cd /root/Kone/elevator_mod_pipeline/src
+
+export FIRERED_PYTHON=/root/Kone/firered_venv/bin/python
+export FIRERED_REPIN_SCRIPT=/root/Kone/fire_red_image_edit.py
+export FIRERED_CUDA_VISIBLE_DEVICES=1
+export FIRERED_SERVICE_URL=http://127.0.0.1:8010/edit
+export FIRERED_SERVICE_TIMEOUT=900
+export FIRERED_FACE_STRENGTH=0.25
+export FIRERED_SHADOW_STRENGTH=0.60
+export FIRERED_RING_WIDTH=11
+export FIRERED_RING_BLUR=2.5
+export FIRERED_STEPS=30
+export FIRERED_TRUE_CFG_SCALE=1.8
+export REPIN_ERASER_ENGINE=lama
+
+export HF_HOME=/root/Kone/firered_hf_cache
+export HF_HUB_CACHE=/root/Kone/firered_hf_cache/hub
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export TOKENIZERS_PARALLELISM=false
+export CUDA_VISIBLE_DEVICES=0
+export PYTHONUNBUFFERED=1
+
+PYTHONPATH=/root/Kone/elevator_mod_pipeline/src:/root/Kone:/root/Kone/GroundingDINO:/root/Kone/sam2_src:/root/Kone/lama \
+python3 -m uvicorn server:app \
+  --host 0.0.0.0 \
+  --port 8001

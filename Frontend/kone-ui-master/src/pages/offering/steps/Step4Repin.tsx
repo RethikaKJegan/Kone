@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Check, ChevronDown, Eraser, Eye, Redo2, RotateCcw, Undo2, Wand2 } from 'lucide-react'
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Eraser, Eye, Redo2, RotateCcw, Undo2, Wand2 } from 'lucide-react'
 import apiClient from '../../../api/client'
 import { getGuestSessionId, isGuestSession } from '../../../api/guestWorkflow'
 import { useOfferingStore } from '../../../store/offeringStore'
@@ -267,11 +267,30 @@ export default function Step4Repin() {
   const isSameComponentReEdit = Boolean(selectedComp && sourceVersion > 1 && sourceVersionComponent === selectedComp)
   const canvasBaseBackgroundUrl = sourceVersion > 1 || selectedComp === 'door' ? (previewImageUrl ?? originalImageUrl) : (originalImageUrl ?? previewImageUrl)
   const hasGeneratedRepinBackground = sourceVersion > 1
-  const editingBackgroundUrl = isSameComponentReEdit
-    ? (repinBackgroundForEditing(transform, true) ?? canvasBaseBackgroundUrl)
+  const sameComponentSourcePreview = isSameComponentReEdit && selectedSourcePreview?.sourceVersion
+    ? versions.find(item => Number(item.version) === Number(selectedSourcePreview.sourceVersion))
+    : null
+  const sameComponentSourceBackgroundUrl = sameComponentSourcePreview
+    ? versionUrl(sameComponentSourcePreview, originalImageUrl)
+    : null
+  const manualEraserBackgroundUrl = hasManualEraserBackground(transform)
+    ? transform?.repinBackgroundDisplayUrl ?? transform?.repinBackgroundUrl ?? null
+    : null
+  const editingBackgroundUrl = manualEraserBackgroundUrl ?? (isSameComponentReEdit
+    ? (sameComponentSourceBackgroundUrl ?? repinBackgroundForEditing(transform, true) ?? canvasBaseBackgroundUrl)
     : sourceVersion > 1 || selectedComp === 'door'
       ? canvasBaseBackgroundUrl
-      : (repinBackgroundForEditing(transform, hasGeneratedRepinBackground) ?? canvasBaseBackgroundUrl)
+      : (repinBackgroundForEditing(transform, hasGeneratedRepinBackground) ?? canvasBaseBackgroundUrl))
+  const eraserBackgroundRevision = [
+    transform?.eraserHistory?.length ?? 0,
+    transform?.repinBackgroundDisplayUrl ?? transform?.repinBackgroundUrl ?? '',
+  ].join(':')
+  const editingCanvasImageUrl = useMemo(() => {
+    if (!editingBackgroundUrl) return null
+    if (!hasManualEraserBackground(transform)) return editingBackgroundUrl
+    const separator = editingBackgroundUrl.includes('?') ? '&' : '?'
+    return editingBackgroundUrl + separator + 'magicEraserRevision=' + encodeURIComponent(eraserBackgroundRevision)
+  }, [editingBackgroundUrl, eraserBackgroundRevision, transform?.eraserHistory])
   const generatedComponentsInSource = new Set(
     versions
       .filter(version => version.version <= sourceVersion)
@@ -308,7 +327,11 @@ export default function Step4Repin() {
 
   const handleSelectComponent = (component: ComponentKey) => {
     if (versions.length > 1) {
-      setSourceChooserComp(current => current === component ? null : component)
+      const shouldOpenChooser = sourceChooserComp !== component
+      if (selectedComp !== component) {
+        handleStartComponent(component, latestVersion || sourceVersion)
+      }
+      setSourceChooserComp(shouldOpenChooser ? component : null)
       return
     }
     handleStartComponent(component, sourceVersion)
@@ -327,19 +350,22 @@ export default function Step4Repin() {
     const sourceOfVersionPreview = versionPreview?.sourceVersion
       ? versions.find(item => Number(item.version) === Number(versionPreview.sourceVersion))
       : null
+    const sameComponentSourceBackgroundUrl = sameComponentReEdit
+      ? versionUrl(sourceOfVersionPreview ?? undefined, originalImageUrl)
+      : null
     const backgroundTransform = sameComponentReEdit
       ? ([versionPreview?.transform, existing, pinTransform].find(item => item?.repinBackgroundUrl) ?? versionPreview?.transform ?? existing ?? pinTransform)
       : null
     const sameComponentBackgroundUrl = sameComponentReEdit
-      ? backgroundTransform?.repinBackgroundUrl
+      ? sameComponentSourceBackgroundUrl
+        ?? backgroundTransform?.repinBackgroundUrl
         ?? backgroundTransform?.repinBackgroundDisplayUrl
-        ?? versionUrl(sourceOfVersionPreview ?? undefined, null)
         ?? null
       : null
     const sameComponentBackgroundDisplayUrl = sameComponentReEdit
-      ? backgroundTransform?.repinBackgroundDisplayUrl
+      ? sameComponentSourceBackgroundUrl
+        ?? backgroundTransform?.repinBackgroundDisplayUrl
         ?? backgroundTransform?.repinBackgroundUrl
-        ?? versionUrl(sourceOfVersionPreview ?? undefined, null)
         ?? null
       : null
     const nextTransform = {
@@ -387,8 +413,11 @@ export default function Step4Repin() {
   const handleEraseMask = async (maskDataUrl: string) => {
     if (!transform || !selectedComp || isProcessing) return
     try {
-      const nextTransform = await eraseRepinBackground(transform, maskDataUrl, sourceVersion, sourceBaseMode)
-      persistTransforms({ ...repinTransforms, [selectedComp]: nextTransform })
+      const activeTransform = { ...transform, componentKey: selectedComp, componentType: selectedComp }
+      const nextTransform = await eraseRepinBackground(activeTransform, maskDataUrl, sourceVersion, sourceBaseMode)
+      const selectedTransform = { ...nextTransform, componentKey: selectedComp, componentType: selectedComp }
+      const latestTransforms = useOfferingStore.getState().currentOffering?.repinTransforms ?? repinTransforms
+      persistTransforms({ ...latestTransforms, [selectedComp]: selectedTransform })
       setCanvasConfirmed(false)
       setEraserMode(false)
       setPlacementPreview(false)
@@ -465,6 +494,12 @@ export default function Step4Repin() {
     setSourceChooserComp(null)
     setInspectedVersion(version)
   }
+
+  const inspectedVersionIndex = inspectedVersion
+    ? versions.findIndex(version => version.version === inspectedVersion.version)
+    : -1
+  const previousInspectedVersion = inspectedVersionIndex > 0 ? versions[inspectedVersionIndex - 1] : null
+  const nextInspectedVersion = inspectedVersionIndex >= 0 && inspectedVersionIndex < versions.length - 1 ? versions[inspectedVersionIndex + 1] : null
 
   const persistFeedbackOptions = (nextOptions: RepinFeedbackOption[]) => {
     setFeedbackOptions(nextOptions)
@@ -604,16 +639,38 @@ export default function Step4Repin() {
           {transform && selectedComp ? (
             inspectedVersion ? (
               <div className="relative flex min-h-[360px] items-center justify-center overflow-hidden rounded-lg border border-[#E4E4E4] bg-[#0A0A0A]">
-                <img src={inspectedVersion.url} alt={`Version ${inspectedVersion.version}`} className="max-h-[520px] w-full object-contain" />
+                <img src={inspectedVersion.url} alt={"Version " + inspectedVersion.version} className="max-h-[520px] w-full object-contain" />
                 <div className="absolute left-3 top-3 rounded-[4px] bg-black/70 px-2 py-1 text-[11px] font-semibold text-white">Version {inspectedVersion.version}</div>
                 <div className="absolute right-3 top-3">
                   <button onClick={() => setInspectedVersion(null)} className="rounded-[4px] bg-white px-2 py-1 text-[11px] font-semibold text-[#111827] shadow-sm hover:text-[#1450F5]">Back to editing</button>
                 </div>
+                {previousInspectedVersion && (
+                  <button
+                    type="button"
+                    onClick={() => setInspectedVersion(previousInspectedVersion)}
+                    className="absolute left-3 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full bg-white/90 text-[#111827] shadow-sm transition-colors duration-[120ms] hover:bg-white hover:text-[#1450F5]"
+                    aria-label={"Preview Version " + previousInspectedVersion.version}
+                    title={"Version " + previousInspectedVersion.version}
+                  >
+                    <ChevronLeft style={{ width: 18, height: 18 }} />
+                  </button>
+                )}
+                {nextInspectedVersion && (
+                  <button
+                    type="button"
+                    onClick={() => setInspectedVersion(nextInspectedVersion)}
+                    className="absolute right-3 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full bg-white/90 text-[#111827] shadow-sm transition-colors duration-[120ms] hover:bg-white hover:text-[#1450F5]"
+                    aria-label={"Preview Version " + nextInspectedVersion.version}
+                    title={"Version " + nextInspectedVersion.version}
+                  >
+                    <ChevronRight style={{ width: 18, height: 18 }} />
+                  </button>
+                )}
               </div>
             ) : (
               <RepinTransformCanvas
-                key={String(selectedComp) + ":" + String(sourceVersion) + ":" + (isSameComponentReEdit ? (transform.editableLayerUrl ?? 'generated-layer') : (selectedComponentImageUrl ?? 'asset'))}
-                imageUrl={editingBackgroundUrl}
+                key={String(selectedComp) + ":" + String(sourceVersion) + ":" + eraserBackgroundRevision + ":" + (isSameComponentReEdit ? (transform.editableLayerUrl ?? 'generated-layer') : (selectedComponentImageUrl ?? 'asset'))}
+                imageUrl={editingCanvasImageUrl}
                 transform={transform}
                 label={COMP_LABELS[selectedComp]}
                 componentImageUrl={isSameComponentReEdit ? (transform.editableLayerUrl ?? null) : (selectedComponentImageUrl ?? transform.editableLayerUrl ?? null)}

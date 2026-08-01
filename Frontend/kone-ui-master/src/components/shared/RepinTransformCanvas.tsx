@@ -537,7 +537,7 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
         {eraserEnabled && !previewOnly ? (
           <canvas
             ref={eraserCanvasRef}
-            className="absolute inset-0 z-20 h-full w-full opacity-35 mix-blend-screen"
+            className="absolute inset-0 z-20 h-full w-full opacity-20 mix-blend-screen"
             style={{ cursor: ERASER_CURSOR }}
             onPointerDown={beginErase}
             onPointerMove={moveErase}
