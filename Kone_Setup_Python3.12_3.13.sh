@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 ROOT_DIR="${ROOT_DIR:-/root/Kone}"
-HF_TOKEN="${HF_TOKEN:-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}"
+HF_TOKEN="${HF_TOKEN:-PUT_YOUR_HF_TOKEN_HERE}"
 
 BACKEND_PORT="${BACKEND_PORT:-8001}"
 API_PORT="${API_PORT:-4000}"
@@ -11,7 +11,8 @@ UI_PORT="${UI_PORT:-3000}"
 VENV_DIR="$ROOT_DIR/.venv"
 PY="$VENV_DIR/bin/python"
 PIP="$VENV_DIR/bin/pip"
-TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
+TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
+CPU_TORCH_INDEX_URL="${CPU_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
 
 LOG_DIR="$ROOT_DIR/setup_logs"
 LOG_FILE="$LOG_DIR/setup_kone_all.log"
@@ -32,11 +33,29 @@ HF_HUB_ENABLE_HF_TRANSFER="0"
 PIPELINE_DIR="$ROOT_DIR/elevator_mod_pipeline"
 API_DIR="$ROOT_DIR/Frontend/kone-api-master"
 UI_DIR="$ROOT_DIR/Frontend/kone-ui-master"
+VDOTEST_DIR="$ROOT_DIR/vdotest"
+COMFY_DIR="$VDOTEST_DIR/ComfyUI"
+COMFY_VENV_DIR="$COMFY_DIR/.venv"
+COMFY_PY="$COMFY_VENV_DIR/bin/python"
+COMFY_PIP="$COMFY_VENV_DIR/bin/pip"
+COMFY_WORKFLOW_DIR="$VDOTEST_DIR/workflows"
+COMFY_INPUT_DIR="$COMFY_DIR/input"
+COMFY_OUTPUT_DIR="$COMFY_DIR/output"
+COMFY_MODEL_PRECISION="${COMFY_MODEL_PRECISION:-fp8}"
 
 GDINO_DIR="$ROOT_DIR/GroundingDINO"
 SAM2_DIR="$ROOT_DIR/sam2_src"
 LAMA_DIR="$ROOT_DIR/lama"
 BERT_DIR="$ROOT_DIR/bert-base-uncased"
+DEPTH_MODEL_DIR="$ROOT_DIR/models/depth-anything-v2-base-hf"
+REFINEMENT_MODEL_DIR="$ROOT_DIR/models/stable-diffusion-inpainting"
+FIRERED_VENV_DIR="$ROOT_DIR/firered_venv"
+FIRERED_PY="$FIRERED_VENV_DIR/bin/python"
+FIRERED_PIP="$FIRERED_VENV_DIR/bin/pip"
+FIRERED_MODEL_REPO="${FIRERED_MODEL_REPO:-FireRedTeam/FireRed-Image-Edit-1.1}"
+FIRERED_MODEL_DIR="$ROOT_DIR/models/FireRed-Image-Edit-1.1"
+FIRERED_HF_HOME="$ROOT_DIR/firered_hf_cache"
+FIRERED_HF_HUB_CACHE="$FIRERED_HF_HOME/hub"
 WEIGHTS_DIR="$ROOT_DIR/weights"
 BIG_LAMA_DIR="$ROOT_DIR/big-lama"
 PIPELINE_LAMA_DIR="$PIPELINE_DIR/third_party/lama/big-lama"
@@ -45,11 +64,15 @@ DINO_WEIGHT="$WEIGHTS_DIR/groundingdino_swint_ogc.pth"
 SAM2_WEIGHT="$WEIGHTS_DIR/sam2.1_hiera_large.pt"
 BIG_LAMA_CKPT="$BIG_LAMA_DIR/models/best.ckpt"
 
-export ROOT_DIR HF_TOKEN BACKEND_PORT API_PORT UI_PORT VENV_DIR PY PIP TORCH_INDEX_URL
+export ROOT_DIR HF_TOKEN BACKEND_PORT API_PORT UI_PORT VENV_DIR PY PIP TORCH_INDEX_URL CPU_TORCH_INDEX_URL
 export LOG_DIR LOG_FILE CACHE_DIR HF_HOME HUGGINGFACE_HUB_CACHE TRANSFORMERS_CACHE HF_HUB_CACHE
 export TORCH_HOME XDG_CACHE_HOME PIP_CACHE_DIR NPM_CONFIG_CACHE MPLCONFIGDIR
 export HF_HUB_DISABLE_SYMLINKS_WARNING HF_HUB_ENABLE_HF_TRANSFER
-export PIPELINE_DIR API_DIR UI_DIR GDINO_DIR SAM2_DIR LAMA_DIR BERT_DIR WEIGHTS_DIR
+export PIPELINE_DIR API_DIR UI_DIR VDOTEST_DIR COMFY_DIR COMFY_VENV_DIR COMFY_PY COMFY_PIP
+export COMFY_WORKFLOW_DIR COMFY_INPUT_DIR COMFY_OUTPUT_DIR COMFY_MODEL_PRECISION
+export GDINO_DIR SAM2_DIR LAMA_DIR BERT_DIR DEPTH_MODEL_DIR REFINEMENT_MODEL_DIR
+export FIRERED_VENV_DIR FIRERED_PY FIRERED_PIP FIRERED_MODEL_REPO FIRERED_MODEL_DIR
+export FIRERED_HF_HOME FIRERED_HF_HUB_CACHE WEIGHTS_DIR
 export BIG_LAMA_DIR PIPELINE_LAMA_DIR DINO_WEIGHT SAM2_WEIGHT BIG_LAMA_CKPT
 
 log() {
@@ -110,6 +133,33 @@ find_python() {
     fail "Missing required command: python3.13, python3, or python"
 }
 
+find_preferred_python() {
+    local env_name="$1"
+    shift
+
+    local override=""
+    case "$env_name" in
+        firered) override="${PY_FIRERED_BASE:-}" ;;
+        comfy) override="${PY_COMFY_BASE:-}" ;;
+    esac
+
+    if [[ -n "$override" ]]; then
+        command -v "$override" >/dev/null 2>&1 || fail "$env_name Python command not found: $override"
+        printf "%s\n" "$override"
+        return 0
+    fi
+
+    local candidate
+    for candidate in "$@"; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            printf "%s\n" "$candidate"
+            return 0
+        fi
+    done
+
+    fail "Missing Python for $env_name; tried: $*"
+}
+
 activate_venv() {
     [[ -f "$VENV_DIR/bin/activate" ]] || fail "Missing venv activation file: $VENV_DIR/bin/activate"
     # shellcheck disable=SC1091
@@ -124,12 +174,14 @@ configure_backend_env() {
 
 create_dirs() {
     [[ -d "$ROOT_DIR" ]] || {
-        printf 'ERROR: ROOT_DIR does not exist: %s\n' "$ROOT_DIR" >&2
+        printf "ERROR: ROOT_DIR does not exist: %s\n" "$ROOT_DIR" >&2
         exit 1
     }
 
     mkdir -p "$LOG_DIR" "$CACHE_DIR" "$HF_HOME" "$HUGGINGFACE_HUB_CACHE"
     mkdir -p "$TORCH_HOME" "$PIP_CACHE_DIR" "$NPM_CONFIG_CACHE" "$MPLCONFIGDIR" "$WEIGHTS_DIR"
+    mkdir -p "$ROOT_DIR/models" "$FIRERED_HF_HOME" "$FIRERED_HF_HUB_CACHE"
+    mkdir -p "$VDOTEST_DIR" "$COMFY_WORKFLOW_DIR" "$COMFY_INPUT_DIR" "$COMFY_OUTPUT_DIR"
 }
 
 create_venv() {
@@ -173,6 +225,7 @@ clone_repos() {
     clone_or_pull "GroundingDINO" "https://github.com/IDEA-Research/GroundingDINO.git" "$GDINO_DIR"
     clone_or_pull "SAM2" "https://github.com/facebookresearch/sam2.git" "$SAM2_DIR"
     clone_or_pull "LaMa" "https://github.com/advimman/lama.git" "$LAMA_DIR"
+    clone_or_pull "ComfyUI" "https://github.com/comfyanonymous/ComfyUI.git" "$COMFY_DIR"
     cd "$ROOT_DIR" || fail "Cannot return to ROOT_DIR"
 }
 
@@ -229,6 +282,188 @@ install_ai_repos() {
     "$PIP" install --cache-dir "$PIP_CACHE_DIR" -e "$SAM2_DIR" >>"$LOG_FILE" 2>&1 || fail "SAM2 editable install failed"
 }
 
+create_named_venv() {
+    local env_name="$1"
+    local venv_dir="$2"
+    shift 2
+
+    local py_bin="$venv_dir/bin/python"
+    if [[ -x "$py_bin" ]]; then
+        log "$env_name venv already exists: $venv_dir"
+        "$py_bin" --version >>"$LOG_FILE" 2>&1 || fail "$env_name venv Python check failed"
+        return 0
+    fi
+
+    local python_base
+    python_base="$(find_preferred_python "$env_name" "$@")"
+    log "Creating $env_name Python venv with $python_base: $venv_dir"
+    "$python_base" -m venv "$venv_dir" >>"$LOG_FILE" 2>&1 || fail "Failed creating $env_name venv"
+    "$py_bin" -m ensurepip --upgrade >>"$LOG_FILE" 2>&1 || fail "$env_name ensurepip failed"
+    "$py_bin" -m pip install --cache-dir "$PIP_CACHE_DIR" --upgrade pip setuptools wheel >>"$LOG_FILE" 2>&1 || fail "$env_name pip upgrade failed"
+}
+
+create_firered_venv() {
+    create_named_venv "firered" "$FIRERED_VENV_DIR" python3.11 python3.12 python3.13 python3 python
+}
+
+create_comfy_venv() {
+    create_named_venv "comfy" "$COMFY_VENV_DIR" python3.12 python3.11 python3.13 python3 python
+}
+
+install_firered_requirements() {
+    log "Installing FireRed CUDA inference requirements"
+    create_firered_venv
+    "$FIRERED_PIP" install --cache-dir "$PIP_CACHE_DIR" --index-url "$TORCH_INDEX_URL" "torch>=2.7" "torchvision>=0.22" "torchaudio>=2.7" >>"$LOG_FILE" 2>&1 || fail "FireRed Torch install failed"
+    "$FIRERED_PIP" install --cache-dir "$PIP_CACHE_DIR" --upgrade "diffusers>=0.35" "transformers>=4.56,<5" "accelerate>=1.10" "sentencepiece>=0.2" "protobuf>=5" "safetensors>=0.4.5" pillow requests fastapi uvicorn python-multipart >>"$LOG_FILE" 2>&1 || fail "FireRed dependency install failed"
+}
+
+install_comfyui() {
+    log "Installing/updating ComfyUI for Wan 2.2 workflows"
+    clone_or_pull "ComfyUI" "https://github.com/comfyanonymous/ComfyUI.git" "$COMFY_DIR"
+    mkdir -p "$COMFY_INPUT_DIR" "$COMFY_OUTPUT_DIR" "$COMFY_DIR/models/diffusion_models" "$COMFY_DIR/models/loras" "$COMFY_DIR/models/text_encoders" "$COMFY_DIR/models/vae"
+    create_comfy_venv
+    "$COMFY_PIP" install --cache-dir "$PIP_CACHE_DIR" --index-url "$TORCH_INDEX_URL" "torch>=2.7" "torchvision>=0.22" "torchaudio>=2.7" >>"$LOG_FILE" 2>&1 || fail "ComfyUI Torch install failed"
+    if [[ -f "$COMFY_DIR/requirements.txt" ]]; then
+        "$COMFY_PIP" install --cache-dir "$PIP_CACHE_DIR" -r "$COMFY_DIR/requirements.txt" >>"$LOG_FILE" 2>&1 || fail "ComfyUI requirements install failed"
+    else
+        fail "Missing ComfyUI requirements.txt: $COMFY_DIR/requirements.txt"
+    fi
+    "$COMFY_PIP" install --cache-dir "$PIP_CACHE_DIR" --upgrade huggingface_hub[cli] imageio-ffmpeg opencv-python >>"$LOG_FILE" 2>&1 || fail "ComfyUI extra dependency install failed"
+}
+
+hf_token_arg() {
+    if [[ -n "${HF_TOKEN:-}" && "${HF_TOKEN,,}" != "put_your_hf_token_here" ]]; then
+        printf "%s" "$HF_TOKEN"
+    fi
+}
+
+snapshot_model() {
+    local repo_id="$1"
+    local local_dir="$2"
+    local marker_file="$3"
+
+    if [[ -f "$marker_file" ]]; then
+        log "Model already exists: $local_dir"
+        return 0
+    fi
+
+    mkdir -p "$local_dir"
+    log "Downloading Hugging Face snapshot $repo_id -> $local_dir"
+    HF_DOWNLOAD_REPO_ID="$repo_id" HF_DOWNLOAD_LOCAL_DIR="$local_dir" "$PY" - <<PY >>"$LOG_FILE" 2>&1
+import os
+from huggingface_hub import snapshot_download
+
+token = os.environ.get("HF_TOKEN")
+if not token or token.lower() == "put_your_hf_token_here":
+    token = None
+
+snapshot_download(
+    repo_id=os.environ["HF_DOWNLOAD_REPO_ID"],
+    local_dir=os.environ["HF_DOWNLOAD_LOCAL_DIR"],
+    local_dir_use_symlinks=False,
+    token=token,
+)
+PY
+}
+
+download_hf_file() {
+    local repo_id="$1"
+    local filename="$2"
+    local local_dir="$3"
+    local final_path="$local_dir/$(basename "$filename")"
+
+    if [[ -f "$final_path" ]]; then
+        log "Model file already exists: $final_path"
+        return 0
+    fi
+
+    mkdir -p "$local_dir"
+    log "Downloading Hugging Face file $repo_id/$filename -> $local_dir"
+    HF_DOWNLOAD_REPO_ID="$repo_id" HF_DOWNLOAD_FILENAME="$filename" HF_DOWNLOAD_LOCAL_DIR="$local_dir" "$PY" - <<PY >>"$LOG_FILE" 2>&1
+import os
+from huggingface_hub import hf_hub_download
+
+token = os.environ.get("HF_TOKEN")
+if not token or token.lower() == "put_your_hf_token_here":
+    token = None
+
+hf_hub_download(
+    repo_id=os.environ["HF_DOWNLOAD_REPO_ID"],
+    filename=os.environ["HF_DOWNLOAD_FILENAME"],
+    local_dir=os.environ["HF_DOWNLOAD_LOCAL_DIR"],
+    token=token,
+)
+PY
+}
+
+download_firered_model() {
+    log "Checking FireRed Image Edit model"
+    if [[ -f "$FIRERED_MODEL_DIR/model_index.json" ]]; then
+        log "FireRed model already exists: $FIRERED_MODEL_DIR"
+        return 0
+    fi
+    HF_HOME="$FIRERED_HF_HOME" HF_HUB_CACHE="$FIRERED_HF_HUB_CACHE" HUGGINGFACE_HUB_CACHE="$FIRERED_HF_HUB_CACHE" snapshot_model "$FIRERED_MODEL_REPO" "$FIRERED_MODEL_DIR" "$FIRERED_MODEL_DIR/model_index.json" || fail "FireRed model download failed"
+}
+
+download_depth_and_refinement_models() {
+    snapshot_model "depth-anything/Depth-Anything-V2-Base-hf" "$DEPTH_MODEL_DIR" "$DEPTH_MODEL_DIR/config.json" || fail "Depth Anything model download failed"
+    snapshot_model "runwayml/stable-diffusion-inpainting" "$REFINEMENT_MODEL_DIR" "$REFINEMENT_MODEL_DIR/model_index.json" || fail "Stable Diffusion inpainting model download failed"
+}
+
+download_comfy_wan_models() {
+    log "Checking ComfyUI Wan 2.2 I2V models"
+    local diffusion_suffix="fp8_scaled"
+    if [[ "$COMFY_MODEL_PRECISION" == "fp16" ]]; then
+        diffusion_suffix="fp16"
+    fi
+
+    download_hf_file "Comfy-Org/Wan_2.2_ComfyUI_Repackaged" "split_files/diffusion_models/wan2.2_i2v_high_noise_14B_${diffusion_suffix}.safetensors" "$COMFY_DIR/models/diffusion_models" || fail "Wan high-noise model download failed"
+    download_hf_file "Comfy-Org/Wan_2.2_ComfyUI_Repackaged" "split_files/diffusion_models/wan2.2_i2v_low_noise_14B_${diffusion_suffix}.safetensors" "$COMFY_DIR/models/diffusion_models" || fail "Wan low-noise model download failed"
+    download_hf_file "Comfy-Org/Wan_2.2_ComfyUI_Repackaged" "split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors" "$COMFY_DIR/models/loras" || fail "Wan high-noise LoRA download failed"
+    download_hf_file "Comfy-Org/Wan_2.2_ComfyUI_Repackaged" "split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors" "$COMFY_DIR/models/loras" || fail "Wan low-noise LoRA download failed"
+    download_hf_file "Comfy-Org/Wan_2.2_ComfyUI_Repackaged" "split_files/vae/wan_2.1_vae.safetensors" "$COMFY_DIR/models/vae" || fail "Wan VAE download failed"
+    download_hf_file "Comfy-Org/Wan_2.1_ComfyUI_repackaged" "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors" "$COMFY_DIR/models/text_encoders" || fail "Wan text encoder download failed"
+}
+
+patch_pipeline_config_paths() {
+    log "Updating pipeline config paths for this ROOT_DIR"
+    "$PY" - <<PY >>"$LOG_FILE" 2>&1
+import os
+from pathlib import Path
+import yaml
+
+root = Path(os.environ["ROOT_DIR"])
+config_path = root / "elevator_mod_pipeline" / "config.yaml"
+with config_path.open("r", encoding="utf-8") as handle:
+    cfg = yaml.safe_load(handle)
+
+video = cfg.setdefault("video", {})
+geometry = cfg.setdefault("geometry", {})
+refinement = cfg.setdefault("refinement", {})
+comfy = video.setdefault("comfy", {})
+
+precision = os.environ.get("COMFY_MODEL_PRECISION", "fp8")
+suffix = "fp16" if precision == "fp16" else "fp8_scaled"
+comfy.update({
+    "root_dir": str(root / "vdotest" / "ComfyUI"),
+    "workflow_dir": str(root / "vdotest" / "workflows"),
+    "input_dir": str(root / "vdotest" / "ComfyUI" / "input"),
+    "output_dir": str(root / "vdotest" / "ComfyUI" / "output"),
+    "high_noise_model": f"wan2.2_i2v_high_noise_14B_{suffix}.safetensors",
+    "low_noise_model": f"wan2.2_i2v_low_noise_14B_{suffix}.safetensors",
+    "high_noise_lora": "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors",
+    "low_noise_lora": "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors",
+    "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+    "vae_name": "wan_2.1_vae.safetensors",
+})
+geometry["depth_model_id"] = str(root / "models" / "depth-anything-v2-base-hf")
+refinement["model_id"] = str(root / "models" / "stable-diffusion-inpainting")
+
+with config_path.open("w", encoding="utf-8") as handle:
+    yaml.safe_dump(cfg, handle, sort_keys=False)
+PY
+}
+
 download_models() {
     log "Preparing model/cache downloads under ROOT_DIR"
 
@@ -243,6 +478,9 @@ download_models() {
     download_groundingdino_weight
     download_sam2_weight
     download_big_lama
+    download_depth_and_refinement_models
+    download_firered_model
+    download_comfy_wan_models
 }
 
 download_bert() {
@@ -403,9 +641,9 @@ EOF
 run_checks() {
     log "Running setup checks"
 
-    printf '\n============================================================\n'
-    printf 'CHECKS\n'
-    printf '============================================================\n'
+    printf "\n============================================================\n"
+    printf "CHECKS\n"
+    printf "============================================================\n"
 
     check_file "$PY"
     check_file "$PIPELINE_DIR/requirements.txt"
@@ -426,6 +664,13 @@ run_checks() {
     check_dir "$BERT_DIR"
     check_dir "$BIG_LAMA_DIR"
     check_dir "$WEIGHTS_DIR"
+    check_dir "$FIRERED_VENV_DIR"
+    check_dir "$COMFY_DIR"
+    check_dir "$COMFY_VENV_DIR"
+    check_dir "$COMFY_DIR/models/diffusion_models"
+    check_dir "$COMFY_DIR/models/loras"
+    check_dir "$COMFY_DIR/models/text_encoders"
+    check_dir "$COMFY_DIR/models/vae"
 
     check_file "$BERT_DIR/config.json"
     check_file "$DINO_WEIGHT"
@@ -434,12 +679,28 @@ run_checks() {
     check_file "$BIG_LAMA_DIR/models/best.ckpt"
     check_file "$PIPELINE_LAMA_DIR/config.yaml"
     check_file "$PIPELINE_LAMA_DIR/models/best.ckpt"
+    check_file "$FIRERED_PY"
+    check_file "$COMFY_PY"
+    check_file "$FIRERED_MODEL_DIR/model_index.json"
+    check_file "$DEPTH_MODEL_DIR/config.json"
+    check_file "$REFINEMENT_MODEL_DIR/model_index.json"
+    if [[ "$COMFY_MODEL_PRECISION" == "fp16" ]]; then
+        check_file "$COMFY_DIR/models/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors"
+        check_file "$COMFY_DIR/models/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors"
+    else
+        check_file "$COMFY_DIR/models/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"
+        check_file "$COMFY_DIR/models/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
+    fi
+    check_file "$COMFY_DIR/models/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors"
+    check_file "$COMFY_DIR/models/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors"
+    check_file "$COMFY_DIR/models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+    check_file "$COMFY_DIR/models/vae/wan_2.1_vae.safetensors"
 
     log "Checking Python version"
     "$PY" --version >>"$LOG_FILE" 2>&1 || fail "Python version check failed"
 
     log "Checking torch"
-    "$PY" -c "import torch; print('torch:', torch.__version__, 'cuda:', torch.cuda.is_available())" >"$LOG_DIR/torch_check.txt" 2>>"$LOG_FILE" || fail "Torch import check failed"
+    "$PY" -c 'import torch; print("torch:", torch.__version__, "cuda:", torch.cuda.is_available())' >"$LOG_DIR/torch_check.txt" 2>>"$LOG_FILE" || fail "Torch import check failed"
     cat "$LOG_DIR/torch_check.txt"
     cat "$LOG_DIR/torch_check.txt" >>"$LOG_FILE"
 
@@ -450,7 +711,7 @@ run_checks() {
     grep -Fq "True" "$LOG_DIR/core_import_check.txt" || fail "Core backend import check failed"
 
     log "Checking BERT local model and get_head_mask"
-    if ! "$PY" - <<'PY' >"$LOG_DIR/bert_check.txt" 2>>"$LOG_FILE"
+    if ! "$PY" - <<PY >"$LOG_DIR/bert_check.txt" 2>>"$LOG_FILE"
 import os
 from transformers import BertModel
 
@@ -479,13 +740,25 @@ PY
     cat "$LOG_DIR/sam2_import_check.txt" >>"$LOG_FILE"
     grep -Fq "True" "$LOG_DIR/sam2_import_check.txt" || fail "SAM2 import check failed"
 
+    log "Checking FireRed imports"
+    "$FIRERED_PY" -c "import torch, diffusers, transformers, accelerate, fastapi, uvicorn; print(True)" >"$LOG_DIR/firered_import_check.txt" 2>>"$LOG_FILE" || fail "FireRed import check failed"
+    cat "$LOG_DIR/firered_import_check.txt"
+    cat "$LOG_DIR/firered_import_check.txt" >>"$LOG_FILE"
+    grep -Fq "True" "$LOG_DIR/firered_import_check.txt" || fail "FireRed import check failed"
+
+    log "Checking ComfyUI imports"
+    "$COMFY_PY" -c "import torch, aiohttp, yaml, PIL, safetensors; print(True)" >"$LOG_DIR/comfy_import_check.txt" 2>>"$LOG_FILE" || fail "ComfyUI import check failed"
+    cat "$LOG_DIR/comfy_import_check.txt"
+    cat "$LOG_DIR/comfy_import_check.txt" >>"$LOG_FILE"
+    grep -Fq "True" "$LOG_DIR/comfy_import_check.txt" || fail "ComfyUI import check failed"
+
     log "Checking LaMa source path"
     [[ -f "$LAMA_DIR/saicinpainting/__init__.py" ]] || fail "LaMa saicinpainting package missing"
 
     log "API npm packages installed"
     log "UI npm packages installed"
 
-    printf '\nTRUE\nAll required checks passed.\nLogs: %s\n\n' "$LOG_FILE"
+    printf "\nTRUE\nAll required checks passed.\nLogs: %s\n\n" "$LOG_FILE"
     log "All checks passed"
 }
 
@@ -507,6 +780,16 @@ start_api() {
     export LOGIC_URL="http://localhost:$BACKEND_PORT"
     export NPM_CONFIG_CACHE
     npm run dev
+}
+
+start_comfy() {
+    log "Starting ComfyUI"
+    cd "$COMFY_DIR" || fail "Cannot cd into ComfyUI dir"
+    export HF_HOME="$HF_HOME"
+    export HF_HUB_CACHE="$HF_HUB_CACHE"
+    export HUGGINGFACE_HUB_CACHE="$HUGGINGFACE_HUB_CACHE"
+    export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+    "$COMFY_PY" main.py --listen 0.0.0.0 --port 8188
 }
 
 start_ui() {
@@ -556,6 +839,7 @@ start_all() {
     launch_session "KONE BACKEND $BACKEND_PORT" backend
     launch_session "KONE API $API_PORT" api
     launch_session "KONE UI $UI_PORT" ui
+    launch_session "KONE COMFYUI 8188" comfy
 }
 
 pipeline_check() {
@@ -586,9 +870,10 @@ KONE SETUP / LAUNCHER
 [1] Start BACKEND only
 [2] Start API only
 [3] Start UI only
-[4] Open BACKEND + API + UI in separate Linux sessions
-[5] Run backend pipeline check
-[6] Run local dependency checks again
+[4] Open BACKEND + API + UI + ComfyUI in separate Linux sessions
+[5] Start ComfyUI only
+[6] Run backend pipeline check
+[7] Run local dependency checks again
 [L] Open setup log
 [X] Exit
 EOF
@@ -600,8 +885,9 @@ EOF
             2) start_api ;;
             3) start_ui ;;
             4) start_all ;;
-            5) pipeline_check ;;
-            6) run_checks ;;
+            5) start_comfy ;;
+            6) pipeline_check ;;
+            7) run_checks ;;
             [Ll]) show_log ;;
             [Xx]) log "User selected exit"; exit 0 ;;
             *) printf 'Invalid choice: %s\n' "$choice" ;;
@@ -636,8 +922,11 @@ main_setup() {
     clone_repos
     install_python_requirements
     install_ai_repos
+    install_firered_requirements
+    install_comfyui
     download_models
     copy_lama_for_pipeline
+    patch_pipeline_config_paths
     write_env_files
     run_checks
 }
@@ -654,6 +943,10 @@ case "${1:-}" in
     ui)
         create_dirs
         start_ui
+        ;;
+    comfy)
+        create_dirs
+        start_comfy
         ;;
     all)
         create_dirs
@@ -675,7 +968,7 @@ case "${1:-}" in
         menu
         ;;
     *)
-        printf 'Usage: %s [setup|backend|api|ui|all|pipeline-check|checks]\n' "$0" >&2
+        printf 'Usage: %s [setup|backend|api|ui|comfy|all|pipeline-check|checks]\n' "$0" >&2
         exit 2
         ;;
 esac
