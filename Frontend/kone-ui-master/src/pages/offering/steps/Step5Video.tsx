@@ -44,15 +44,23 @@ function formatDuration(seconds: number) {
 export default function Step5Video() {
   const { projectId, offeringId } = useParams()
   const navigate = useNavigate()
-  const { currentOffering, setCurrentOffering, goToStep } = useOfferingStore()
+  const {
+    currentOffering,
+    setCurrentOffering,
+    goToStep,
+    videoGenerations,
+    startVideoGeneration,
+    finishVideoGeneration,
+  } = useOfferingStore()
 
   const [motion, setMotion] = useState<MotionStyle>(availableMotionStyle(currentOffering?.videoMotionStyle))
   const [quality, setQuality] = useState<Quality>(currentOffering?.videoQuality ?? '1080p')
   const [playing, setPlaying] = useState(false)
-  const [generating, setGenerating] = useState(false)
-  const [generationStartedAt, setGenerationStartedAt] = useState<number | null>(null)
-  const [progressNow, setProgressNow] = useState(Date.now())
+  const activeVideoGeneration = currentOffering ? videoGenerations[currentOffering.id] : undefined
   const [loadFailed, setLoadFailed] = useState(false)
+  const [progressNow, setProgressNow] = useState(Date.now())
+  const generating = Boolean(activeVideoGeneration)
+  const generationStartedAt = activeVideoGeneration?.startedAt ?? null
   const selectedVideoMatchesOffering = currentOffering?.videoMotionStyle === motion
     && currentOffering?.videoQuality === quality
   const videoReady = !!currentOffering?.outputVideoUrl
@@ -91,15 +99,24 @@ export default function Step5Video() {
     : 0
 
   useEffect(() => {
+    if (!activeVideoGeneration) return
+    setMotion(activeVideoGeneration.motion)
+    setQuality(activeVideoGeneration.quality)
+    setProgressNow(Date.now())
+  }, [activeVideoGeneration?.startedAt, activeVideoGeneration?.motion, activeVideoGeneration?.quality])
+
+
+  useEffect(() => {
     if (!generating) return undefined
     const interval = window.setInterval(() => setProgressNow(Date.now()), 1000)
     return () => window.clearInterval(interval)
   }, [generating])
 
-  const startGenerationTimer = () => {
-    const now = Date.now()
-    setGenerationStartedAt(now)
-    setProgressNow(now)
+  const startGenerationTimer = (startedAt = Date.now()) => {
+    setProgressNow(startedAt)
+    if (currentOffering) {
+      startVideoGeneration(currentOffering.id, { startedAt, motion, quality })
+    }
   }
 
   const handleGeneratePreview = async () => {
@@ -108,7 +125,6 @@ export default function Step5Video() {
       : { engine: 'wan2.2', motion, speed: currentOffering?.videoSpeed, quality }
 
     if (isGuestSession() && projectId && currentOffering) {
-      setGenerating(true)
       startGenerationTimer()
       setLoadFailed(false)
       try {
@@ -147,8 +163,7 @@ export default function Step5Video() {
         setLoadFailed(true)
         toast(error instanceof Error ? error.message : 'Video generation failed', 'destructive')
       } finally {
-        setGenerating(false)
-        setGenerationStartedAt(null)
+        finishVideoGeneration(currentOffering.id)
       }
       return
     }
@@ -163,7 +178,6 @@ export default function Step5Video() {
         return
       }
 
-      setGenerating(true)
       startGenerationTimer()
       setLoadFailed(false)
       setCurrentOffering({
@@ -223,8 +237,7 @@ export default function Step5Video() {
         }).catch(() => {})
         toast(message, 'destructive')
       } finally {
-        setGenerating(false)
-        setGenerationStartedAt(null)
+        finishVideoGeneration(currentOffering.id)
       }
       return
     }

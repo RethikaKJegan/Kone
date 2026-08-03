@@ -229,6 +229,278 @@ def _points_bbox_px(points: list[tuple[float, float]], image_size: tuple[int, in
     y2 = max(y1 + 1, min(height, int(np.ceil(max(ys)))))
     return x1, y1, x2, y2
 
+def _segment_angle_degrees(start: tuple[float, float], end: tuple[float, float]) -> float:
+    return float(np.degrees(np.arctan2(end[1] - start[1], end[0] - start[0])))
+
+
+def _segment_length(start: tuple[float, float], end: tuple[float, float]) -> float:
+    return float(np.hypot(end[0] - start[0], end[1] - start[1]))
+
+
+def _component_key_from_transform(transform: dict[str, Any] | None) -> str:
+    if not isinstance(transform, dict):
+        return ""
+    return str(transform.get("componentKey") or transform.get("componentType") or "").lower()
+
+
+def _is_lci_or_cop_transform(transform: dict[str, Any] | None) -> bool:
+    component_key = _component_key_from_transform(transform)
+    return component_key in {"lci", "cop"} or "landing call" in component_key or "control operating" in component_key
+
+
+def _wants_perspective_refine(transform: dict[str, Any] | None) -> bool:
+    if not isinstance(transform, dict):
+        return False
+    raw_feedback = transform.get("feedbackOptions")
+    if isinstance(raw_feedback, list):
+        keys = {str(item).strip() for item in raw_feedback if str(item).strip()}
+    else:
+        key = str(transform.get("feedbackOption") or "").strip()
+        keys = {key} if key else set()
+    return bool(keys.intersection({"perspective_depth", "bad_perspective"}))
+
+def _scene_line_angles_from_image(image: Image.Image) -> tuple[float | None, float | None]:
+    gray = np.asarray(image.convert("L"), dtype=np.uint8)
+    if gray.size == 0:
+        return None, None
+
+    height, width = gray.shape[:2]
+    scale = min(1.0, 900.0 / max(1, max(width, height)))
+    if scale < 1.0:
+        gray = cv2.resize(
+            gray,
+            (max(1, int(width * scale)), max(1, int(height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    edges = cv2.Canny(blurred, 60, 160)
+    min_line_length = max(24, int(min(edges.shape[:2]) * 0.16))
+    lines = cv2.HoughLinesP(
+        edges,
+        1,
+        np.pi / 180.0,
+        threshold=42,
+        minLineLength=min_line_length,
+        maxLineGap=12,
+    )
+    if lines is None:
+        return None, None
+
+    horizontal_angles: list[float] = []
+    vertical_leans: list[float] = []
+    for line in np.asarray(lines).reshape(-1, 4)[:180]:
+        x1, y1, x2, y2 = [float(value) for value in line]
+        length = float(np.hypot(x2 - x1, y2 - y1))
+        if length < min_line_length:
+            continue
+        angle = float(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
+        if abs(angle) <= 35.0 or abs(abs(angle) - 180.0) <= 35.0:
+            horizontal_angles.append(((angle + 90.0) % 180.0) - 90.0)
+        elif 55.0 <= abs(angle) <= 125.0:
+            vertical_leans.append(angle - 90.0 if angle > 0.0 else angle + 90.0)
+
+    horizontal = float(np.median(horizontal_angles)) if len(horizontal_angles) >= 2 else None
+    vertical = float(np.median(vertical_leans)) if len(vertical_leans) >= 2 else None
+    return horizontal, vertical
+
+
+def _scene_line_perspective_prompt(image_path: Path) -> str:
+    image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+    if image is None or image.size == 0:
+        return ""
+
+    height, width = image.shape[:2]
+    scale = min(1.0, 900.0 / max(1, max(width, height)))
+    if scale < 1.0:
+        image = cv2.resize(
+            image,
+            (max(1, int(width * scale)), max(1, int(height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+
+    blurred = cv2.GaussianBlur(image, (3, 3), 0)
+    edges = cv2.Canny(blurred, 60, 160)
+    min_line_length = max(24, int(min(edges.shape[:2]) * 0.18))
+    lines = cv2.HoughLinesP(
+        edges,
+        1,
+        np.pi / 180.0,
+        threshold=45,
+        minLineLength=min_line_length,
+        maxLineGap=12,
+    )
+    if lines is None:
+        return ""
+
+    horizontal_angles: list[float] = []
+    vertical_leans: list[float] = []
+    for line in np.asarray(lines).reshape(-1, 4)[:160]:
+        x1, y1, x2, y2 = [float(value) for value in line]
+        length = float(np.hypot(x2 - x1, y2 - y1))
+        if length < min_line_length:
+            continue
+        angle = float(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
+        if abs(angle) <= 35.0 or abs(abs(angle) - 180.0) <= 35.0:
+            normalized = ((angle + 90.0) % 180.0) - 90.0
+            horizontal_angles.append(normalized)
+        elif 55.0 <= abs(angle) <= 125.0:
+            lean = angle - 90.0 if angle > 0.0 else angle + 90.0
+            vertical_leans.append(lean)
+
+    parts: list[str] = []
+    if len(horizontal_angles) >= 2:
+        parts.append(f"dominant horizontal architectural edges run at about {float(np.median(horizontal_angles)):.1f} degrees")
+    if len(vertical_leans) >= 2:
+        parts.append(f"dominant vertical architectural edges lean about {float(np.median(vertical_leans)):.1f} degrees from upright")
+    if not parts:
+        return ""
+
+    return (
+        " Scene line analysis from the FireRed input crop estimates that "
+        + " and ".join(parts)
+        + ". Match these observed wall, doorway, floor, ceiling and elevator edge directions during refinement."
+    )
+
+def _perspective_analysis_prompt(
+    transform: dict[str, Any],
+    image_size: tuple[int, int],
+    crop_box: tuple[int, int, int, int] | None = None,
+) -> str:
+    points = _transform_points_px(transform, image_size)
+    if points is None:
+        return (
+            " Before refining, analyze the original photograph camera viewpoint from the visible elevator, wall, doorway, floor, ceiling and component edges. "
+            "Preserve the same camera roll, tilt, perspective convergence and viewing angle; do not make the component or nearby elevator architecture straight-on."
+        )
+
+    tl, tr, br, bl = points
+    top_angle = _segment_angle_degrees(tl, tr)
+    bottom_angle = _segment_angle_degrees(bl, br)
+    left_angle = _segment_angle_degrees(tl, bl)
+    right_angle = _segment_angle_degrees(tr, br)
+    top_width = max(1.0, _segment_length(tl, tr))
+    bottom_width = max(1.0, _segment_length(bl, br))
+    left_height = max(1.0, _segment_length(tl, bl))
+    right_height = max(1.0, _segment_length(tr, br))
+    horizontal_roll = (top_angle + bottom_angle) / 2.0
+    vertical_lean = ((left_angle - 90.0) + (right_angle - 90.0)) / 2.0
+    width_ratio = top_width / bottom_width
+    height_ratio = right_height / left_height
+
+    if width_ratio > 1.08:
+        depth_hint = "the lower edge recedes from camera more than the upper edge"
+    elif width_ratio < 0.92:
+        depth_hint = "the upper edge recedes from camera more than the lower edge"
+    else:
+        depth_hint = "top and bottom depth scale are nearly even"
+
+    if height_ratio > 1.08:
+        side_hint = "the left side appears farther away and the right side appears closer"
+    elif height_ratio < 0.92:
+        side_hint = "the right side appears farther away and the left side appears closer"
+    else:
+        side_hint = "left and right side depth scale are nearly even"
+
+    if crop_box is not None:
+        crop_x, crop_y, _, _ = crop_box
+        local_points = [(x - crop_x, y - crop_y) for x, y in points]
+        coord_label = "crop-local"
+    else:
+        local_points = points
+        coord_label = "image"
+
+    point_text = ", ".join(
+        f"({round(x, 1)}, {round(y, 1)})" for x, y in local_points
+    )
+
+    return (
+        " Before refining, perform a perspective check from the four Repin corner pins. "
+        f"The selected plane corners in {coord_label} coordinates are top-left, top-right, bottom-right, bottom-left: {point_text}. "
+        f"Respect this plane exactly: average horizontal roll is {horizontal_roll:.1f} degrees, vertical lean from upright is {vertical_lean:.1f} degrees, "
+        f"top-to-bottom scale ratio is {width_ratio:.2f}, and right-to-left side scale ratio is {height_ratio:.2f}. "
+        f"This means {depth_hint}; {side_hint}. "
+        "All refined edges, bevels, highlights, shadows, button/display face, handrail/contact cues and local wall seams must follow these same vanishing directions. "
+        "Do not level, straighten, front-face, orthographically redraw, center-align, or catalog-render the component; keep it photographed from the same tilted camera viewpoint as the source image."
+    )
+
+def _quad_matches_rect(points: list[tuple[float, float]], image_size: tuple[int, int], tolerance: float = 1.5) -> bool:
+    x1, y1, x2, y2 = _points_bbox_px(points, image_size)
+    rect = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+    return all(
+        abs(point[0] - rect_point[0]) <= tolerance and abs(point[1] - rect_point[1]) <= tolerance
+        for point, rect_point in zip(points, rect)
+    )
+
+
+def _fit_quad_to_bbox(
+    points: list[tuple[float, float]],
+    bbox: tuple[int, int, int, int],
+) -> list[tuple[float, float]]:
+    x1, y1, x2, y2 = bbox
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    raw_x1, raw_x2 = min(xs), max(xs)
+    raw_y1, raw_y2 = min(ys), max(ys)
+    scale_x = (x2 - x1) / max(1.0, raw_x2 - raw_x1)
+    scale_y = (y2 - y1) / max(1.0, raw_y2 - raw_y1)
+    return [
+        (x1 + (point[0] - raw_x1) * scale_x, y1 + (point[1] - raw_y1) * scale_y)
+        for point in points
+    ]
+
+
+def _with_lci_cop_homography_points(transform: dict[str, Any], source_image: Image.Image) -> dict[str, Any]:
+    if not _is_lci_or_cop_transform(transform):
+        return transform
+
+    image_size = source_image.size
+    existing_points = _transform_points_px(transform, image_size)
+    if existing_points is not None and not _quad_matches_rect(existing_points, image_size):
+        return transform
+
+    bbox = _points_bbox_px(existing_points, image_size) if existing_points is not None else _transform_box_px(transform, image_size)
+    x1, y1, x2, y2 = bbox
+    width = max(1, x2 - x1)
+    height = max(1, y2 - y1)
+    if width < 8 or height < 8:
+        return transform
+
+    crop_box = _expanded_crop_box(bbox, image_size, pad_ratio=3.0)
+    local_image = source_image.crop(crop_box)
+    horizontal_angle, vertical_lean = _scene_line_angles_from_image(local_image)
+    if horizontal_angle is None or vertical_lean is None:
+        full_horizontal, full_vertical = _scene_line_angles_from_image(source_image)
+        horizontal_angle = horizontal_angle if horizontal_angle is not None else full_horizontal
+        vertical_lean = vertical_lean if vertical_lean is not None else full_vertical
+
+    horizontal_angle = float(np.clip(horizontal_angle or 0.0, -14.0, 14.0))
+    vertical_lean = float(np.clip(vertical_lean or 0.0, -12.0, 12.0))
+    if abs(horizontal_angle) < 0.8 and abs(vertical_lean) < 0.8:
+        return transform
+
+    horizontal_shift = float(np.tan(np.radians(horizontal_angle)) * width)
+    vertical_shift = float(np.tan(np.radians(vertical_lean)) * height)
+    raw_quad = [
+        (float(x1), float(y1)),
+        (float(x2), float(y1) + horizontal_shift),
+        (float(x2) + vertical_shift, float(y2) + horizontal_shift),
+        (float(x1) + vertical_shift, float(y2)),
+    ]
+    fitted_quad = _fit_quad_to_bbox(raw_quad, bbox)
+    next_transform = {**transform}
+    next_transform.update({
+        "points": [{"x": round(float(x), 1), "y": round(float(y), 1)} for x, y in fitted_quad],
+        "coordinateSpace": "pixels",
+        "imageWidth": image_size[0],
+        "imageHeight": image_size[1],
+        "autoPerspectiveHomography": True,
+        "autoPerspectiveHorizontalAngle": round(horizontal_angle, 2),
+        "autoPerspectiveVerticalLean": round(vertical_lean, 2),
+    })
+    return next_transform
+
+
 def _transform_box_px(transform: dict[str, Any], image_size: tuple[int, int]) -> tuple[int, int, int, int]:
     width, height = image_size
     coordinate_space = str(transform.get("coordinateSpace") or "").lower()
@@ -415,7 +687,7 @@ def _component_mask_for_transform(component_image: Image.Image, transform: dict[
     return mask
 
 
-def _firered_prompt(transform: dict[str, Any]) -> str:
+def _firered_prompt(transform: dict[str, Any], perspective_analysis: str = "") -> str:
     raw_feedback = transform.get("feedbackOptions")
     if isinstance(raw_feedback, list):
         feedback_keys = [str(item).strip() for item in raw_feedback if str(item).strip()]
@@ -423,6 +695,17 @@ def _firered_prompt(transform: dict[str, Any]) -> str:
         feedback_key = str(transform.get("feedbackOption") or "").strip()
         feedback_keys = [feedback_key] if feedback_key else []
     component = str(transform.get("componentKey") or transform.get("componentType") or "component")
+    component_perspective_sentence = ""
+    if _is_lci_or_cop_transform(transform):
+        component_perspective_sentence = (
+            " STRICT LCI/COP PERSPECTIVE RULES: treat this small panel with the same camera-pose rules used for the elevator interior and doors. "
+            "The LCI/COP is not a front-view asset; it is a rigid object mounted on the wall plane described by the four Repin pins, surrounding wall seams, doorway lines, floor lines and ceiling lines. "
+            "The panel face, display glass, button plates, arrows, labels, bevels, screw holes, brushed-metal grain, reflections and side thickness must all share that exact plane perspective. "
+            "Keep only the outer four corner coordinates, footprint and silhouette fixed; inside that silhouette, perspective correction is required and has priority over preserving a straight upright product-render look. "
+            "If the wall is tilted or viewed from the side, the display and buttons must also tilt, taper and foreshorten. Their top and bottom edges must follow the same vanishing direction as the wall-mounted panel, not the screen. "
+            "Remove any flat sticker look, pasted rectangular face, upright catalog view, parallel-to-screen buttons, or straight-on display. "
+            "Do not make the LCI/COP visually larger, move it, replace the model, invent extra controls, or change the chosen outer pin placement."
+        )
     feedback_instructions = {
         "edge_alignment": "Sharpen only the local edge alignment: make the component boundary sit flush to the wall with clean seams, no halos, no ghost outline, and no duplicate border.",
         "perspective_depth": "Improve local perspective depth: align bevels, face plane, thickness cues, and contact geometry to the camera angle while preserving the exact selected silhouette.",
@@ -453,6 +736,8 @@ def _firered_prompt(transform: dict[str, Any]) -> str:
         "Preserve exactly every existing button, display, arrow, number, icon, logo, label, spacing and product detail. Do not add, remove, repeat, merge, redraw or reinterpret any control. Do not alter the elevator, door, wall tiles, joints, signs, floor or surrounding architecture. There is exactly one LCI in the edited region."
         "Do not move, resize, redesign, replace, erase, or duplicate the component. Do not alter elevator doors, wall tiles, signs, floor, ceiling, or background geometry outside the immediate component edge transition. "
         "No new buttons, no redesigned display, no warped text, no extra panels, no floating sticker look."
+        f"{perspective_analysis}"
+        f"{component_perspective_sentence}"
         f"{feedback_sentence}"
     )
 
@@ -728,6 +1013,7 @@ def _firered_constrained_composite(
     edited_crop: Image.Image,
     component_mask: Image.Image | None,
     crop_box: tuple[int, int, int, int],
+    transform: dict[str, Any] | None = None,
 ) -> Image.Image:
     if component_mask is None:
         return source_crop
@@ -744,14 +1030,19 @@ def _firered_constrained_composite(
     if crop_mask.getbbox() is None:
         return source_crop
 
+    lci_cop_perspective_refine = _is_lci_or_cop_transform(transform) and _wants_perspective_refine(transform)
+
     face_strength = float(
-        os.environ.get("FIRERED_FACE_STRENGTH", "0.20")
+        os.environ.get(
+            "FIRERED_FACE_STRENGTH",
+            "0.68" if lci_cop_perspective_refine else "0.20",
+        )
     )
     shadow_strength = float(
         os.environ.get("FIRERED_SHADOW_STRENGTH", "0.70")
     )
 
-    face_strength = float(np.clip(face_strength, 0.0, 0.33))
+    face_strength = float(np.clip(face_strength, 0.0, 0.78 if lci_cop_perspective_refine else 0.33))
     shadow_strength = float(np.clip(shadow_strength, 0.0, 0.85))
 
     inner_face_mask = crop_mask.filter(
@@ -794,14 +1085,17 @@ def _firered_constrained_composite(
         crop_mask,
     )
 
-    protected_details = ImageChops.lighter(
-        dark_details,
-        edge_details,
-    ).filter(
-        ImageFilter.MaxFilter(5)
-    ).filter(
-        ImageFilter.GaussianBlur(radius=0.7)
-    )
+    if lci_cop_perspective_refine:
+        protected_details = Image.new("L", crop_size, 0)
+    else:
+        protected_details = ImageChops.lighter(
+            dark_details,
+            edge_details,
+        ).filter(
+            ImageFilter.MaxFilter(5)
+        ).filter(
+            ImageFilter.GaussianBlur(radius=0.7)
+        )
 
     face_refinement = Image.blend(
         source_crop,
@@ -850,13 +1144,20 @@ def _run_firered_if_available(input_path: Path, output_path: Path, transform: di
     fire_input = input_path
     fire_output = output_path
     crop_box: tuple[int, int, int, int] | None = None
+    with Image.open(input_path) as source_probe:
+        source_size = source_probe.size
     if bbox is not None:
         source = Image.open(input_path).convert("RGB")
+        source_size = source.size
         crop_box = _expanded_crop_box(bbox, source.size)
         fire_input = output_path.with_name(f"{output_path.stem}_firered_crop_input.png")
         fire_output = output_path.with_name(f"{output_path.stem}_firered_crop_output.png")
         source.crop(crop_box).save(fire_input)
-    firered_prompt = _firered_prompt(transform)
+    perspective_analysis = (
+        _perspective_analysis_prompt(transform, source_size, crop_box)
+        + _scene_line_perspective_prompt(fire_input)
+    )
+    firered_prompt = _firered_prompt(transform, perspective_analysis)
     firered_steps = int(os.environ.get("FIRERED_STEPS", "36"))
     firered_cfg = float(os.environ.get("FIRERED_TRUE_CFG_SCALE", "3.8"))
     service_url = os.environ.get(
@@ -975,6 +1276,7 @@ def _run_firered_if_available(input_path: Path, output_path: Path, transform: di
             edited_crop,
             component_mask,
             crop_box,
+            transform,
         )
 
         blend_mask = _crop_blend_mask(
@@ -1169,6 +1471,8 @@ def repin_components(payload: ProjectPayload):
         transforms = [target_transform]
         placed_image = Image.open(source_image_path).convert("RGB")
         placed_image = _restore_original_repin_footprint(placed_image, storage, target_transform)
+        target_transform = _with_lci_cop_homography_points(target_transform, placed_image)
+        transforms = [target_transform]
         placements = []
         component_masks = []
         for transform in transforms:

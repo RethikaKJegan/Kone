@@ -16,9 +16,10 @@ type RestoreState = {
 
 function inputImageUrl(offering: Offering | null) {
   if (!offering) return null
+  if (offering.uploadedFileUrl) return offering.uploadedFileUrl
   if (offering.inputImagePath) return offering.inputImagePath
-  if (offering.imageId) return `/uploads/${offering.imageId}/input.jpg`
-  return offering.uploadedFileUrl ?? null
+  if (offering.imageId) return '/uploads/' + offering.imageId + '/input.jpg'
+  return null
 }
 
 export default function Step1Upload() {

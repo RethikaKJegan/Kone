@@ -23,19 +23,19 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "geometric_defects": 0.05,
     },
     "hard_fails": {
-        "perspective_fail": 0.62,
-        "perspective_review": 0.68,
+        "perspective_fail": 0.25,
+        "perspective_review": 0.52,
         "visibility_min": 0.40,
         "sharpness_extreme_min": 0.05,
         "exposure_min": 0.30,
-        "composition_min": 0.30,
+        "composition_min": 0.24,
         "technical_defects_min": 0.35,
-        "geometric_defects_min": 0.35,
-        "min_short_side": 420,
+        "geometric_defects_min": 0.10,
+        "min_short_side": 300,
     },
     "thresholds": {
-        "pass": 0.65,
-        "review": 0.55,
+        "pass": 0.58,
+        "review": 0.45,
     },
     "elevator_presence": {
         "min_score": 0.22,
@@ -89,8 +89,8 @@ def validate_input_image(rgb: np.ndarray, cfg: dict[str, Any]) -> dict[str, Any]
     h, w = rgb.shape[:2]
     short_side = min(h, w)
     tilt = image_tilt_degrees(rgb)
-    if tilt is not None and (abs(tilt.get("signed_degrees", 0.0)) > 4.0 or tilt.get("absolute_degrees", 0.0) > 6.0):
-        message = "Image must be straight. Please upload a non-tilted image."
+    if tilt is not None and (abs(tilt.get("signed_degrees", 0.0)) > 12.0 or tilt.get("absolute_degrees", 0.0) > 16.0):
+        message = "Image tilt is too severe. Please upload a clearer elevator image if possible."
         return {
             "result": "FAIL",
             "valid": False,

@@ -6,6 +6,11 @@ import { useProjectStore } from './projectStore'
 import type { Offering, OfferingStep, Environment, ComponentKey, ComponentPin, RepinTransform } from '../types'
 
 type ComponentAssetMap = Partial<Record<ComponentKey, string>>
+type VideoGenerationState = {
+  startedAt: number
+  motion: Offering['videoMotionStyle']
+  quality: Offering['videoQuality']
+}
 
 function getGuestData<T>(key: string): T | null {
   try {
@@ -69,6 +74,7 @@ interface OfferingState {
   currentOffering: Offering | null
   currentStep: OfferingStep
   isProcessing: boolean
+  videoGenerations: Record<string, VideoGenerationState>
   fetchOfferings: (projectId: string) => Promise<void>
   createOffering: (projectId: string) => Promise<Offering>
   updateOfferingName: (projectId: string, offeringId: string, name: string) => Promise<Offering>
@@ -89,6 +95,8 @@ interface OfferingState {
   goToStep: (step: OfferingStep) => void
   completeOffering: () => Promise<void>
   setCurrentOffering: (offering: Offering) => void
+  startVideoGeneration: (offeringId: string, generation: VideoGenerationState) => void
+  finishVideoGeneration: (offeringId: string) => void
 }
 
 function patchOffering(offering: Offering, updates: Partial<Offering>): Offering {
@@ -203,6 +211,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
   currentOffering: null,
   currentStep: 1,
   isProcessing: false,
+  videoGenerations: {},
 
   fetchOfferings: async projectId => {
     if (isGuestSession()) {
@@ -309,10 +318,23 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
     })
   },
 
+
   setCurrentOffering: offering => set(state => {
     const normalized = normalizeOffering(offering)
     const savedStep = normalized.savedStep ?? state.currentStep ?? 1
     return { ...writeOfferingState(state, { ...normalized, savedStep }), currentStep: savedStep }
+  }),
+
+  startVideoGeneration: (offeringId, generation) => set(state => ({
+    videoGenerations: {
+      ...state.videoGenerations,
+      [offeringId]: generation,
+    },
+  })),
+
+  finishVideoGeneration: offeringId => set(state => {
+    const { [offeringId]: _finished, ...videoGenerations } = state.videoGenerations
+    return { videoGenerations }
   }),
 
   setUpload: async (file: File) => {
@@ -337,11 +359,14 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
         uploadedFileUrl: data.image_url,
         uploadedFileName: file.name,
         uploadedFileType: 'image',
+        inputImagePath: null,
+        previewImagePath: null,
+        outputImagePath: null,
+        outputVideoPath: null,
         componentPins: [],
         renderComplete: false,
         outputImageUrl: null,
         outputVideoUrl: null,
-        previewRequestKey: null,
         videoGenerated: false,
         downloadUrl: null,
         previewVersions: [],
@@ -363,11 +388,16 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       )
       imageId = uploadData.imageId
 
-      // Persist file metadata and imageId — blob URL stays client-side only
-      await apiClient.patch(`/offerings/${currentOffering.id}`, {
+      // Persist file metadata and imageId; blob URL stays client-side only
+      await apiClient.patch('/offerings/' + currentOffering.id, {
         imageId,
         uploadedFileName: file.name,
         uploadedFileType: file.type.startsWith('video') ? 'video' : 'image',
+        inputImagePath: '/uploads/' + imageId + '/input.jpg',
+        previewImagePath: null,
+        outputImagePath: null,
+        outputVideoPath: null,
+        pipelineStatus: 'uploaded',
       })
       refreshProjects()
     }
@@ -377,6 +407,10 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       uploadedFileUrl: fileUrl,
       uploadedFileName: file.name,
       uploadedFileType: file.type.startsWith('video') ? 'video' : 'image',
+      inputImagePath: imageId ? '/uploads/' + imageId + '/input.jpg' : null,
+      previewImagePath: null,
+      outputImagePath: null,
+      outputVideoPath: null,
       componentPins: [],
       renderComplete: false,
       outputImageUrl: null,

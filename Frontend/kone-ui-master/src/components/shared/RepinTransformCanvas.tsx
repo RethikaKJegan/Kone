@@ -308,7 +308,7 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
     const ctx = canvas?.getContext('2d')
     if (!canvas || !ctx) return
     ctx.save()
-    ctx.strokeStyle = 'rgba(20,80,245,0.42)'
+    ctx.strokeStyle = 'rgba(20,80,245,0.82)'
     ctx.lineWidth = eraserBrushSize
     ctx.lineCap = 'round'
     ctx.lineJoin = 'round'
@@ -555,7 +555,7 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
         {eraserEnabled && !previewOnly ? (
           <canvas
             ref={eraserCanvasRef}
-            className="absolute inset-0 z-20 h-full w-full opacity-20 mix-blend-screen"
+            className="absolute inset-0 z-20 h-full w-full opacity-70 mix-blend-multiply"
             style={{ cursor: ERASER_CURSOR }}
             onPointerDown={beginErase}
             onPointerMove={moveErase}

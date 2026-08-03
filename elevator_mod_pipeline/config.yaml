@@ -21,18 +21,18 @@ input_validation:
     technical_defects: 0.07
     geometric_defects: 0.05
   hard_fails:
-    perspective_fail: 0.62
-    perspective_review: 0.68
+    perspective_fail: 0.25
+    perspective_review: 0.52
     visibility_min: 0.4
     sharpness_extreme_min: 0.05
     exposure_min: 0.3
-    composition_min: 0.3
+    composition_min: 0.24
     technical_defects_min: 0.35
-    geometric_defects_min: 0.35
-    min_short_side: 420
+    geometric_defects_min: 0.10
+    min_short_side: 300
   thresholds:
-    pass: 0.65
-    review: 0.55
+    pass: 0.58
+    review: 0.45
   elevator_presence:
     min_score: 0.22
 detection:

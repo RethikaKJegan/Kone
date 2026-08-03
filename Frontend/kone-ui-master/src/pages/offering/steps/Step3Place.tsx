@@ -112,13 +112,16 @@ export default function Step3Place() {
             continue
           }
           if (data.pipelineStatus === 'preview_ready' || data.pipelineStatus === 'video_ready') {
+            const outputVideoUrl = data.pipelineStatus === 'video_ready'
+              ? data.outputVideoUrl ?? data.outputVideoPath ?? currentOffering.outputVideoUrl ?? null
+              : null
             setCurrentOffering({
               ...data,
               renderComplete: true,
-              outputImageUrl: data.outputImageUrl ? `${data.outputImageUrl}${data.outputImageUrl.includes('?') ? '&' : '?'}v=${Date.now()}` : null,
-              outputVideoUrl: null,
-              videoGenerated: false,
-              downloadUrl: null,
+              outputImageUrl: data.outputImageUrl ? data.outputImageUrl + (data.outputImageUrl.includes('?') ? '&' : '?') + 'v=' + Date.now() : null,
+              outputVideoUrl,
+              videoGenerated: data.pipelineStatus === 'video_ready' ? Boolean(outputVideoUrl || data.videoGenerated) : false,
+              downloadUrl: data.pipelineStatus === 'video_ready' ? data.downloadUrl ?? currentOffering.downloadUrl ?? null : null,
             })
             return
           }

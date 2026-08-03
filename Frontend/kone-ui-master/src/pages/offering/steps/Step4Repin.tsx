@@ -747,7 +747,7 @@ export default function Step4Repin() {
               {eraserMode && (
                 <div className="flex h-12 w-16 items-center justify-center" aria-label="Brush size preview">
                   <span
-                    className="block rounded-full border border-[#1450F5] bg-[rgba(20,80,245,0.28)] shadow-[0_0_0_1px_rgba(20,80,245,0.12)]"
+                    className="block rounded-full border border-[#1450F5] bg-[rgba(20,80,245,0.58)] shadow-[0_0_0_1px_rgba(20,80,245,0.28)]"
                     style={{ width: Math.max(8, eraserBrushSize / 4), height: Math.max(8, eraserBrushSize / 4) }}
                   />
                 </div>
