@@ -198,6 +198,7 @@ def add_sam2_masks(image_path: str | Path, cfg: dict[str, Any], detection_data: 
 
 	predictor = _SAM2_CACHE[device]
 	image_np = load_image_rgb(image_path)
+	sam_dets: list[tuple[dict[str, Any], Any]] = []
 	for det in detection_data["detections"]:
 		if det.get("source") in {
 			"open_door_interior_inset",
@@ -218,11 +219,14 @@ def add_sam2_masks(image_path: str | Path, cfg: dict[str, Any], detection_data: 
 			score=float(det.get("score", 0.0)),
 			remove=True,
 		)
+		sam_dets.append((det, main2_det))
+
+	if sam_dets:
 		with main2.autocast_for(device):
 			combined_mask, component_masks = main2.make_mask(
 				predictor,
 				image_np,
-				[main2_det],
+				[main2_det for _, main2_det in sam_dets],
 				multimask=bool(sam_cfg.get("sam2_multimask", True)),
 				use_center_point=bool(sam_cfg.get("sam2_center_point", True)),
 				close_radius=int(sam_cfg.get("mask_close", 3)),
@@ -230,9 +234,10 @@ def add_sam2_masks(image_path: str | Path, cfg: dict[str, Any], detection_data: 
 				min_component_area=int(sam_cfg.get("mask_min_component_area", 64)),
 				fill_holes=bool(sam_cfg.get("fill_holes", True)),
 			)
-		mask = (component_masks[0] if component_masks else combined_mask) > 127
-		det["mask_area_px"] = int(mask.sum())
-		det["mask"] = mask_to_rle(mask)
+		for idx, (det, _) in enumerate(sam_dets):
+			mask = (component_masks[idx] if idx < len(component_masks) else combined_mask) > 127
+			det["mask_area_px"] = int(mask.sum())
+			det["mask"] = mask_to_rle(mask)
 
 	detection_data["metadata"]["segmenter"] = "main2.py SAM2"
 	detection_data["metadata"]["sam2_weights"] = str(main2.SAM2_WEIGHTS)

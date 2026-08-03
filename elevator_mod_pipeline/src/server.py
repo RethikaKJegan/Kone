@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import warnings
 from pathlib import Path
@@ -22,6 +23,16 @@ from pydantic import BaseModel
 from input_validation import validate_elevator_or_cop_upload, validate_input_image
 
 app = FastAPI()
+PIPELINE_LOCK = threading.Lock()
+
+
+def _run_pipeline_in_process(config_path: Path) -> None:
+    root = repo_root()
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from src.pipeline import run as run_pipeline
+
+    run_pipeline(config_path)
 
 
 class ProjectPayload(BaseModel):
@@ -1099,11 +1110,8 @@ def run_components(payload: ProjectPayload):
     config_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
 
     try:
-        subprocess.run(
-            [sys.executable, "-m", "src.pipeline", "--config", str(config_path)],
-            cwd=repo_root(),
-            check=True,
-        )
+        with PIPELINE_LOCK:
+            _run_pipeline_in_process(config_path)
         final_output = pipeline_dir / "final_output.png"
         shutil.copy2(final_output if final_output.exists() else input_image, preview_dir / "final_output.png")
         status = public_status("preview_ready")

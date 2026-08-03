@@ -117,7 +117,7 @@ def select_device(requested: str) -> str:
 
 
 def lama_device_for(device: str) -> str:
-	return "cuda" if device == "cuda" else "cpu"
+	return device if device.startswith("cuda") else "cpu"
 
 
 def autocast_for(device: str):
@@ -809,6 +809,19 @@ def blend_crop(
 	return np.clip(blended, 0, 255).astype(np.uint8)
 
 
+_LAMA_INPAINTER_CACHE: dict[tuple[str, str], Any] = {}
+
+
+def _load_lama_inpainter(lama_model: Path, device: str):
+	from lama_inpaint import LamaInpainter
+
+	lama_device = lama_device_for(device)
+	key = (str(Path(lama_model).resolve()), lama_device)
+	if key not in _LAMA_INPAINTER_CACHE:
+		_LAMA_INPAINTER_CACHE[key] = LamaInpainter(lama_model, device=lama_device)
+	return _LAMA_INPAINTER_CACHE[key]
+
+
 def inpaint_image(
 	image_rgb: np.ndarray,
 	mask: np.ndarray,
@@ -820,8 +833,6 @@ def inpaint_image(
 	if bbox is None:
 		return image_rgb.copy()
 
-	from lama_inpaint import LamaInpainter
-
 	height, width = image_rgb.shape[:2]
 	if args.inpaint_crop_padding >= 0:
 		crop_box = np.array(bbox, dtype=np.float32)
@@ -831,7 +842,7 @@ def inpaint_image(
 
 	crop_rgb = image_rgb[y1:y2, x1:x2]
 	crop_mask = mask[y1:y2, x1:x2]
-	inpainter = LamaInpainter(lama_model, device=lama_device_for(device))
+	inpainter = _load_lama_inpainter(lama_model, device)
 	generated_crop = inpainter.inpaint(crop_rgb, crop_mask, max_side=args.lama_max_side)
 
 	result = image_rgb.copy()
