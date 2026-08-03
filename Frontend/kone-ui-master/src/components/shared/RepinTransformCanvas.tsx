@@ -103,6 +103,19 @@ function rotatePoints(points: QuadPoints, center: QuadPoint, radians: number): Q
   }) as QuadPoints
 }
 
+function scalePointsFromAnchor(points: QuadPoints, anchorIndex: number, dragIndex: number, target: QuadPoint): QuadPoints {
+  const anchor = points[anchorIndex]
+  const startDrag = points[dragIndex]
+  const startDistance = Math.hypot(startDrag.x - anchor.x, startDrag.y - anchor.y)
+  if (startDistance < MIN_SIZE) return points
+  const nextDistance = Math.hypot(target.x - anchor.x, target.y - anchor.y)
+  const scale = Math.max(MIN_SIZE / startDistance, nextDistance / startDistance)
+  return points.map(point => ({
+    x: anchor.x + (point.x - anchor.x) * scale,
+    y: anchor.y + (point.y - anchor.y) * scale,
+  })) as QuadPoints
+}
+
 function defaultsFor(componentKey: ComponentKey) {
   if (componentKey === 'door') return { widthRatio: 0.34, heightRatio: 0.58 }
   if (componentKey === 'ceiling') return { widthRatio: 0.48, heightRatio: 0.22 }
@@ -295,7 +308,7 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
     const ctx = canvas?.getContext('2d')
     if (!canvas || !ctx) return
     ctx.save()
-    ctx.strokeStyle = 'rgba(255,255,255,1)'
+    ctx.strokeStyle = 'rgba(20,80,245,0.42)'
     ctx.lineWidth = eraserBrushSize
     ctx.lineCap = 'round'
     ctx.lineJoin = 'round'
@@ -412,6 +425,11 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
 
       const cornerIndex = Number(drag.mode.replace('corner-', ''))
       if (cornerIndex >= 0 && cornerIndex < 4) {
+        if (event.shiftKey) {
+          const anchorIndex = (cornerIndex + 2) % 4
+          setTransform({ ...drag.start, points: scalePointsFromAnchor(startPoints, anchorIndex, cornerIndex, point) })
+          return
+        }
         const points = startPoints.map(startPoint => ({ ...startPoint })) as QuadPoints
         points[cornerIndex] = { x: point.x, y: point.y }
         setTransform({ ...drag.start, points })

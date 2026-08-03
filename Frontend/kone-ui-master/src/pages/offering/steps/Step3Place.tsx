@@ -12,6 +12,16 @@ import { toast } from '../../../hooks/useToast'
 import type { ComponentKey, ComponentPin } from '../../../types'
 
 const COMP_LABELS = Object.fromEntries(KONE_COMPONENTS.map(c => [c.key, c.label])) as Record<ComponentKey, string>
+const ESTIMATED_PREVIEW_SECONDS = 90
+
+function formatPreviewTime(seconds: number) {
+  if (seconds <= 0) return 'less than 1 sec'
+  const minutes = Math.floor(seconds / 60)
+  const remainingSeconds = seconds % 60
+  if (minutes <= 0) return remainingSeconds + ' sec'
+  if (remainingSeconds <= 0) return minutes + ' min'
+  return minutes + ' min ' + remainingSeconds + ' sec'
+}
 
 export default function Step3Place() {
   const { projectId, offeringId } = useParams()
@@ -19,6 +29,7 @@ export default function Step3Place() {
   const { currentOffering, runAIPlacement, setCurrentOffering, goToStep, isProcessing } = useOfferingStore()
   const [hasRunAI, setHasRunAI] = useState(false)
   const [showAnnotations, setShowAnnotations] = useState(true)
+  const [previewElapsedSeconds, setPreviewElapsedSeconds] = useState(0)
 
   const offering = currentOffering
   const components = offering?.selectedComponents ?? []
@@ -27,6 +38,20 @@ export default function Step3Place() {
     offering?.outputImageUrl &&
     (offering.renderComplete || offering.pipelineStatus === 'preview_ready' || offering.pipelineStatus === 'video_ready')
   )
+  const previewProgressWidth = Math.min(95, Math.max(8, (previewElapsedSeconds / ESTIMATED_PREVIEW_SECONDS) * 95)) + '%'
+  const previewEstimatedRemaining = formatPreviewTime(Math.max(0, ESTIMATED_PREVIEW_SECONDS - previewElapsedSeconds))
+
+  useEffect(() => {
+    if (previewReady) {
+      setPreviewElapsedSeconds(0)
+      return
+    }
+    setPreviewElapsedSeconds(0)
+    const timer = window.setInterval(() => {
+      setPreviewElapsedSeconds(seconds => seconds + 1)
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [previewReady, currentOffering?.previewRequestKey])
 
   useEffect(() => {
     if (!previewReady) return
@@ -152,6 +177,15 @@ export default function Step3Place() {
         <div className="mx-8 mb-8 flex min-h-[360px] flex-col items-center justify-center gap-4 rounded-lg border border-[#E4E4E4] bg-white">
           <div className="h-7 w-7 animate-spin rounded-full border-2 border-[#DBEAFE] border-t-[#1450F5]" />
           <p className="text-sm font-medium text-[#111827]">Generating final preview...</p>
+          <div className="w-full max-w-[320px] space-y-2">
+            <div className="h-2 overflow-hidden rounded-full bg-[#E5E7EB]">
+              <div
+                className="h-full rounded-full bg-[#1450F5] transition-[width] duration-500 ease-out"
+                style={{ width: previewProgressWidth }}
+              />
+            </div>
+            <p className="text-center text-xs text-[#6B7280]">Estimated time remaining: {previewEstimatedRemaining}</p>
+          </div>
           <p className="text-xs text-[#9CA3AF]">The preview appears here after the process is complete.</p>
         </div>
       </div>

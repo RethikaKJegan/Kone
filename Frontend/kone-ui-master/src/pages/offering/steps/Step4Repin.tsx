@@ -744,7 +744,14 @@ export default function Step4Repin() {
                   <Redo2 style={{ width: 14, height: 14 }} />
                 </button>
               </div>
-              {eraserMode && <span className="text-[10px] font-medium text-[#6B7280]">Brush {eraserBrushSize}px</span>}
+              {eraserMode && (
+                <div className="flex h-12 w-16 items-center justify-center" aria-label="Brush size preview">
+                  <span
+                    className="block rounded-full border border-[#1450F5] bg-[rgba(20,80,245,0.28)] shadow-[0_0_0_1px_rgba(20,80,245,0.12)]"
+                    style={{ width: Math.max(8, eraserBrushSize / 4), height: Math.max(8, eraserBrushSize / 4) }}
+                  />
+                </div>
+              )}
             </div>
             {eraserMode && (
               <label className="mt-3 block text-[11px] font-medium text-[#6B7280]">
