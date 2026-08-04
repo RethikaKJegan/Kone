@@ -456,6 +456,45 @@ def _fit_quad_to_bbox(
 
 
 
+def _lci_wall_plane_quad(
+    bbox: tuple[int, int, int, int],
+    image_size: tuple[int, int],
+    horizontal_angle: float,
+    vertical_lean: float,
+) -> tuple[list[tuple[float, float]], float, float] | None:
+    x1, y1, x2, y2 = bbox
+    width = max(1, x2 - x1)
+    height = max(1, y2 - y1)
+    center_x = (x1 + x2) * 0.5
+    side_position = float(np.clip((center_x / max(1.0, image_size[0]) - 0.5) * 2.0, -1.0, 1.0))
+    line_strength = max(abs(horizontal_angle) / 14.0, abs(vertical_lean) / 12.0)
+    plane_strength = float(np.clip(max(line_strength, abs(side_position) * 0.55), 0.0, 1.0))
+    if plane_strength < 0.22:
+        return None
+
+    side = 1.0 if side_position >= 0.0 else -1.0
+    horizontal_shift = float(np.clip(np.tan(np.radians(horizontal_angle)) * width, -height * 0.18, height * 0.18))
+    vertical_shift = float(np.clip(np.tan(np.radians(vertical_lean)) * height, -width * 0.16, width * 0.16))
+    side_taper = float(np.clip(height * (0.025 + 0.065 * plane_strength), height * 0.0, height * 0.095))
+
+    if side >= 0.0:
+        raw_quad = [
+            (float(x1), float(y1)),
+            (float(x2), float(y1) + side_taper + horizontal_shift),
+            (float(x2) + vertical_shift, float(y2) - side_taper + horizontal_shift),
+            (float(x1) + vertical_shift, float(y2)),
+        ]
+    else:
+        raw_quad = [
+            (float(x1), float(y1) + side_taper),
+            (float(x2), float(y1) + horizontal_shift),
+            (float(x2) + vertical_shift, float(y2) + horizontal_shift),
+            (float(x1) + vertical_shift, float(y2) - side_taper),
+        ]
+
+    return _fit_quad_to_bbox(raw_quad, bbox), side_position, plane_strength
+
+
 def _with_lci_cop_homography_points(transform: dict[str, Any], source_image: Image.Image) -> dict[str, Any]:
     if not _is_lci_or_cop_transform(transform):
         return transform
@@ -484,10 +523,15 @@ def _with_lci_cop_homography_points(transform: dict[str, Any], source_image: Ima
     vertical_lean = float(np.clip(vertical_lean or 0.0, -12.0, 12.0))
 
     if _is_lci_transform(transform):
-        center_x = (x1 + x2) * 0.5
-        side_position = float(np.clip((center_x / max(1.0, image_size[0]) - 0.5) * 2.0, -1.0, 1.0))
-        line_strength = max(abs(horizontal_angle) / 14.0, abs(vertical_lean) / 12.0)
-        internal_strength = float(np.clip(max(0.58, line_strength, abs(side_position) * 0.72), 0.0, 0.95))
+        plane = _lci_wall_plane_quad(bbox, image_size, horizontal_angle, vertical_lean)
+        if plane is None:
+            center_x = (x1 + x2) * 0.5
+            side_position = float(np.clip((center_x / max(1.0, image_size[0]) - 0.5) * 2.0, -1.0, 1.0))
+            plane_strength = max(abs(horizontal_angle) / 14.0, abs(vertical_lean) / 12.0)
+            fitted_quad = None
+        else:
+            fitted_quad, side_position, plane_strength = plane
+        internal_strength = float(np.clip(max(0.58, plane_strength, abs(side_position) * 0.72), 0.0, 0.95))
         next_transform = {**transform}
         next_transform.update({
             "autoLCIInternalPerspective": True,
@@ -496,6 +540,14 @@ def _with_lci_cop_homography_points(transform: dict[str, Any], source_image: Ima
             "autoPerspectiveHorizontalAngle": round(horizontal_angle, 2),
             "autoPerspectiveVerticalLean": round(vertical_lean, 2),
         })
+        if fitted_quad is not None:
+            next_transform.update({
+                "points": [{"x": round(float(x), 1), "y": round(float(y), 1)} for x, y in fitted_quad],
+                "coordinateSpace": "pixels",
+                "imageWidth": image_size[0],
+                "imageHeight": image_size[1],
+                "autoLCIWallPlaneHomography": True,
+            })
         return next_transform
 
     if abs(horizontal_angle) < 0.8 and abs(vertical_lean) < 0.8:
@@ -629,63 +681,13 @@ def _warp_component(component: Image.Image, transform: dict[str, Any], image_siz
 
 
 def _lci_internal_perspective_component(component: Image.Image, transform: dict[str, Any]) -> Image.Image:
-    if not _is_lci_transform(transform) or not transform.get("autoLCIInternalPerspective"):
-        return component.convert("RGBA")
-
     comp = component.convert("RGBA")
-    width, height = comp.size
-    if width < 12 or height < 12 or comp.getchannel("A").getbbox() is None:
+    if not _is_lci_transform(transform):
         return comp
 
-    side_position = _clamp_float(transform.get("autoLCISidePosition"), 0.0)
-    side = 1.0 if side_position >= 0.0 else -1.0
-    strength = float(np.clip(_clamp_float(transform.get("autoLCIInternalPerspectiveStrength"), 0.7), 0.0, 1.0))
-    horizontal_angle = _clamp_float(transform.get("autoPerspectiveHorizontalAngle"), 0.0)
-    vertical_lean = _clamp_float(transform.get("autoPerspectiveVerticalLean"), 0.0)
-
-    depth_px = float(np.clip(width * (0.10 + 0.16 * strength), width * 0.08, width * 0.26))
-    top_shift = float(np.clip(np.tan(np.radians(horizontal_angle)) * width, -height * 0.08, height * 0.08))
-    side_shift = float(np.clip(height * (0.08 + 0.14 * strength) + abs(vertical_lean) * 0.45, height * 0.08, height * 0.24))
-
-    if side >= 0.0:
-        face_quad = [
-            (0.0, 0.0),
-            (width - depth_px, side_shift + top_shift),
-            (width - depth_px, height - side_shift + top_shift),
-            (0.0, float(height)),
-        ]
-        bevel_poly = [(width - depth_px, side_shift + top_shift), (float(width), 0.0), (float(width), float(height)), (width - depth_px, height - side_shift + top_shift)]
-    else:
-        face_quad = [
-            (depth_px, side_shift),
-            (float(width), top_shift),
-            (float(width), float(height) + top_shift),
-            (depth_px, height - side_shift),
-        ]
-        bevel_poly = [(0.0, 0.0), (depth_px, side_shift), (depth_px, height - side_shift), (0.0, float(height))]
-
-    body = Image.new("RGBA", comp.size, (0, 0, 0, 0))
-
-    bevel_mask = Image.new("L", comp.size, 0)
-    ImageDraw.Draw(bevel_mask).polygon(bevel_poly, fill=92)
-    bevel_shade = Image.new("RGBA", comp.size, (42, 45, 45, 0))
-    bevel_shade.putalpha(bevel_mask.filter(ImageFilter.GaussianBlur(radius=0.45)))
-    body.alpha_composite(bevel_shade)
-
-    src_points = np.array([[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32)
-    dst_points = np.array(face_quad, dtype=np.float32)
-    matrix = cv2.getPerspectiveTransform(src_points, dst_points)
-    face_array = cv2.warpPerspective(
-        np.asarray(comp),
-        matrix,
-        (width, height),
-        flags=cv2.INTER_CUBIC,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(0, 0, 0, 0),
-    )
-    face = Image.fromarray(face_array, "RGBA")
-    body.alpha_composite(face)
-    return body
+    # LCI is a thin wall-mounted faceplate. The outer homography carries camera
+    # perspective; adding an internal side face creates the dark slab/reflection artifact.
+    return comp
 
 
 def _add_lci_plane_depth(component: Image.Image, transform: dict[str, Any]) -> Image.Image:
@@ -693,35 +695,15 @@ def _add_lci_plane_depth(component: Image.Image, transform: dict[str, Any]) -> I
         return component
 
     comp = component.convert("RGBA")
-    alpha = np.asarray(comp.getchannel("A"), dtype=np.float32) / 255.0
-    if float(alpha.max()) <= 0.0:
+    alpha_image = comp.getchannel("A")
+    if alpha_image.getbbox() is None:
         return comp
 
-    width, height = comp.size
-    side = 1.0
-    points = transform.get("points")
-    if isinstance(points, list) and len(points) == 4:
-        xs = [_clamp_float(point.get("x")) for point in points if isinstance(point, dict)]
-        if len(xs) == 4:
-            left_mid = (xs[0] + xs[3]) * 0.5
-            right_mid = (xs[1] + xs[2]) * 0.5
-            side = 1.0 if right_mid >= left_mid else -1.0
-
     rgb = np.asarray(comp.convert("RGB"), dtype=np.float32)
-    x_ramp = np.linspace(-1.0, 1.0, width, dtype=np.float32)[None, :, None]
-    y_ramp = np.linspace(0.08, -0.06, height, dtype=np.float32)[:, None, None]
-    face_light = 1.0 + side * x_ramp * 0.10 + y_ramp
-    rgb = rgb * face_light
-
-    alpha_image = comp.getchannel("A")
-    edge = alpha_image.filter(ImageFilter.FIND_EDGES).filter(ImageFilter.GaussianBlur(radius=1.1))
-    edge_array = (np.asarray(edge, dtype=np.float32) / 255.0)[..., None]
-    highlight = np.clip((side * x_ramp + 1.0) * 0.5, 0.0, 1.0)
-    shade = np.clip((-side * x_ramp + 1.0) * 0.5, 0.0, 1.0)
-    rgb = rgb + edge_array * highlight * 28.0
-    rgb = rgb * (1.0 - edge_array * shade * 0.18)
-
-    rgb = np.clip(rgb, 0.0, 255.0).astype(np.uint8)
+    width, height = comp.size
+    x_ramp = np.linspace(0.98, 1.02, width, dtype=np.float32)[None, :, None]
+    y_ramp = np.linspace(1.015, 0.985, height, dtype=np.float32)[:, None, None]
+    rgb = np.clip(rgb * x_ramp * y_ramp, 0.0, 255.0).astype(np.uint8)
     return Image.merge("RGBA", (*Image.fromarray(rgb, "RGB").split(), alpha_image))
 
 
@@ -768,7 +750,8 @@ def _paste_with_contact_shadow(
 ) -> None:
     alpha = component.getchannel("A")
     shadow = Image.new("RGBA", component.size, (0, 0, 0, 0))
-    shadow_alpha = alpha.filter(ImageFilter.GaussianBlur(radius=max(3, int(min(component.size) * 0.035))))
+    blur_radius = max(1, int(min(component.size) * (0.018 if shadow_strength <= 0.10 else 0.035)))
+    shadow_alpha = alpha.filter(ImageFilter.GaussianBlur(radius=blur_radius))
     shadow_alpha = shadow_alpha.point(lambda value: int(value * shadow_strength))
     shadow.putalpha(shadow_alpha)
     offset = max(1, int(min(component.size) * 0.014))
@@ -789,7 +772,7 @@ def _place_manual_component(base_image: Image.Image, component_image: Image.Imag
     scene_crop = base_image.crop((paste_x, paste_y, paste_x + visible.width, paste_y + visible.height))
     visible = _add_lci_plane_depth(visible, transform)
     visible = _soften_component_alpha(_match_component_to_scene(visible, scene_crop))
-    _paste_with_contact_shadow(result, visible, (paste_x, paste_y), 0.16 if _is_lci_transform(transform) else 0.34)
+    _paste_with_contact_shadow(result, visible, (paste_x, paste_y), 0.055 if _is_lci_transform(transform) else 0.34)
     px_bbox = (paste_x, paste_y, paste_x + visible.width, paste_y + visible.height)
     return result.convert("RGB"), px_bbox
 
@@ -832,7 +815,9 @@ def _firered_prompt(transform: dict[str, Any], perspective_analysis: str = "") -
             "Keep only the outer four corner coordinates, footprint and silhouette fixed; inside that silhouette, perspective correction is required and has priority over preserving a straight upright product-render look. "
             "If the wall is tilted or viewed from the side, the display and buttons must also tilt, taper and foreshorten. Their top and bottom edges must follow the same vanishing direction as the wall-mounted panel, not the screen. "
             "Remove any flat sticker look, pasted rectangular face, upright catalog view, parallel-to-screen buttons, or straight-on display. "
-            "Do not make the LCI/COP visually larger, move it, replace the model, invent extra controls, or change the chosen outer pin placement."
+            "Do not make the LCI/COP visually larger, move it, replace the model, invent extra controls, or change the chosen outer pin placement. "
+            "Treat LCI as a thin flat faceplate mounted flush to the wall, not as a protruding box. "
+            "Never create side thickness, a dark side face, cast slab, mirrored copy, reflected twin, translucent echo, opposite-side reflection, or duplicate LCI/COP anywhere outside the selected four-corner mask."
         )
     feedback_instructions = {
         "edge_alignment": "Sharpen only the local edge alignment: make the component boundary sit flush to the wall with clean seams, no halos, no ghost outline, and no duplicate border.",
@@ -1158,20 +1143,21 @@ def _firered_constrained_composite(
     if crop_mask.getbbox() is None:
         return source_crop
 
+    is_lci_transform = _is_lci_transform(transform)
     lci_cop_perspective_refine = _is_lci_or_cop_transform(transform) and _wants_perspective_refine(transform)
 
     face_strength = float(
         os.environ.get(
             "FIRERED_FACE_STRENGTH",
-            "0.68" if lci_cop_perspective_refine else "0.20",
+            "0.10" if is_lci_transform else ("0.68" if lci_cop_perspective_refine else "0.20"),
         )
     )
     shadow_strength = float(
-        os.environ.get("FIRERED_SHADOW_STRENGTH", "0.70")
+        os.environ.get("FIRERED_SHADOW_STRENGTH", "0.0" if is_lci_transform else "0.70")
     )
 
-    face_strength = float(np.clip(face_strength, 0.0, 0.78 if lci_cop_perspective_refine else 0.33))
-    shadow_strength = float(np.clip(shadow_strength, 0.0, 0.85))
+    face_strength = float(np.clip(face_strength, 0.0, 0.14 if is_lci_transform else (0.78 if lci_cop_perspective_refine else 0.33)))
+    shadow_strength = float(np.clip(shadow_strength, 0.0, 0.08 if is_lci_transform else 0.85))
 
     inner_face_mask = crop_mask.filter(
         ImageFilter.MinFilter(5)
@@ -1184,6 +1170,8 @@ def _firered_constrained_composite(
         crop_box,
         crop_size,
     )
+    if is_lci_transform:
+        outer_ring_mask = crop_mask.filter(ImageFilter.FIND_EDGES).filter(ImageFilter.GaussianBlur(radius=0.45))
 
     grayscale = source_crop.convert("L")
     grayscale_array = np.asarray(grayscale, dtype=np.uint8)
