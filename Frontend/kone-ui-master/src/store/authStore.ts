@@ -45,12 +45,38 @@ function mapApiUser(apiUser: ApiUser): User {
   }
 }
 
+function initialAuthState(): Pick<AuthState, 'user' | 'isAuthenticated' | 'isGuest' | 'token' | 'guestBannerDismissed'> {
+  if (typeof window === 'undefined') {
+    return { user: null, isAuthenticated: false, isGuest: false, token: null, guestBannerDismissed: false }
+  }
+
+  const token = localStorage.getItem('salesnxt_token')
+  const userStr = localStorage.getItem('salesnxt_user')
+  if (token && userStr) {
+    try {
+      return {
+        user: JSON.parse(userStr) as User,
+        token,
+        isAuthenticated: true,
+        isGuest: false,
+        guestBannerDismissed: false,
+      }
+    } catch {
+      localStorage.removeItem('salesnxt_token')
+      localStorage.removeItem('salesnxt_refresh_token')
+      localStorage.removeItem('salesnxt_user')
+    }
+  }
+
+  if (sessionStorage.getItem('guest_session') === '1') {
+    return { user: GUEST_USER, isGuest: true, isAuthenticated: false, token: null, guestBannerDismissed: false }
+  }
+
+  return { user: null, isAuthenticated: false, isGuest: false, token: null, guestBannerDismissed: false }
+}
+
 export const useAuthStore = create<AuthState>()((set, get) => ({
-  user: null,
-  isAuthenticated: false,
-  isGuest: false,
-  token: null,
-  guestBannerDismissed: false,
+  ...initialAuthState(),
 
   signIn: async (email, password) => {
     const { data } = await apiClient.post<{ user: ApiUser; tokens: AuthTokens }>('/auth/login', {

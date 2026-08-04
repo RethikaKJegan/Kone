@@ -37,6 +37,12 @@ function refreshProjects() {
   }
 }
 
+function initialOfferingStep(): OfferingStep {
+  if (typeof window === 'undefined') return 1
+  const step = Number(window.location.pathname.split('/step/').pop())
+  return step >= 1 && step <= 6 ? (step as OfferingStep) : 1
+}
+
 function makeGuestOffering(projectId: string): Offering {
   return {
     id: `guest_off_${Date.now()}`,
@@ -209,7 +215,7 @@ function writeOfferingState(state: OfferingState, offering: Offering) {
 export const useOfferingStore = create<OfferingState>()((set, get) => ({
   offerings: {},
   currentOffering: null,
-  currentStep: 1,
+  currentStep: initialOfferingStep(),
   isProcessing: false,
   videoGenerations: {},
 

@@ -7,7 +7,7 @@ import { useProjectStore } from '../../store/projectStore'
 import { TopBar } from '../../components/layout/TopBar'
 import { Skeleton } from '../../components/ui/skeleton'
 import { toast } from '../../hooks/useToast'
-import type { Offering } from '../../types'
+import type { Offering, OfferingStep } from '../../types'
 
 const Step1 = lazy(() => import('./steps/Step1Upload'))
 const Step2 = lazy(() => import('./steps/Step2Components'))
@@ -16,11 +16,17 @@ const Step4 = lazy(() => import('./steps/Step4Repin'))
 const Step5 = lazy(() => import('./steps/Step5Video'))
 const Step6 = lazy(() => import('./steps/Step6Download'))
 
+function stepFromPath(pathname: string): OfferingStep | null {
+  const step = Number(pathname.split('/step/').pop())
+  return step >= 1 && step <= 6 ? (step as OfferingStep) : null
+}
+
 export default function OfferingShell() {
   const { projectId, offeringId } = useParams<{ projectId: string; offeringId: string }>()
   const location = useLocation()
   const navigate = useNavigate()
   const { offerings, currentOffering, currentStep, fetchOfferings, setCurrentOffering, goToStep } = useOfferingStore()
+  const requestedStep = stepFromPath(location.pathname)
   const { projects } = useProjectStore()
   const [loadingOffering, setLoadingOffering] = useState(false)
 
@@ -44,7 +50,7 @@ export default function OfferingShell() {
 
       const found = projectOfferings.find(o => o.id === offeringId)
       if (found) {
-        setCurrentOffering(found)
+        setCurrentOffering({ ...found, savedStep: requestedStep ?? found.savedStep ?? 1 })
         return
       }
 
@@ -57,7 +63,7 @@ export default function OfferingShell() {
           navigate(`/projects/${projectId}`, { replace: true })
           return
         }
-        setCurrentOffering(data)
+        setCurrentOffering({ ...data, savedStep: requestedStep ?? data.savedStep ?? 1 })
       } catch {
         if (!cancelled) {
           toast('Visualization not found.', 'destructive')
@@ -71,11 +77,10 @@ export default function OfferingShell() {
     return () => {
       cancelled = true
     }
-  }, [currentOffering?.id, currentOffering?.projectId, offeringId, projectId, projectOfferings, setCurrentOffering, navigate])
+  }, [currentOffering?.id, currentOffering?.projectId, offeringId, projectId, projectOfferings, requestedStep, setCurrentOffering, navigate])
 
   useEffect(() => {
-    const match = location.pathname.match(/\/step\/([1-6])$/)
-    const step = match ? Number(match[1]) : null
+    const step = requestedStep
     if (!activeOffering) return
     const savedStep = activeOffering.savedStep
     if (step === 1 && savedStep && savedStep > 1 && currentStep === savedStep) {
@@ -85,7 +90,7 @@ export default function OfferingShell() {
     if (step && step !== currentStep) {
       goToStep(step as 1 | 2 | 3 | 4 | 5 | 6)
     }
-  }, [activeOffering, currentStep, goToStep, location.pathname, navigate, offeringId, projectId])
+  }, [activeOffering, currentStep, goToStep, requestedStep, navigate, offeringId, projectId])
 
   const crumbs = [
     { label: 'All Projects', to: '/projects' },

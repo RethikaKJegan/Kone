@@ -248,6 +248,11 @@ def _is_lci_or_cop_transform(transform: dict[str, Any] | None) -> bool:
     return component_key in {"lci", "cop"} or "landing call" in component_key or "control operating" in component_key
 
 
+def _is_lci_transform(transform: dict[str, Any] | None) -> bool:
+    component_key = _component_key_from_transform(transform)
+    return component_key == "lci" or "landing call" in component_key
+
+
 def _wants_perspective_refine(transform: dict[str, Any] | None) -> bool:
     if not isinstance(transform, dict):
         return False
@@ -450,6 +455,7 @@ def _fit_quad_to_bbox(
     ]
 
 
+
 def _with_lci_cop_homography_points(transform: dict[str, Any], source_image: Image.Image) -> dict[str, Any]:
     if not _is_lci_or_cop_transform(transform):
         return transform
@@ -476,6 +482,22 @@ def _with_lci_cop_homography_points(transform: dict[str, Any], source_image: Ima
 
     horizontal_angle = float(np.clip(horizontal_angle or 0.0, -14.0, 14.0))
     vertical_lean = float(np.clip(vertical_lean or 0.0, -12.0, 12.0))
+
+    if _is_lci_transform(transform):
+        center_x = (x1 + x2) * 0.5
+        side_position = float(np.clip((center_x / max(1.0, image_size[0]) - 0.5) * 2.0, -1.0, 1.0))
+        line_strength = max(abs(horizontal_angle) / 14.0, abs(vertical_lean) / 12.0)
+        internal_strength = float(np.clip(max(0.58, line_strength, abs(side_position) * 0.72), 0.0, 0.95))
+        next_transform = {**transform}
+        next_transform.update({
+            "autoLCIInternalPerspective": True,
+            "autoLCISidePosition": round(side_position, 3),
+            "autoLCIInternalPerspectiveStrength": round(internal_strength, 3),
+            "autoPerspectiveHorizontalAngle": round(horizontal_angle, 2),
+            "autoPerspectiveVerticalLean": round(vertical_lean, 2),
+        })
+        return next_transform
+
     if abs(horizontal_angle) < 0.8 and abs(vertical_lean) < 0.8:
         return transform
 
@@ -546,7 +568,7 @@ def _warp_component(component: Image.Image, transform: dict[str, Any], image_siz
         target_w, target_h = x2 - x1, y2 - y1
         if target_w <= 1 or target_h <= 1:
             raise ValueError("Repin transform points are too small")
-        component_rgba = component.convert("RGBA")
+        component_rgba = _lci_internal_perspective_component(component, transform)
         src_points = np.array(
             [
                 [0, 0],
@@ -574,6 +596,7 @@ def _warp_component(component: Image.Image, transform: dict[str, Any], image_siz
     x1, y1, x2, y2 = _transform_box_px(transform, image_size)
     target_w, target_h = x2 - x1, y2 - y1
     slot = component.convert("RGBA").resize((target_w, target_h), Image.Resampling.LANCZOS)
+    slot = _lci_internal_perspective_component(slot, transform)
 
     skew_x = _clamp_float(transform.get("skewX"))
     skew_y = _clamp_float(transform.get("skewY"))
@@ -603,6 +626,103 @@ def _warp_component(component: Image.Image, transform: dict[str, Any], image_siz
         y2 = y1 + slot.height
 
     return slot, (x1, y1, x2, y2)
+
+
+def _lci_internal_perspective_component(component: Image.Image, transform: dict[str, Any]) -> Image.Image:
+    if not _is_lci_transform(transform) or not transform.get("autoLCIInternalPerspective"):
+        return component.convert("RGBA")
+
+    comp = component.convert("RGBA")
+    width, height = comp.size
+    if width < 12 or height < 12 or comp.getchannel("A").getbbox() is None:
+        return comp
+
+    side_position = _clamp_float(transform.get("autoLCISidePosition"), 0.0)
+    side = 1.0 if side_position >= 0.0 else -1.0
+    strength = float(np.clip(_clamp_float(transform.get("autoLCIInternalPerspectiveStrength"), 0.7), 0.0, 1.0))
+    horizontal_angle = _clamp_float(transform.get("autoPerspectiveHorizontalAngle"), 0.0)
+    vertical_lean = _clamp_float(transform.get("autoPerspectiveVerticalLean"), 0.0)
+
+    depth_px = float(np.clip(width * (0.10 + 0.16 * strength), width * 0.08, width * 0.26))
+    top_shift = float(np.clip(np.tan(np.radians(horizontal_angle)) * width, -height * 0.08, height * 0.08))
+    side_shift = float(np.clip(height * (0.08 + 0.14 * strength) + abs(vertical_lean) * 0.45, height * 0.08, height * 0.24))
+
+    if side >= 0.0:
+        face_quad = [
+            (0.0, 0.0),
+            (width - depth_px, side_shift + top_shift),
+            (width - depth_px, height - side_shift + top_shift),
+            (0.0, float(height)),
+        ]
+        bevel_poly = [(width - depth_px, side_shift + top_shift), (float(width), 0.0), (float(width), float(height)), (width - depth_px, height - side_shift + top_shift)]
+    else:
+        face_quad = [
+            (depth_px, side_shift),
+            (float(width), top_shift),
+            (float(width), float(height) + top_shift),
+            (depth_px, height - side_shift),
+        ]
+        bevel_poly = [(0.0, 0.0), (depth_px, side_shift), (depth_px, height - side_shift), (0.0, float(height))]
+
+    body = Image.new("RGBA", comp.size, (0, 0, 0, 0))
+
+    bevel_mask = Image.new("L", comp.size, 0)
+    ImageDraw.Draw(bevel_mask).polygon(bevel_poly, fill=92)
+    bevel_shade = Image.new("RGBA", comp.size, (42, 45, 45, 0))
+    bevel_shade.putalpha(bevel_mask.filter(ImageFilter.GaussianBlur(radius=0.45)))
+    body.alpha_composite(bevel_shade)
+
+    src_points = np.array([[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32)
+    dst_points = np.array(face_quad, dtype=np.float32)
+    matrix = cv2.getPerspectiveTransform(src_points, dst_points)
+    face_array = cv2.warpPerspective(
+        np.asarray(comp),
+        matrix,
+        (width, height),
+        flags=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0, 0),
+    )
+    face = Image.fromarray(face_array, "RGBA")
+    body.alpha_composite(face)
+    return body
+
+
+def _add_lci_plane_depth(component: Image.Image, transform: dict[str, Any]) -> Image.Image:
+    if not _is_lci_transform(transform):
+        return component
+
+    comp = component.convert("RGBA")
+    alpha = np.asarray(comp.getchannel("A"), dtype=np.float32) / 255.0
+    if float(alpha.max()) <= 0.0:
+        return comp
+
+    width, height = comp.size
+    side = 1.0
+    points = transform.get("points")
+    if isinstance(points, list) and len(points) == 4:
+        xs = [_clamp_float(point.get("x")) for point in points if isinstance(point, dict)]
+        if len(xs) == 4:
+            left_mid = (xs[0] + xs[3]) * 0.5
+            right_mid = (xs[1] + xs[2]) * 0.5
+            side = 1.0 if right_mid >= left_mid else -1.0
+
+    rgb = np.asarray(comp.convert("RGB"), dtype=np.float32)
+    x_ramp = np.linspace(-1.0, 1.0, width, dtype=np.float32)[None, :, None]
+    y_ramp = np.linspace(0.08, -0.06, height, dtype=np.float32)[:, None, None]
+    face_light = 1.0 + side * x_ramp * 0.10 + y_ramp
+    rgb = rgb * face_light
+
+    alpha_image = comp.getchannel("A")
+    edge = alpha_image.filter(ImageFilter.FIND_EDGES).filter(ImageFilter.GaussianBlur(radius=1.1))
+    edge_array = (np.asarray(edge, dtype=np.float32) / 255.0)[..., None]
+    highlight = np.clip((side * x_ramp + 1.0) * 0.5, 0.0, 1.0)
+    shade = np.clip((-side * x_ramp + 1.0) * 0.5, 0.0, 1.0)
+    rgb = rgb + edge_array * highlight * 28.0
+    rgb = rgb * (1.0 - edge_array * shade * 0.18)
+
+    rgb = np.clip(rgb, 0.0, 255.0).astype(np.uint8)
+    return Image.merge("RGBA", (*Image.fromarray(rgb, "RGB").split(), alpha_image))
 
 
 def _match_component_to_scene(component: Image.Image, scene_crop: Image.Image) -> Image.Image:
@@ -667,8 +787,9 @@ def _place_manual_component(base_image: Image.Image, component_image: Image.Imag
         raise ValueError("Repin transform places the component outside the image")
     visible = warped.crop((crop_l, crop_t, crop_r, crop_b))
     scene_crop = base_image.crop((paste_x, paste_y, paste_x + visible.width, paste_y + visible.height))
+    visible = _add_lci_plane_depth(visible, transform)
     visible = _soften_component_alpha(_match_component_to_scene(visible, scene_crop))
-    _paste_with_contact_shadow(result, visible, (paste_x, paste_y))
+    _paste_with_contact_shadow(result, visible, (paste_x, paste_y), 0.16 if _is_lci_transform(transform) else 0.34)
     px_bbox = (paste_x, paste_y, paste_x + visible.width, paste_y + visible.height)
     return result.convert("RGB"), px_bbox
 
@@ -696,6 +817,13 @@ def _firered_prompt(transform: dict[str, Any], perspective_analysis: str = "") -
         feedback_keys = [feedback_key] if feedback_key else []
     component = str(transform.get("componentKey") or transform.get("componentType") or "component")
     component_perspective_sentence = ""
+    shadow_sentence = (
+        "Create tight ambient occlusion directly along all four panel-to-wall seams. Add one clearly visible soft cast shadow on the wall opposite the dominant light source. The shadow must begin at the panel boundary, remain attached to the plate, be darkest near the mounting edge and gradually soften with distance. The shadow must follow the existing panel silhouette and perspective. Do not create a second rectangle, backing plate, border, frame, floating layer or duplicate panel."
+    )
+    if _is_lci_transform(transform):
+        shadow_sentence = (
+            "For the LCI, keep shadowing minimal: only a thin contact occlusion directly under the single panel edge. Do not create a large cast shadow, offset rectangle, translucent duplicate, backing plate, second LCI, glass slab, or floating ghost panel."
+        )
     if _is_lci_or_cop_transform(transform):
         component_perspective_sentence = (
             " STRICT LCI/COP PERSPECTIVE RULES: treat this small panel with the same camera-pose rules used for the elevator interior and doors. "
@@ -731,7 +859,7 @@ def _firered_prompt(transform: dict[str, Any], perspective_analysis: str = "") -
         "Infer the dominant light direction from the surrounding wall, ceiling highlights and elevator reflections. Apply that same illumination continuously across the panel. Create a restrained highlight on the light-facing edges and darker shading on the opposite edges."
         "Express depth only through subtle tonal shading and restrained edge highlights entirely inside the existing panel silhouette. Do not generate visible thickness, extrusion, backing material, raised extensions or any pixels resembling another object outside the exact four panel corners."
 
-        "Create tight ambient occlusion directly along all four panel-to-wall seams. Add one clearly visible soft cast shadow on the wall opposite the dominant light source. The shadow must begin at the panel boundary, remain attached to the plate, be darkest near the mounting edge and gradually soften with distance. The shadow must follow the existing panel silhouette and perspective. Do not create a second rectangle, backing plate, border, frame, floating layer or duplicate panel."
+        f"{shadow_sentence}"
 
         "Preserve exactly every existing button, display, arrow, number, icon, logo, label, spacing and product detail. Do not add, remove, repeat, merge, redraw or reinterpret any control. Do not alter the elevator, door, wall tiles, joints, signs, floor or surrounding architecture. There is exactly one LCI in the edited region."
         "Do not move, resize, redesign, replace, erase, or duplicate the component. Do not alter elevator doors, wall tiles, signs, floor, ceiling, or background geometry outside the immediate component edge transition. "
@@ -1234,13 +1362,11 @@ def _run_firered_if_available(input_path: Path, output_path: Path, transform: di
         )
 
     if not service_succeeded:
+        firered_python = os.environ.get("FIRERED_PYTHON", "/root/Kone/firered_venv/bin/python")
         try:
-            subprocess.run(
+            completed = subprocess.run(
                 [
-                    os.environ.get(
-                        "FIRERED_PYTHON",
-                        "/root/Kone/vdotest/ComfyUI/.venv/bin/python",
-                    ),
+                    firered_python,
                     str(script_path),
                     "--image",
                     str(fire_input),
@@ -1255,11 +1381,19 @@ def _run_firered_if_available(input_path: Path, output_path: Path, transform: di
                 ],
                 check=True,
                 env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
             )
+            if completed.stdout.strip():
+                print(completed.stdout.strip(), flush=True)
         except Exception as exc:
+            detail = getattr(exc, "stderr", "") or getattr(exc, "stdout", "") or str(exc)
+            last_line = str(detail).strip().splitlines()[-1] if str(detail).strip() else str(exc)
             print(
-                f"[FIRERED] unavailable or failed: {exc}",
+                f"[FIRERED] optional refinement skipped: {last_line}",
                 file=sys.stderr,
+                flush=True,
             )
             return False
     if crop_box is not None:
