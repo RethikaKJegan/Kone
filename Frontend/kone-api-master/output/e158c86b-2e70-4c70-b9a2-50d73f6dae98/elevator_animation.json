@@ -1,7 +1,0 @@
-{
-  "engine": "camera_motion",
-  "motion": "pan-lr",
-  "quality": "1080p",
-  "prompt": "Deterministic left-to-right camera pan generated from the final preview image; elevator doors and scene pixels remain unchanged.",
-  "generatedAt": "2026-06-26T15:48:34.550Z"
-}
