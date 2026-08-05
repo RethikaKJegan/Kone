@@ -83,6 +83,35 @@ const offeringSchema = mongoose.Schema(
       type: String,
       default: null,
     },
+    uploadedImageBlobPath: {
+      type: String,
+      default: null,
+    },
+    selectedImageBlobPath: {
+      type: String,
+      default: null,
+    },
+    finalVideoBlobPath: {
+      type: String,
+      default: null,
+    },
+    azureSyncStatus: {
+      uploadedImage: {
+        type: String,
+        enum: ['pending', 'success', 'failed', 'skipped', null],
+        default: null,
+      },
+      selectedImage: {
+        type: String,
+        enum: ['pending', 'success', 'failed', 'skipped', null],
+        default: null,
+      },
+      finalVideo: {
+        type: String,
+        enum: ['pending', 'success', 'failed', 'skipped', null],
+        default: null,
+      },
+    },
     downloadZipPath: {
       type: String,
       default: null,

@@ -13,6 +13,7 @@ const eraserHistoryEntry = Joi.object().keys({
 const imageIdBody = {
   body: Joi.object().keys({
     imageId: Joi.string().required(),
+    offeringId: Joi.string(),
     sourceImageUrl: Joi.string(),
     videoOptions: Joi.object().unknown(true),
   }),

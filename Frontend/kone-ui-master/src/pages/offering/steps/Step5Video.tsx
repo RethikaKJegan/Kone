@@ -197,6 +197,7 @@ export default function Step5Video() {
 
         await apiClient.post('/video/generate', {
           imageId: effectiveImageId,
+          offeringId: currentOffering.id,
           sourceImageUrl:
           currentOffering.outputImagePath
           ?? currentOffering.outputImageUrl,

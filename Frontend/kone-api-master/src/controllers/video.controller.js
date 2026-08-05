@@ -242,8 +242,33 @@ const { promisify } = require('util');
 const Offering = require('../models/offering.model');
 const Project = require('../models/project.model');
 const { projectService } = require('../services');
+const { uploadFileToAzure } = require('../services/azureBlob.service');
+const {
+  uploadedImageBlobPath,
+  selectedImageBlobPath,
+  finalVideoBlobPath,
+} = require('../utils/azureBlobPaths');
+
 
 const fsPromises = fs.promises;
+const uploadAzureCopy = (localFilePath, blobPath, contentType, onSuccess) => {
+  uploadFileToAzure(localFilePath, blobPath, contentType)
+    .then(async (result) => {
+      if (!result.success) {
+        console.warn('[Azure] Copy failed/skipped:', result);
+        return;
+      }
+
+      console.log('[Azure] Copied:', result.blobPath);
+
+      if (onSuccess) {
+        await onSuccess(result);
+      }
+    })
+    .catch((error) => {
+      console.error('[Azure] Copy crashed:', error.message);
+    });
+};
 const execFileAsync = promisify(execFile);
 const LOGIC_URL = process.env.LOGIC_URL || 'http://localhost:8001';
 const COMFY_ROOT = process.env.COMFY_ROOT || '/workspace/Kone/vdotest';
@@ -1044,6 +1069,19 @@ const selectComponents = async (req, res) => {
         message: 'Invalid offeringId',
       });
     }
+    const originalBlobPath = uploadedImageBlobPath({
+      userId: req.user.id,
+      projectId: offering.projectId,
+      offeringId,
+      fileName: 'original-image.jpg',
+    });
+
+    uploadAzureCopy(job.inputPath, originalBlobPath, 'image/jpeg', async (result) => {
+      await Offering.findByIdAndUpdate(offeringId, {
+        uploadedImageBlobPath: result.blobPath,
+        'azureSyncStatus.uploadedImage': 'success',
+      });
+    });
 
     const effectiveEnvironments = environments.length ? environments : job.environment ? [job.environment] : [];
 
@@ -1292,12 +1330,54 @@ const generateVideo = async (req, res) => {
     if (path.resolve(inputPath) !== path.resolve(videoInputPath)) {
       await fsPromises.copyFile(inputPath, videoInputPath);
     }
+    const offeringId = req.body.offeringId;
+
+    if (offeringId) {
+      const offering = await getOwnedOffering(offeringId, req.user.id);
+
+      if (offering) {
+        const selectedBlobPath = selectedImageBlobPath({
+          userId: req.user.id,
+          projectId: offering.projectId,
+          offeringId,
+          fileName: 'selected-for-video.png',
+        });
+
+        uploadAzureCopy(videoInputPath, selectedBlobPath, 'image/png', async (result) => {
+          await Offering.findByIdAndUpdate(offeringId, {
+            selectedImageBlobPath: result.blobPath,
+            'azureSyncStatus.selectedImage': 'success',
+          });
+        });
+      }
+    }
 
     await generateComfyVideo({
       inputPath: videoInputPath,
       outputDir,
       videoOptions,
     });
+    const finalVideoPath = path.join(outputDir, 'elevator_animation.mp4');
+
+    if (offeringId && await fileExists(finalVideoPath)) {
+      const offering = await getOwnedOffering(offeringId, req.user.id);
+
+      if (offering) {
+        const videoBlobPath = finalVideoBlobPath({
+          userId: req.user.id,
+          projectId: offering.projectId,
+          offeringId,
+          fileName: 'final-video.mp4',
+        });
+
+        uploadAzureCopy(finalVideoPath, videoBlobPath, 'video/mp4', async (result) => {
+          await Offering.findByIdAndUpdate(offeringId, {
+            finalVideoBlobPath: result.blobPath,
+            'azureSyncStatus.finalVideo': 'success',
+          });
+        });
+      }
+    }
 
     // Write manifest
     await fsPromises.writeFile(

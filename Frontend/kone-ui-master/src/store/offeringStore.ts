@@ -754,6 +754,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
         try {
           await apiClient.post('/video/generate', {
             imageId,
+            offeringId: currentOffering.id,
             sourceImageUrl:  currentOffering.outputImagePath ?? currentOffering.outputImageUrl ?? currentOffering.uploadedFileUrl ?? undefined,
             videoOptions: {
               motion: currentOffering.videoMotionStyle,
