@@ -26,7 +26,15 @@ function normalizeBlobName(value) {
     .replace(/\/+/g, "/");
 }
 
-async function uploadFileToAzure(localFilePath, blobPath, contentType) {
+function cleanMetadata(metadata = {}) {
+  return Object.fromEntries(
+    Object.entries(metadata)
+      .filter(([, value]) => value !== undefined && value !== null)
+      .map(([key, value]) => [key, String(value)])
+  );
+}
+
+async function uploadFileToAzure(localFilePath, blobPath, contentType, metadata = {}) {
   try {
     const client = getContainerClient();
 
@@ -45,6 +53,7 @@ async function uploadFileToAzure(localFilePath, blobPath, contentType) {
       blobHTTPHeaders: contentType
         ? { blobContentType: contentType }
         : undefined,
+      metadata: cleanMetadata(metadata),
     });
 
     return {
@@ -66,6 +75,32 @@ async function uploadFileToAzure(localFilePath, blobPath, contentType) {
   }
 }
 
+function getBlobClient(blobPath) {
+  const client = getContainerClient();
+
+  if (!client) {
+    throw new Error("Azure upload disabled or missing config");
+  }
+
+  return client.getBlobClient(normalizeBlobName(blobPath));
+}
+
+async function blobExists(blobPath) {
+  return getBlobClient(blobPath).exists();
+}
+
+async function getBlobMetadata(blobPath) {
+  const properties = await getBlobClient(blobPath).getProperties();
+  return properties.metadata || {};
+}
+
+function getBlobUrl(blobPath) {
+  return getBlobClient(blobPath).url;
+}
+
 module.exports = {
   uploadFileToAzure,
+  blobExists,
+  getBlobMetadata,
+  getBlobUrl,
 };

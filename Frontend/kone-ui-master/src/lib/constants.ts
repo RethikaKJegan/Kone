@@ -24,7 +24,7 @@ export const KONE_COMPONENTS: ComponentItem[] = [
     variants: [
       { id: 'lci-flush-up', label: 'LCI Flush - Up', imageUrl: '/components/lci/lci-flush-up.png' },
       { id: 'lci-surface-up', label: 'LCI Surface - Up', imageUrl: '/components/lci/lci-surface-up.png' },
-      { id: 'ci-7-segment', label: 'CI - 7 Segment', imageUrl: '/components/lci/ci-7-segment.png' },
+      { id: 'ci-7-segment', label: 'CI - 7 Segment', imageUrl: '/components/lci/CI - 7 Segment.png' },
       { id: 'lci-flush-up-down', label: 'LCI Flush - Up/Down', imageUrl: '/components/lci/lci-flush-up-down.png' },
       { id: 'lci-surface-up-down', label: 'LCI Surface - Up/Down', imageUrl: '/components/lci/LCI Surface – UpDown.png' },
       { id: 'ci-dot-matrix', label: 'CI - Dot Matrix', imageUrl: '/components/lci/ci-dot-matrix.png' },

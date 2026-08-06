@@ -243,6 +243,7 @@ const Offering = require('../models/offering.model');
 const Project = require('../models/project.model');
 const { projectService } = require('../services');
 const { uploadFileToAzure } = require('../services/azureBlob.service');
+const User = require('../models/user.model');
 const {
   uploadedImageBlobPath,
   selectedImageBlobPath,
@@ -1370,12 +1371,66 @@ const generateVideo = async (req, res) => {
           fileName: 'final-video.mp4',
         });
 
-        uploadAzureCopy(finalVideoPath, videoBlobPath, 'video/mp4', async (result) => {
-          await Offering.findByIdAndUpdate(offeringId, {
-            finalVideoBlobPath: result.blobPath,
-            'azureSyncStatus.finalVideo': 'success',
-          });
+        const originalBlobPath = uploadedImageBlobPath({
+          userId: req.user.id,
+          projectId: offering.projectId,
+          offeringId,
+          fileName: 'original-image.jpg',
         });
+
+        const selectedBlobPath = selectedImageBlobPath({
+          userId: req.user.id,
+          projectId: offering.projectId,
+          offeringId,
+          fileName: 'selected-for-video.png',
+        });
+
+        const originalInputPath = getUploadInputPath(imageId);
+        if (await fileExists(originalInputPath)) {
+          const originalUploadResult = await uploadFileToAzure(originalInputPath, originalBlobPath, 'image/jpeg');
+          if (originalUploadResult.success) {
+            await Offering.findByIdAndUpdate(offeringId, {
+              uploadedImageBlobPath: originalUploadResult.blobPath,
+              'azureSyncStatus.uploadedImage': 'success',
+            });
+          } else {
+            console.warn('[Azure] Original image backup upload failed/skipped:', originalUploadResult);
+          }
+        } else {
+          console.warn('[Azure] Original image backup upload skipped: local input missing', originalInputPath);
+        }
+
+        const project = await Project.findById(offering.projectId);
+        const user = await User.findById(req.user.id);
+
+        const videoMetadata = {
+          userId: req.user.id,
+          projectId: String(offering.projectId),
+          offeringId,
+          personName: user?.name || req.user.name || '',
+          projectName: project?.name || '',
+          beforeBlobPath: originalBlobPath,
+          afterBlobPath: selectedBlobPath,
+          videoBlobPath,
+        };
+
+        uploadFileToAzure(finalVideoPath, videoBlobPath, 'video/mp4', videoMetadata)
+          .then(async (result) => {
+            if (!result.success) {
+              console.warn('[Azure] Final video copy failed/skipped:', result);
+              return;
+            }
+
+            console.log('[Azure] Copied final video with metadata:', result.blobPath);
+
+            await Offering.findByIdAndUpdate(offeringId, {
+              finalVideoBlobPath: result.blobPath,
+              'azureSyncStatus.finalVideo': 'success',
+            });
+          })
+          .catch((error) => {
+            console.error('[Azure] Final video copy crashed:', error.message);
+          });
       }
     }
 
