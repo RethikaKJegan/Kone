@@ -39,7 +39,7 @@ function passwordStrength(pw: string): { label: string; level: number; color: st
 
 export default function SignUpPage() {
   const [showPw, setShowPw] = useState(false)
-  const { signUp, continueAsGuest } = useAuthStore()
+  const { signUp } = useAuthStore()
   const navigate = useNavigate()
 
   const {
@@ -64,11 +64,6 @@ export default function SignUpPage() {
         setError('email', { message: 'Something went wrong. Try again.' })
       }
     }
-  }
-
-  const handleGuest = () => {
-    continueAsGuest()
-    navigate('/projects')
   }
 
   const inputClass =
@@ -178,23 +173,6 @@ export default function SignUpPage() {
             Create account
           </button>
         </form>
-
-        <div className="relative my-6">
-          <div className="absolute inset-0 flex items-center">
-            <div className="w-full border-t border-[#F0F0F0]" />
-          </div>
-          <div className="relative flex justify-center">
-            <span className="bg-white px-3 text-[11px] font-medium text-[#C4C9D4]">or</span>
-          </div>
-        </div>
-
-        <button
-          onClick={handleGuest}
-          className="flex w-full items-center justify-center rounded-lg border border-[#E4E4E4] bg-white text-[13px] font-semibold text-[#374151] transition-all duration-[150ms] hover:border-[#D1D5DB] hover:bg-[#F9FAFB]"
-          style={{ height: 42 }}
-        >
-          Continue as guest
-        </button>
 
         <p className="mt-6 text-center text-[12px] text-[#9CA3AF]">
           Already have an account?{' '}
