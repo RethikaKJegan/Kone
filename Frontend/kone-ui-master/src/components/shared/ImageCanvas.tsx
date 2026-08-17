@@ -14,6 +14,7 @@ interface Props {
 
 export function ImageCanvas({ imageUrl, pins, selectedComponent, labels, onPinMove, showAnnotations = true }: Props) {
   const [zoom, setZoom] = useState(1)
+  const [imageSize, setImageSize] = useState({ width: 1000, height: 750 })
   const containerRef = useRef<HTMLDivElement>(null)
 
   const handleCanvasClick = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -26,7 +27,7 @@ export function ImageCanvas({ imageUrl, pins, selectedComponent, labels, onPinMo
   }
 
   return (
-    <div className="relative w-full overflow-hidden rounded-lg bg-[#0A0A0A]" style={{ aspectRatio: '4/3' }}>
+    <div className="relative w-full overflow-hidden rounded-lg bg-[#0A0A0A]" style={{ aspectRatio: imageSize.width + ' / ' + imageSize.height }}>
       <div
         ref={containerRef}
         onClick={handleCanvasClick}
@@ -39,7 +40,18 @@ export function ImageCanvas({ imageUrl, pins, selectedComponent, labels, onPinMo
         aria-label="Component placement canvas — click to reposition selected component"
       >
         {imageUrl ? (
-          <img src={imageUrl} alt="Building" className="w-full h-full object-cover" />
+          <img
+            src={imageUrl}
+            alt="Building"
+            className="h-full w-full object-fill"
+            onLoad={event => {
+              const img = event.currentTarget
+              setImageSize({
+                width: img.naturalWidth || imageSize.width,
+                height: img.naturalHeight || imageSize.height,
+              })
+            }}
+          />
         ) : (
           <div className="w-full h-full bg-[#1A1A1A]" />
         )}

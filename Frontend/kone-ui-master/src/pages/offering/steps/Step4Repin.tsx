@@ -135,7 +135,6 @@ export default function Step4Repin() {
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [eraserMode, setEraserMode] = useState(false)
   const [placementPreview, setPlacementPreview] = useState(false)
-  const [sourceChooserComp, setSourceChooserComp] = useState<ComponentKey | null>(null)
   const [eraserBrushSize, setEraserBrushSize] = useState(48)
 
   useEffect(() => {
@@ -151,7 +150,14 @@ export default function Step4Repin() {
     let changed = false
     const nextTransforms: Partial<Record<ComponentKey, RepinTransform>> = { ...(offering?.repinTransforms ?? repinTransforms) }
     components.forEach(comp => {
-      if (nextTransforms[comp]) return
+      const existing = nextTransforms[comp]
+      if (existing) {
+        if (existing.sourceVersion !== sourceVersion || existing.targetVersion !== targetVersion) {
+          nextTransforms[comp] = { ...existing, sourceVersion, targetVersion }
+          changed = true
+        }
+        return
+      }
       nextTransforms[comp] = repinTransformFromPin(comp, sourceVersion, targetVersion, pins.find((p: ComponentPin) => p.componentKey === comp))
       changed = true
     })
@@ -171,7 +177,7 @@ export default function Step4Repin() {
     setCanvasConfirmed(false)
     setEraserMode(false)
     setPlacementPreview(false)
-  }, [selectedComp, sourceVersion])
+  }, [sourceVersion])
 
   useEffect(() => {
     let stopped = false
@@ -265,7 +271,9 @@ export default function Step4Repin() {
   const canUndoEraser = Boolean(transform?.eraserHistory && transform.eraserHistory.length > 1)
   const canRedoEraser = Boolean(transform?.eraserRedoStack && transform.eraserRedoStack.length > 0)
   const isSameComponentReEdit = Boolean(selectedComp && sourceVersion > 1 && sourceVersionComponent === selectedComp)
-  const canvasBaseBackgroundUrl = sourceVersion > 1 || selectedComp === 'door' ? (previewImageUrl ?? originalImageUrl) : (originalImageUrl ?? previewImageUrl)
+  const transformHasCleanBackground = Boolean(sourceVersion > 1 && (transform?.repinBackgroundDisplayUrl || transform?.repinBackgroundUrl))
+  const isGeneratedComponentReEdit = isSameComponentReEdit || transformHasCleanBackground
+  const canvasBaseBackgroundUrl = sourceVersion > 1 ? (previewImageUrl ?? originalImageUrl) : (originalImageUrl ?? previewImageUrl)
   const hasGeneratedRepinBackground = sourceVersion > 1
   const sameComponentSourcePreview = isSameComponentReEdit && selectedSourcePreview?.sourceVersion
     ? versions.find(item => Number(item.version) === Number(selectedSourcePreview.sourceVersion))
@@ -276,9 +284,9 @@ export default function Step4Repin() {
   const manualEraserBackgroundUrl = hasManualEraserBackground(transform)
     ? transform?.repinBackgroundDisplayUrl ?? transform?.repinBackgroundUrl ?? null
     : null
-  const editingBackgroundUrl = manualEraserBackgroundUrl ?? (isSameComponentReEdit
-    ? (sameComponentSourceBackgroundUrl ?? repinBackgroundForEditing(transform, true) ?? canvasBaseBackgroundUrl)
-    : sourceVersion > 1 || selectedComp === 'door'
+  const editingBackgroundUrl = manualEraserBackgroundUrl ?? (isGeneratedComponentReEdit
+    ? (repinBackgroundForEditing(transform, true) ?? sameComponentSourceBackgroundUrl ?? canvasBaseBackgroundUrl)
+    : sourceVersion > 1
       ? canvasBaseBackgroundUrl
       : (repinBackgroundForEditing(transform, hasGeneratedRepinBackground) ?? canvasBaseBackgroundUrl))
   const eraserBackgroundRevision = [
@@ -291,25 +299,23 @@ export default function Step4Repin() {
     const separator = editingBackgroundUrl.includes('?') ? '&' : '?'
     return editingBackgroundUrl + separator + 'magicEraserRevision=' + encodeURIComponent(eraserBackgroundRevision)
   }, [editingBackgroundUrl, eraserBackgroundRevision, transform?.eraserHistory])
-  const generatedComponentsInSource = new Set(
-    versions
-      .filter(version => version.version <= sourceVersion)
-      .map(version => version.transform?.componentKey)
-      .filter(Boolean) as ComponentKey[]
-  )
-  const staticComponentLayers = false
-    ? components
-        .filter(comp => comp !== selectedComp && !generatedComponentsInSource.has(comp))
-        .map(comp => {
-          const layerTransform = repinTransforms[comp] ?? defaultTransformFor(comp)
-          return {
-            transform: layerTransform,
-            label: COMP_LABELS[comp],
-            componentImageUrl: componentImageFor(offering, comp) ?? layerTransform.editableLayerUrl ?? null,
-          }
-        })
-        .filter(layer => Boolean(layer.componentImageUrl))
-    : []
+  const staticComponentLayers = components
+    .filter(comp => comp !== selectedComp)
+    .map(comp => {
+      const layerTransform = repinTransforms[comp] ?? defaultTransformFor(comp)
+      return {
+        transform: layerTransform,
+        label: COMP_LABELS[comp],
+        componentImageUrl: componentImageFor(offering, comp) ?? layerTransform.editableLayerUrl ?? null,
+        onSelect: () => {
+          setSelectedComp(comp)
+          setInspectedVersion(null)
+          setEraserMode(false)
+          setPlacementPreview(false)
+        },
+      }
+    })
+    .filter(layer => Boolean(layer.componentImageUrl))
 
   const persistTransforms = (nextTransforms: Partial<Record<ComponentKey, RepinTransform>>) => {
     setLocalRepinTransforms(nextTransforms)
@@ -323,71 +329,6 @@ export default function Step4Repin() {
       if (history.length && transformSnapshot(history[history.length - 1]) === transformSnapshot(snapshot)) return prev
       return { ...prev, [key]: [...history, snapshot] }
     })
-  }
-
-  const handleSelectComponent = (component: ComponentKey) => {
-    if (versions.length > 1) {
-      const shouldOpenChooser = sourceChooserComp !== component
-      if (selectedComp !== component) {
-        handleStartComponent(component, latestVersion || sourceVersion)
-      }
-      setSourceChooserComp(shouldOpenChooser ? component : null)
-      return
-    }
-    handleStartComponent(component, sourceVersion)
-  }
-
-  const handleStartComponent = (component: ComponentKey, version: number) => {
-    const nextTargetVersion = Math.min(latestVersion + 1, 5)
-    const existing = repinTransforms[component]
-    const versionPreview = versions.find(item => item.version === version)
-    const sameComponentReEdit = version > 1 && versionPreview?.transform?.componentKey === component
-    const pinTransform = repinTransformFromPin(component, version, nextTargetVersion, pins.find((p: ComponentPin) => p.componentKey === component))
-    const seedTransform = sameComponentReEdit ? (versionPreview?.transform ?? existing ?? pinTransform) : (existing ?? pinTransform)
-    const sameComponentEditableLayerUrl = sameComponentReEdit
-      ? versionPreview?.transform?.editableLayerUrl ?? existing?.editableLayerUrl ?? null
-      : seedTransform.editableLayerUrl ?? null
-    const sourceOfVersionPreview = versionPreview?.sourceVersion
-      ? versions.find(item => Number(item.version) === Number(versionPreview.sourceVersion))
-      : null
-    const sameComponentSourceBackgroundUrl = sameComponentReEdit
-      ? versionUrl(sourceOfVersionPreview ?? undefined, originalImageUrl)
-      : null
-    const backgroundTransform = sameComponentReEdit
-      ? ([versionPreview?.transform, existing, pinTransform].find(item => item?.repinBackgroundUrl) ?? versionPreview?.transform ?? existing ?? pinTransform)
-      : null
-    const sameComponentBackgroundUrl = sameComponentReEdit
-      ? sameComponentSourceBackgroundUrl
-        ?? backgroundTransform?.repinBackgroundUrl
-        ?? backgroundTransform?.repinBackgroundDisplayUrl
-        ?? null
-      : null
-    const sameComponentBackgroundDisplayUrl = sameComponentReEdit
-      ? sameComponentSourceBackgroundUrl
-        ?? backgroundTransform?.repinBackgroundDisplayUrl
-        ?? backgroundTransform?.repinBackgroundUrl
-        ?? null
-      : null
-    const nextTransform = {
-      ...seedTransform,
-      componentKey: component,
-      componentType: component,
-      sourceVersion: version,
-      targetVersion: nextTargetVersion,
-      editableLayerUrl: sameComponentEditableLayerUrl,
-      repinBackgroundUrl: sameComponentBackgroundUrl,
-      repinBackgroundDisplayUrl: sameComponentBackgroundDisplayUrl,
-      eraserHistory: backgroundTransform?.eraserHistory ?? [],
-      eraserRedoStack: backgroundTransform?.eraserRedoStack ?? [],
-    }
-    setSelectedSourceVersion(version)
-    setSelectedComp(component)
-    setSourceChooserComp(null)
-    setInspectedVersion(null)
-    setCanvasConfirmed(false)
-    setEraserMode(false)
-    setPlacementPreview(false)
-    persistTransforms({ ...repinTransforms, [component]: nextTransform })
   }
 
   const handleTransformEditStart = (snapshot: RepinTransform) => {
@@ -479,7 +420,6 @@ export default function Step4Repin() {
   const handleConfirmCanvas = () => {
     if (!selectedComp || !transform) return
 
-    // Persist only the final confirmed transform.
     persistTransforms({
       ...repinTransforms,
       [selectedComp]: transform,
@@ -491,7 +431,6 @@ export default function Step4Repin() {
   }
 
   const handleInspectVersion = (version: PreviewVersion) => {
-    setSourceChooserComp(null)
     setInspectedVersion(version)
   }
 
@@ -524,35 +463,48 @@ export default function Step4Repin() {
   const handleGenerate = async () => {
     if (!transform || !selectedComp) return
     if (!canvasConfirmed) {
-      toast('Confirm the selected component before generating a new preview.', 'destructive')
+      toast("Confirm all component positions before generating a new preview.", "destructive")
       return
     }
     if (generationLimitReached) {
-      toast('Version limit reached. Choose the best saved version to continue to video.', 'destructive')
+      toast("Version limit reached. Choose the best saved version to continue to video.", "destructive")
       return
     }
-    const payload = {
-      ...transformForRepinSubmit(transform, hasGeneratedRepinBackground || isSameComponentReEdit),
-      componentKey: selectedComp,
-      componentType: selectedComp,
-      sourceVersion,
-      targetVersion,
-      rotation: transform.rotation || 0,
-      skewX: transform.skewX || 0,
-      skewY: transform.skewY || 0,
-      editableLayerUrl: isSameComponentReEdit ? transform.editableLayerUrl ?? null : null,
-      repinBackgroundUrl: transform.repinBackgroundUrl ?? null,
-      repinBackgroundDisplayUrl: transform.repinBackgroundDisplayUrl ?? null,
-      feedbackOption: feedbackOptions[0] ?? null,
-      feedbackOptions,
-      sourceBaseMode,
-      sourceVersionComponent,
-    }
+
+    const submittedTransforms = components
+      .map(comp => {
+        const item = repinTransforms[comp] ?? (comp === selectedComp ? transform : defaultTransformFor(comp))
+        if (!item) return null
+        const sameComponent = sourceVersion > 1 && (sourceVersionComponent === comp || Boolean(item.repinBackgroundDisplayUrl || item.repinBackgroundUrl))
+        return {
+          ...transformForRepinSubmit(item, hasGeneratedRepinBackground || sameComponent),
+          componentKey: comp,
+          componentType: comp,
+          sourceVersion,
+          targetVersion,
+          rotation: item.rotation || 0,
+          skewX: item.skewX || 0,
+          skewY: item.skewY || 0,
+          editableLayerUrl: sameComponent ? item.editableLayerUrl ?? null : null,
+          repinBackgroundUrl: item.repinBackgroundUrl ?? null,
+          repinBackgroundDisplayUrl: item.repinBackgroundDisplayUrl ?? null,
+          feedbackOption: feedbackOptions[0] ?? null,
+          feedbackOptions,
+          sourceBaseMode,
+          sourceVersionComponent,
+        }
+      })
+      .filter(Boolean) as RepinTransform[]
+
+    const primaryPayload = submittedTransforms.find(item => item.componentKey === selectedComp) ?? submittedTransforms[0]
+    if (!primaryPayload) return
+
     try {
-      await submitRepinPreview(payload)
-      toast('Generating repin preview ')
+      persistTransforms(Object.fromEntries(submittedTransforms.map(item => [item.componentKey, item])) as Partial<Record<ComponentKey, RepinTransform>>)
+      await submitRepinPreview(primaryPayload, submittedTransforms)
+      toast("Generating combined repin preview")
     } catch (error) {
-      toast(error instanceof Error ? error.message : 'Could not start repin preview', 'destructive')
+      toast(error instanceof Error ? error.message : "Could not start repin preview", "destructive")
     }
   }
 
@@ -597,42 +549,7 @@ export default function Step4Repin() {
 
       <div className="mt-4 flex gap-0 border-t border-[#E9ECEF]">
         <div className="relative flex-[3] p-6 pr-3">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-            <div className="flex flex-wrap gap-2">
-              {components.map(comp => (
-                <div key={comp} className="relative">
-                  <button
-                    type="button"
-                    onClick={() => handleSelectComponent(comp)}
-                    className={cn(
-                      "min-w-[128px] rounded-[5px] border px-3 py-2 text-left text-xs font-medium transition-colors duration-[120ms]",
-                      selectedComp === comp ? "border-[#1450F5] bg-[#EFF6FF] text-[#1450F5]" : "border-[#E4E4E4] text-[#525252] hover:border-[#BFDBFE]"
-                    )}
-                  >
-                    <span className="block truncate">{COMP_LABELS[comp]}</span>
-                    <span className="mt-1 block text-[10px] font-medium text-[#9CA3AF]">
-                      {selectedComp === comp ? "From Version " + sourceVersion : "Choose base"}
-                    </span>
-                  </button>
-                  {sourceChooserComp === comp && (
-                    <div className="absolute left-0 top-[calc(100%+6px)] z-30 w-48 rounded-[6px] border border-[#DADDE3] bg-white p-2 shadow-lg">
-                      <p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-[#9CA3AF]">Start from</p>
-                      {versions.map(version => (
-                        <button
-                          key={version.version}
-                          type="button"
-                          onClick={() => handleStartComponent(comp, version.version)}
-                          className="flex w-full items-center justify-between rounded-[4px] px-2 py-1.5 text-left text-[11px] font-semibold text-[#525252] hover:bg-[#EFF6FF] hover:text-[#1450F5]"
-                        >
-                          <span>{version.version === latestVersion ? "Latest approved" : "Version " + version.version}</span>
-                          <span className="text-[10px] font-medium text-[#9CA3AF]">V{version.version}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
+          <div className="mb-3 flex items-center justify-end">
             <span className="text-[11px] font-medium text-[#9CA3AF]">Editing Version {sourceVersion} to {targetVersion}</span>
           </div>
 
@@ -669,11 +586,11 @@ export default function Step4Repin() {
               </div>
             ) : (
               <RepinTransformCanvas
-                key={String(selectedComp) + ":" + String(sourceVersion) + ":" + eraserBackgroundRevision + ":" + (isSameComponentReEdit ? (transform.editableLayerUrl ?? 'generated-layer') : (selectedComponentImageUrl ?? 'asset'))}
+                key={String(sourceVersion) + ":" + (editingCanvasImageUrl ?? "base")}
                 imageUrl={editingCanvasImageUrl}
                 transform={transform}
                 label={COMP_LABELS[selectedComp]}
-                componentImageUrl={isSameComponentReEdit ? (transform.editableLayerUrl ?? null) : (selectedComponentImageUrl ?? transform.editableLayerUrl ?? null)}
+                componentImageUrl={isGeneratedComponentReEdit ? (transform.editableLayerUrl ?? selectedComponentImageUrl ?? null) : (selectedComponentImageUrl ?? transform.editableLayerUrl ?? null)}
                 staticLayers={staticComponentLayers}
                 eraserEnabled={eraserMode && !placementPreview}
                 eraserBrushSize={eraserBrushSize}

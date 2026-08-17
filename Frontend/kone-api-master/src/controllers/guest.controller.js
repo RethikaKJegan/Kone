@@ -479,6 +479,9 @@ const runRepin = catchAsync(async (req, res) => {
   const root = projectDir(sessionId, projectId);
   const logicTransform = withLocalRepinFiles(transform);
   const logicTransforms = transforms.map((item) => withLocalRepinFiles(item));
+  const repinComponents = Array.from(new Set((logicTransforms.length ? logicTransforms : [logicTransform])
+    .map((item) => item?.componentKey)
+    .filter(Boolean)));
   const queueKey = root;
   const latestKey = previewRequestKey || null;
   latestComponentRunKeys.set(queueKey, latestKey);
@@ -494,7 +497,7 @@ const runRepin = catchAsync(async (req, res) => {
           project_id: projectId,
           project_name: projectName,
           storage_dir: root,
-          selected_components: selectedComponents,
+          selected_components: repinComponents.length ? repinComponents : selectedComponents,
           component_assets: componentAssets,
           environments,
           preview_request_key: previewRequestKey,

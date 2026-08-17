@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect } from 'react'
+import { lazy, Suspense } from 'react'
 import { createBrowserRouter, RouterProvider, Navigate, Outlet } from 'react-router-dom'
 import { AppShell } from '../components/layout/AppShell'
 import { useAuthStore } from '../store/authStore'
@@ -11,8 +11,8 @@ const OfferingShell = lazy(() => import('../pages/offering/OfferingShell'))
 const BrochurePage = lazy(() => import('../pages/offering/brochure/BrochurePage'))
 
 function AuthGuard() {
-  const { isAuthenticated, isGuest } = useAuthStore()
-  if (!isAuthenticated && !isGuest) return <Navigate to="/signin" replace />
+  const { isAuthenticated } = useAuthStore()
+  if (!isAuthenticated) return <Navigate to="/signin" replace />
   return <Outlet />
 }
 
@@ -20,16 +20,6 @@ function PublicOnlyGuard() {
   const { isAuthenticated } = useAuthStore()
   if (isAuthenticated) return <Navigate to="/projects" replace />
   return <Outlet />
-}
-
-function GuestRedirect() {
-  const continueAsGuest = useAuthStore(s => s.continueAsGuest)
-
-  useEffect(() => {
-    continueAsGuest()
-  }, [continueAsGuest])
-
-  return <Navigate to="/projects" replace />
 }
 
 function FullPageLoader() {
@@ -58,7 +48,7 @@ const router = createBrowserRouter([
       },
       {
         path: '/guest',
-        element: <GuestRedirect />,
+        element: <Navigate to="/signin" replace />,
       },
       {
         path: '/signup',

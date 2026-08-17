@@ -6,9 +6,9 @@ const auth = require('../../middlewares/auth');
 
 const router = express.Router();
 
-router.post('/register', validate(authValidation.register), authController.register);
+router.post('/register', (req, res) => res.status(403).send({ message: 'Registration is disabled' }));
 router.post('/login', validate(authValidation.login), authController.login);
-router.post('/guest-login', authController.guestLogin);
+router.post('/guest-login', (req, res) => res.status(403).send({ message: 'Guest login is disabled' }));
 router.post('/logout', auth(), validate(authValidation.logout), authController.logout);
 router.post('/refresh-tokens', validate(authValidation.refreshTokens), authController.refreshTokens);
 router.post('/forgot-password', validate(authValidation.forgotPassword), authController.forgotPassword);

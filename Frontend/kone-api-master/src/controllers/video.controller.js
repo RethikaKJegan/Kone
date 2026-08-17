@@ -494,6 +494,9 @@ const mergeComponentPins = (existingPins = [], updatedPins = []) => {
 const runLogicRepin = async ({ imageId, userId, transform, transforms = [], componentAssets, environments, previewRequestKey }) => {
   const logicTransform = withLocalRepinFiles(transform);
   const logicTransforms = transforms.map((item) => withLocalRepinFiles(item));
+  const repinComponents = Array.from(new Set((logicTransforms.length ? logicTransforms : [logicTransform])
+    .map((item) => item?.componentKey)
+    .filter(Boolean)));
   const storageDir = getLogicStorageDir(userId, imageId);
   const uploadsDir = path.join(storageDir, 'uploads');
   const previewDir = path.join(storageDir, 'preview');
@@ -517,7 +520,7 @@ const runLogicRepin = async ({ imageId, userId, transform, transforms = [], comp
       project_id: imageId,
       project_name: imageId,
       storage_dir: storageDir,
-      selected_components: [transform.componentKey],
+      selected_components: repinComponents.length ? repinComponents : [transform.componentKey],
       component_assets: componentAssets,
       environments,
       preview_request_key: previewRequestKey,

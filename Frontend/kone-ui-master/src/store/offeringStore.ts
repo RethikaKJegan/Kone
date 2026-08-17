@@ -90,7 +90,7 @@ interface OfferingState {
   setPins: (pins: ComponentPin[]) => void
   setRepinTransforms: (transforms: Partial<Record<ComponentKey, RepinTransform>>) => void
   runAIPlacement: () => Promise<ComponentPin[]>
-  submitRepinPreview: (transform: RepinTransform) => Promise<void>
+  submitRepinPreview: (transform: RepinTransform, transforms?: RepinTransform[]) => Promise<void>
   eraseRepinBackground: (transform: RepinTransform, maskDataUrl: string, sourceVersion: number, sourceBaseMode: 'original' | 'version') => Promise<RepinTransform>
   setAnnotationState: (enabled: boolean, filters: ComponentKey[]) => void
   setVideoSettings: (
@@ -569,7 +569,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
 
 
 
-  submitRepinPreview: async transform => {
+  submitRepinPreview: async (transform, transforms) => {
     const { currentOffering } = get()
     if (!currentOffering) return
     if (transform.targetVersion > 5) {
@@ -577,15 +577,17 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
     }
     set({ isProcessing: true })
     try {
-      const previewRequestKey = `repin:${currentOffering.id}:${transform.componentKey}:v${transform.targetVersion}:${Date.now()}`
+      const submittedTransforms = (transforms?.length ? transforms : [transform])
+      const transformComponents = submittedTransforms.map(item => item.componentKey)
+      const previewRequestKey = `repin:${currentOffering.id}:${transformComponents.join("-") || transform.componentKey}:v${transform.targetVersion}:${Date.now()}`
       const selectedComponents = Array.from(new Set([
         ...(currentOffering.selectedComponents.length ? currentOffering.selectedComponents : []),
-        transform.componentKey,
+        ...transformComponents,
       ]))
       const selectedComponentAssets = componentAssetMap(selectedComponents, currentOffering.selectedComponentAssets)
       const confirmedRepinTransforms = {
         ...(currentOffering.repinTransforms ?? {}),
-        [transform.componentKey]: transform,
+        ...Object.fromEntries(submittedTransforms.map(item => [item.componentKey, item])),
       }
       const updated = patchOffering(currentOffering, {
         pipelineStatus: 'processing',
@@ -612,7 +614,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
           environments: currentOffering.environments,
           preview_request_key: previewRequestKey,
           transform,
-          transforms: Object.values(confirmedRepinTransforms).filter(Boolean),
+          transforms: submittedTransforms,
         }, { timeout: 0 })
       } else {
         const imageId = imageIdFromOffering(currentOffering)
@@ -628,7 +630,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
           component_assets: componentAssets,
           preview_request_key: previewRequestKey,
           transform,
-          transforms: Object.values(confirmedRepinTransforms).filter(Boolean),
+          transforms: submittedTransforms,
         }, { timeout: 0 })
       }
     } catch (error) {

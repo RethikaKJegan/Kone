@@ -28,4 +28,4 @@ cd "$COMFY"
 
 SESSION_LOG="$LOG_DIR/comfyui_$(date +%Y%m%d_%H%M%S).log"
 
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "${COMFY}/.venv/bin/python" main.py --listen 0.0.0.0 --port 8188 2>&1 | tee "$SESSION_LOG"
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "$COMFY/.venv/bin/python" main.py --listen 0.0.0.0 --port 8188 >> "$SESSION_LOG" 2>&1

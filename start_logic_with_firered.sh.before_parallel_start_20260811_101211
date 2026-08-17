@@ -29,10 +29,28 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-echo "FireRed is loading in background..."
-echo "Main logic will start immediately."
-echo "Check FireRed readiness with:"
-echo "  curl -s http://127.0.0.1:8010/health"
+echo "Waiting for FireRed service..."
+
+for i in $(seq 1 120); do
+  if curl -fsS http://127.0.0.1:8010/health >/dev/null 2>&1; then
+    echo "FireRed service is ready."
+    break
+  fi
+
+  if ! kill -0 "$FIRERED_PID" 2>/dev/null; then
+    echo "FireRed service failed to start."
+    tail -n 100 /root/Kone/firered_service.log
+    exit 1
+  fi
+
+  sleep 1
+done
+
+if ! curl -fsS http://127.0.0.1:8010/health >/dev/null 2>&1; then
+  echo "FireRed service did not become ready."
+  tail -n 100 /root/Kone/firered_service.log
+  exit 1
+fi
 
 echo "Starting main logic server on GPU 0..."
 

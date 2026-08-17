@@ -6,7 +6,7 @@ interface Props {
   transform: RepinTransform
   label: string
   componentImageUrl?: string | null
-  staticLayers?: { transform: RepinTransform; label: string; componentImageUrl: string | null }[]
+  staticLayers?: { transform: RepinTransform; label: string; componentImageUrl: string | null; onSelect?: () => void }[]
   eraserEnabled?: boolean
   eraserBrushSize?: number
   previewOnly?: boolean
@@ -508,7 +508,13 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
           return (
             <div
               key={layer.transform.componentKey + ":" + layer.label}
-              className="pointer-events-none absolute overflow-hidden"
+              className={layer.onSelect ? "absolute cursor-pointer overflow-hidden" : "pointer-events-none absolute overflow-hidden"}
+              onPointerDown={event => {
+                if (!layer.onSelect) return
+                event.preventDefault()
+                event.stopPropagation()
+                layer.onSelect()
+              }}
               style={{
                 left: String((box.bbox.x / imageSize.width) * 100) + "%",
                 top: String((box.bbox.y / imageSize.height) * 100) + "%",
@@ -538,7 +544,7 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
         ) : null}
 
         {!previewOnly && (
-        <svg className="absolute inset-0 h-full w-full overflow-visible" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label={`${label} perspective quad`}>
+        <svg className="pointer-events-none absolute inset-0 h-full w-full overflow-visible" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label={`${label} perspective quad`}>
           <polygon points={polygonPoints} fill="rgba(20,80,245,0.08)" stroke="white" strokeWidth="0.45" vectorEffect="non-scaling-stroke" />
           <polygon
             points={polygonPoints}
@@ -546,7 +552,7 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
             stroke="#1450F5"
             strokeWidth="2"
             vectorEffect="non-scaling-stroke"
-            className="cursor-move"
+            className="pointer-events-auto cursor-move"
             onPointerDown={event => beginDrag(event, 'move')}
           />
         </svg>
