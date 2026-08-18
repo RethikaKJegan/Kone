@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Loader2, Play, RotateCcw } from 'lucide-react'
+import { Loader2, Play } from 'lucide-react'
 import apiClient from '../../../api/client'
 import { getGuestSessionId, isGuestSession } from '../../../api/guestWorkflow'
 import { useOfferingStore } from '../../../store/offeringStore'
@@ -11,13 +11,6 @@ import type { Offering } from '../../../types'
 
 type MotionStyle = Offering['videoMotionStyle']
 type Quality = Offering['videoQuality']
-
-const ESTIMATED_VIDEO_SECONDS: Record<Quality, number> = {
-  '360p': 480,
-  '480p': 600,
-  '720p': 780,
-  '1080p': 900,
-}
 
 function availableMotionStyle(value: string | undefined): MotionStyle {
   if (value === 'pan-lr' || value === 'pan-rl') return 'pan'
@@ -86,17 +79,7 @@ export default function Step5Video() {
   const isDoorFunctionality = motion === 'door-functionality'
   const videoStyles = VIDEO_MOTION_STYLES
   const effectiveImageId = imageIdFromOffering(currentOffering)
-  const estimatedSeconds = useMemo(() => {
-    const qualityEstimate = ESTIMATED_VIDEO_SECONDS[quality] ?? ESTIMATED_VIDEO_SECONDS['1080p']
-    return isDoorFunctionality ? Math.max(qualityEstimate, 900) : qualityEstimate
-  }, [isDoorFunctionality, quality])
   const elapsedSeconds = generationStartedAt ? (progressNow - generationStartedAt) / 1000 : 0
-  const progressPercent = generating
-    ? Math.min(96, Math.max(3, Math.round((elapsedSeconds / estimatedSeconds) * 100)))
-    : 0
-  const remainingSeconds = generating
-    ? Math.max(0, estimatedSeconds - elapsedSeconds)
-    : 0
 
   useEffect(() => {
     if (!activeVideoGeneration) return
@@ -244,6 +227,24 @@ export default function Step5Video() {
     }
   }
 
+  const handleSkipVideoGeneration = () => {
+    if (!currentOffering?.outputImageUrl) {
+      toast("Generate the image preview before skipping video generation.", "destructive")
+      return
+    }
+    setLoadFailed(false)
+    setCurrentOffering({
+      ...currentOffering,
+      outputVideoUrl: null,
+      videoGenerated: false,
+      downloadUrl: null,
+      renderComplete: true,
+      pipelineStatus: "preview_ready",
+    })
+    goToStep(6)
+    navigate("/projects/" + projectId + "/offerings/" + offeringId + "/step/6")
+  }
+
   const handleContinue = () => {
     if (!videoReady) {
       toast('Generate the video preview before opening Downloads.', 'destructive')
@@ -321,30 +322,11 @@ export default function Step5Video() {
                         <p className="text-xs text-white/70">{formatDuration(elapsedSeconds)} elapsed</p>
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      title="Refresh estimate"
-                      aria-label="Refresh estimate"
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        startGenerationTimer()
-                      }}
-                      className="flex shrink-0 items-center justify-center rounded-full border border-white/20 bg-white/10 text-white transition-colors duration-[120ms] hover:bg-white/20"
-                      style={{ width: 34, height: 34 }}
-                    >
-                      <RotateCcw style={{ width: 15, height: 15 }} />
-                    </button>
                   </div>
                   <div className="mb-2 h-2 overflow-hidden rounded-full bg-white/20">
-                    <div
-                      className="h-full rounded-full bg-[#1450F5] transition-[width] duration-1000 ease-linear"
-                      style={{ width: `${progressPercent}%` }}
-                    />
+                    <div className="h-full w-full animate-pulse rounded-full bg-[#1450F5]" />
                   </div>
-                  <div className="flex items-center justify-between text-xs text-white/80">
-                    <span>{progressPercent}%</span>
-                    <span>About {formatDuration(remainingSeconds)} left</span>
-                  </div>
+                  <p className="text-xs text-white/80">Live elapsed time updates while generation is running.</p>
                 </div>
               </div>
             )}
@@ -393,6 +375,14 @@ export default function Step5Video() {
       </div>
 
       <div className="mt-8 flex justify-end gap-3">
+        <button
+          onClick={handleSkipVideoGeneration}
+          disabled={generating || !currentOffering?.outputImageUrl}
+          className="rounded-lg border border-[#D7E0FF] bg-white px-6 text-[13px] font-semibold text-[#1450F5] transition-all duration-[150ms] hover:bg-[#F5F8FF] disabled:cursor-not-allowed disabled:opacity-40"
+          style={{ height: 38 }}
+        >
+          Skip video generation
+        </button>
         <button
           onClick={handleGeneratePreview}
           disabled={generating}

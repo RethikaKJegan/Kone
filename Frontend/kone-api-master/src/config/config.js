@@ -22,6 +22,10 @@ const envVarsSchema = Joi.object()
     SMTP_USERNAME: Joi.string().description('username for email server'),
     SMTP_PASSWORD: Joi.string().description('password for email server'),
     EMAIL_FROM: Joi.string().description('the from field in the emails sent by the app'),
+    BROCHURE_INTEGRATION_URL: Joi.string()
+      .uri()
+      .default('https://api.sales-nxt.app/api/integrations/brochures'),
+    BROCHURE_INTEGRATION_API_KEY: Joi.string().allow('').default(''),
   })
   .unknown();
 
@@ -59,5 +63,9 @@ module.exports = {
       },
     },
     from: envVars.EMAIL_FROM,
+  },
+  brochureIntegration: {
+    url: envVars.BROCHURE_INTEGRATION_URL,
+    apiKey: envVars.BROCHURE_INTEGRATION_API_KEY,
   },
 };

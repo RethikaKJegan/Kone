@@ -17,7 +17,7 @@ interface Props {
 
 type QuadPoint = { x: number; y: number }
 type QuadPoints = [QuadPoint, QuadPoint, QuadPoint, QuadPoint]
-type DragMode = 'move' | 'corner-0' | 'corner-1' | 'corner-2' | 'corner-3' | 'rotate' | 'skew-x' | 'skew-y'
+type DragMode = 'move' | 'corner-0' | 'corner-1' | 'corner-2' | 'corner-3' | 'edge-top' | 'edge-right' | 'edge-bottom' | 'edge-left' | 'rotate' | 'skew-x' | 'skew-y'
 
 const MIN_SIZE = 8
 const ERASER_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 28 28'%3E%3Cg fill='none' stroke='%231450F5' stroke-width='2' stroke-linejoin='round'%3E%3Cpath fill='white' d='M5 17 16 6l7 7-11 11H5z'/%3E%3Cpath d='m12 24 11-11'/%3E%3C/g%3E%3C/svg%3E") 5 22, crosshair`
@@ -26,6 +26,13 @@ const CORNERS = [
   { label: 'Top right', cursor: 'cursor-nesw-resize' },
   { label: 'Bottom right', cursor: 'cursor-nwse-resize' },
   { label: 'Bottom left', cursor: 'cursor-nesw-resize' },
+] as const
+
+const EDGE_HANDLES = [
+  { mode: "edge-top", label: "Top edge", cursor: "cursor-ns-resize" },
+  { mode: "edge-right", label: "Right edge", cursor: "cursor-ew-resize" },
+  { mode: "edge-bottom", label: "Bottom edge", cursor: "cursor-ns-resize" },
+  { mode: "edge-left", label: "Left edge", cursor: "cursor-ew-resize" },
 ] as const
 
 function clamp(value: number, min: number, max: number) {
@@ -114,6 +121,36 @@ function scalePointsFromAnchor(points: QuadPoints, anchorIndex: number, dragInde
     x: anchor.x + (point.x - anchor.x) * scale,
     y: anchor.y + (point.y - anchor.y) * scale,
   })) as QuadPoints
+}
+
+function moveEdge(points: QuadPoints, mode: DragMode, dx: number, dy: number, imageSize: { width: number; height: number }): QuadPoints {
+  const next = points.map(point => ({ ...point })) as QuadPoints
+  if (mode === 'edge-top') {
+    const minDy = -Math.min(points[0].y, points[1].y)
+    const maxDy = Math.min(points[2].y - points[0].y - MIN_SIZE, points[3].y - points[1].y - MIN_SIZE)
+    const edgeDy = clamp(dy, minDy, maxDy)
+    next[0].y = points[0].y + edgeDy
+    next[1].y = points[1].y + edgeDy
+  } else if (mode === 'edge-bottom') {
+    const minDy = Math.max(points[0].y - points[2].y + MIN_SIZE, points[1].y - points[3].y + MIN_SIZE)
+    const maxDy = imageSize.height - Math.max(points[2].y, points[3].y)
+    const edgeDy = clamp(dy, minDy, maxDy)
+    next[2].y = points[2].y + edgeDy
+    next[3].y = points[3].y + edgeDy
+  } else if (mode === 'edge-left') {
+    const minDx = -Math.min(points[0].x, points[3].x)
+    const maxDx = Math.min(points[1].x - points[0].x - MIN_SIZE, points[2].x - points[3].x - MIN_SIZE)
+    const edgeDx = clamp(dx, minDx, maxDx)
+    next[0].x = points[0].x + edgeDx
+    next[3].x = points[3].x + edgeDx
+  } else if (mode === 'edge-right') {
+    const minDx = Math.max(points[0].x - points[1].x + MIN_SIZE, points[3].x - points[2].x + MIN_SIZE)
+    const maxDx = imageSize.width - Math.max(points[1].x, points[2].x)
+    const edgeDx = clamp(dx, minDx, maxDx)
+    next[1].x = points[1].x + edgeDx
+    next[2].x = points[2].x + edgeDx
+  }
+  return next
 }
 
 function defaultsFor(componentKey: ComponentKey) {
@@ -285,6 +322,14 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
   }
 
 
+  const rememberAssetAspectRatio = (naturalWidth: number, naturalHeight: number) => {
+    if (!naturalWidth || !naturalHeight || normalized.assetAspectRatio) return
+    const aspectRatio = naturalWidth / naturalHeight
+    if (!Number.isFinite(aspectRatio) || aspectRatio <= 0) return
+
+    setTransform({ ...normalized, assetAspectRatio: aspectRatio })
+  }
+
   const prepareEraserCanvas = () => {
     const canvas = eraserCanvasRef.current
     if (!canvas) return null
@@ -423,6 +468,11 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
         return
       }
 
+      if (drag.mode === "edge-top" || drag.mode === "edge-right" || drag.mode === "edge-bottom" || drag.mode === "edge-left") {
+        setTransform({ ...drag.start, points: moveEdge(startPoints, drag.mode, dx, dy, imageSize) })
+        return
+      }
+
       const cornerIndex = Number(drag.mode.replace('corner-', ''))
       if (cornerIndex >= 0 && cornerIndex < 4) {
         if (event.shiftKey) {
@@ -459,7 +509,12 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
   const center = quadCenter(points)
   const topCenter = midpoint(points[0], points[1])
   const rightCenter = midpoint(points[1], points[2])
-  const rotateHandle = { x: topCenter.x, y: topCenter.y - Math.max(30, imageSize.height * 0.04) }
+  const bottomCenter = midpoint(points[2], points[3])
+  const leftCenter = midpoint(points[3], points[0])
+  const edgeHandlePoints = [topCenter, rightCenter, bottomCenter, leftCenter]
+  const topSkewHandle = { x: topCenter.x, y: topCenter.y - Math.max(16, imageSize.height * 0.022) }
+  const rightSkewHandle = { x: rightCenter.x + Math.max(16, imageSize.width * 0.022), y: rightCenter.y }
+  const rotateHandle = { x: topCenter.x, y: topCenter.y - Math.max(42, imageSize.height * 0.058) }
 
   return (
     <div className="relative w-full overflow-hidden rounded-lg bg-transparent" style={{ aspectRatio: `${imageSize.width} / ${imageSize.height}` }}>
@@ -539,7 +594,13 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
               clipPath: `polygon(${relativePolygon})`,
             }}
           >
-            <img src={componentImageUrl} alt={label} className="h-full w-full object-fill" draggable={false} />
+            <img
+              src={componentImageUrl}
+              alt={label}
+              className="h-full w-full object-fill"
+              draggable={false}
+              onLoad={event => rememberAssetAspectRatio(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight)}
+            />
           </div>
         ) : null}
 
@@ -596,7 +657,7 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
               type="button"
               onPointerDown={event => beginDrag(event, 'skew-x')}
               className="absolute z-10 h-4 w-8 -translate-x-1/2 -translate-y-1/2 cursor-ew-resize rounded-full border-2 border-white bg-[#1450F5] shadow"
-              style={{ left: `${(topCenter.x / imageSize.width) * 100}%`, top: `${(topCenter.y / imageSize.height) * 100}%` }}
+              style={{ left: `${(topSkewHandle.x / imageSize.width) * 100}%`, top: `${(topSkewHandle.y / imageSize.height) * 100}%` }}
               aria-label="Skew horizontally"
               title="Skew horizontally"
             />
@@ -604,12 +665,27 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
               type="button"
               onPointerDown={event => beginDrag(event, 'skew-y')}
               className="absolute z-10 h-8 w-4 -translate-x-1/2 -translate-y-1/2 cursor-ns-resize rounded-full border-2 border-white bg-[#1450F5] shadow"
-              style={{ left: `${(rightCenter.x / imageSize.width) * 100}%`, top: `${(rightCenter.y / imageSize.height) * 100}%` }}
+              style={{ left: `${(rightSkewHandle.x / imageSize.width) * 100}%`, top: `${(rightSkewHandle.y / imageSize.height) * 100}%` }}
               aria-label="Skew vertically"
               title="Skew vertically"
             />
           </>
         ) : null}
+
+        {!eraserEnabled && !previewOnly && EDGE_HANDLES.map((handle, index) => {
+          const point = edgeHandlePoints[index]
+          return (
+            <button
+              key={handle.mode}
+              type="button"
+              onPointerDown={event => beginDrag(event, handle.mode)}
+              className={`absolute z-10 h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-[3px] border-2 border-white bg-[#1450F5] shadow ${handle.cursor}`}
+              style={{ left: `${(point.x / imageSize.width) * 100}%`, top: `${(point.y / imageSize.height) * 100}%` }}
+              aria-label={`${handle.label} resize`}
+              title={`${handle.label} resize`}
+            />
+          )
+        })}
 
         {!eraserEnabled && !previewOnly && points.map((corner, index) => (
           <button

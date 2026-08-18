@@ -12,8 +12,6 @@ import { toast } from '../../../hooks/useToast'
 import type { ComponentKey, ComponentPin } from '../../../types'
 
 const COMP_LABELS = Object.fromEntries(KONE_COMPONENTS.map(c => [c.key, c.label])) as Record<ComponentKey, string>
-const ESTIMATED_PREVIEW_SECONDS = 90
-
 function formatPreviewTime(seconds: number) {
   if (seconds <= 0) return 'less than 1 sec'
   const minutes = Math.floor(seconds / 60)
@@ -38,9 +36,6 @@ export default function Step3Place() {
     offering?.outputImageUrl &&
     (offering.renderComplete || offering.pipelineStatus === 'preview_ready' || offering.pipelineStatus === 'video_ready')
   )
-  const previewProgressWidth = Math.min(95, Math.max(8, (previewElapsedSeconds / ESTIMATED_PREVIEW_SECONDS) * 95)) + '%'
-  const previewEstimatedRemaining = formatPreviewTime(Math.max(0, ESTIMATED_PREVIEW_SECONDS - previewElapsedSeconds))
-
   useEffect(() => {
     if (previewReady) {
       setPreviewElapsedSeconds(0)
@@ -182,12 +177,9 @@ export default function Step3Place() {
           <p className="text-sm font-medium text-[#111827]">Generating final preview...</p>
           <div className="w-full max-w-[320px] space-y-2">
             <div className="h-2 overflow-hidden rounded-full bg-[#E5E7EB]">
-              <div
-                className="h-full rounded-full bg-[#1450F5] transition-[width] duration-500 ease-out"
-                style={{ width: previewProgressWidth }}
-              />
+              <div className="h-full w-full animate-pulse rounded-full bg-[#1450F5]" />
             </div>
-            <p className="text-center text-xs text-[#6B7280]">Estimated time remaining: {previewEstimatedRemaining}</p>
+            <p className="text-center text-xs text-[#6B7280]">Elapsed time: {formatPreviewTime(previewElapsedSeconds)}</p>
           </div>
           <p className="text-xs text-[#9CA3AF]">The preview appears here after the process is complete.</p>
         </div>

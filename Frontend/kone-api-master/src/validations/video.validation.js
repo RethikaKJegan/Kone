@@ -42,6 +42,7 @@ const repinTransform = Joi.object().keys({
   coordinateSpace: Joi.string().valid('pixels').default('pixels'),
   imageWidth: Joi.number().positive(),
   imageHeight: Joi.number().positive(),
+  assetAspectRatio: Joi.number().positive().allow(null),
   originalBbox: Joi.array().ordered(Joi.number(), Joi.number(), Joi.number(), Joi.number()).allow(null),
   originalImageWidth: Joi.number().positive().allow(null),
   originalImageHeight: Joi.number().positive().allow(null),

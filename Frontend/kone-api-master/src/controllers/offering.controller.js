@@ -3,7 +3,7 @@ const path = require('path');
 const httpStatus = require('http-status');
 const catchAsync = require('../utils/catchAsync');
 const ApiError = require('../utils/ApiError');
-const { offeringService, projectService, brochureService, activityLogService } = require('../services');
+const { offeringService, projectService, brochureService, brochureIntegrationService, activityLogService } = require('../services');
 
 const fsPromises = fs.promises;
 const storageRoot = path.resolve(__dirname, '..', '..', 'storage');
@@ -275,6 +275,57 @@ const triggerRender = catchAsync(async (req, res) => {
   res.send(updated);
 });
 
+const createBrochureRedirect = catchAsync(async (req, res) => {
+  const offering = await assertOfferingAccess(req.params.offeringId, req.user.id);
+  const project = await projectService.getProjectById(offering.projectId);
+  if (!project) throw new ApiError(httpStatus.NOT_FOUND, 'Project not found');
+
+  const beforePhotoID = offering.uploadedImageBlobPath;
+  const afterPhotoID = offering.selectedImageBlobPath;
+
+  if (!beforePhotoID || !afterPhotoID) {
+    throw new ApiError(
+      httpStatus.BAD_REQUEST,
+      'Brochure assets are still syncing. Please wait a moment and try again.'
+    );
+  }
+
+  const stableProjectId = `${String(project.id || project._id)}_${String(offering.id || offering._id)}`;
+  const projectName = `${project.name || 'Project'} - ${offering.name || 'Visualization'}`.slice(0, 256);
+  const requestId = req.get('x-request-id') || `brochure-${stableProjectId}`;
+
+  const payload = {
+    userId: String(req.user.id),
+    userName: req.user.name || undefined,
+    projectId: stableProjectId,
+    projectName,
+    beforePhotoID,
+    afterPhotoID,
+    ...(offering.finalVideoBlobPath ? { videoID: offering.finalVideoBlobPath } : {}),
+  };
+
+  const result = await brochureIntegrationService.createBrochureRedirect(payload, requestId);
+
+  await activityLogService.createActivityLog({
+    userId: req.user.id,
+    projectId: project.id,
+    offeringId: offering.id,
+    action: 'generated_brochure_redirect',
+    step: 6,
+    metadata: {
+      brochureProjectId: stableProjectId,
+      correlationId: result.correlationId || null,
+    },
+    ...getRequestMeta(req),
+  });
+
+  res.send({
+    redirectUrl: result.redirectUrl,
+    correlationId: result.correlationId,
+    requestId: result.requestId,
+  });
+});
+
 const completeOffering = catchAsync(async (req, res) => {
   await assertOfferingAccess(req.params.offeringId, req.user.id);
   const offering = await offeringService.completeOffering(req.params.offeringId);
@@ -300,5 +351,6 @@ module.exports = {
   deleteVisualization,
   runAIPlacement,
   triggerRender,
+  createBrochureRedirect,
   completeOffering,
 };

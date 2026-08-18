@@ -15,6 +15,7 @@ router
 router.post('/:offeringId/ai-placement', auth(), validate(offeringValidation.offeringId), offeringController.runAIPlacement);
 router.post('/:offeringId/render', auth(), validate(offeringValidation.offeringId), offeringController.triggerRender);
 router.post('/:offeringId/complete', auth(), validate(offeringValidation.offeringId), offeringController.completeOffering);
+router.post('/:offeringId/brochure-redirect', auth(), validate(offeringValidation.offeringId), offeringController.createBrochureRedirect);
 
 router
   .route('/:offeringId/brochure')

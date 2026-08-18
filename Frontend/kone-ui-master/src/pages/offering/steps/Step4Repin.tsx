@@ -148,7 +148,7 @@ export default function Step4Repin() {
     if (selectedComp !== component) setSelectedComp(component)
 
     let changed = false
-    const nextTransforms: Partial<Record<ComponentKey, RepinTransform>> = { ...(offering?.repinTransforms ?? repinTransforms) }
+    const nextTransforms: Partial<Record<ComponentKey, RepinTransform>> = { ...(offering?.repinTransforms ?? {}), ...repinTransforms }
     components.forEach(comp => {
       const existing = nextTransforms[comp]
       if (existing) {
@@ -523,8 +523,28 @@ export default function Step4Repin() {
     navigate(`/projects/${projectId}/offerings/${offeringId}/step/5`)
   }
 
+  const handleSkipVideoGeneration = () => {
+    if (!offering?.outputImageUrl) {
+      toast("Generate an image preview before skipping video generation.", "destructive")
+      return
+    }
+    const imageUrl = previewImageUrl ?? offering.outputImageUrl
+    setCurrentOffering({
+      ...offering,
+      outputImageUrl: imageUrl,
+      previewImagePath: imageUrl,
+      outputVideoUrl: null,
+      videoGenerated: false,
+      downloadUrl: null,
+      renderComplete: true,
+      pipelineStatus: "preview_ready",
+    })
+    goToStep(6)
+    navigate("/projects/" + projectId + "/offerings/" + offeringId + "/step/6")
+  }
+
   const handleBack = () => {
-    navigate(`/projects/${projectId}/offerings/${offeringId}/step/3`)
+    navigate("/projects/" + projectId + "/offerings/" + offeringId + "/step/3")
     goToStep(3)
   }
 
@@ -759,6 +779,14 @@ export default function Step4Repin() {
                 <RotateCcw style={{ width: 13, height: 13 }} /> Undo position
               </button>
             </div>
+            <button
+              type="button"
+              onClick={handleSkipVideoGeneration}
+              disabled={isProcessing || !offering?.outputImageUrl}
+              className="flex h-8 w-full items-center justify-center rounded-[5px] border border-[#D7E0FF] bg-white text-xs font-semibold text-[#1450F5] transition-colors duration-[120ms] hover:bg-[#F5F8FF] disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Skip video generation
+            </button>
           </div>
 
           {generationLimitReached && <p className="mt-3 text-xs font-medium text-[#B45309]">Version 5 is the last editable base. Choose an earlier version to generate another preview.</p>}

@@ -79,6 +79,7 @@ export interface RepinTransform {
   coordinateSpace?: 'pixels' | 'percent'
   imageWidth?: number
   imageHeight?: number
+  assetAspectRatio?: number | null
   originalBbox?: [number, number, number, number] | null
   originalImageWidth?: number | null
   originalImageHeight?: number | null

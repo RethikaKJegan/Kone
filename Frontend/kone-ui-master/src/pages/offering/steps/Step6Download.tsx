@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Loader2, Image as ImageIcon, Layers, Video, Download, Eye, EyeOff, FileText, ArrowLeft, CheckCircle2 } from 'lucide-react'
+import { Loader2, Image as ImageIcon, Layers, Video, Download, Eye, EyeOff, FileText, ArrowLeft, CheckCircle2, ExternalLink } from 'lucide-react'
 import apiClient from '../../../api/client'
 import { getGuestSessionId } from '../../../api/guestWorkflow'
 import { useOfferingStore } from '../../../store/offeringStore'
@@ -460,6 +460,9 @@ async function generateBrochurePdf(offering: NonNullable<ReturnType<typeof useOf
   pdf.save('elevator-modernization-brochure.pdf')
 }
 
+void withTimeout
+void generateBrochurePdf
+
 async function downloadAnnotatedImage(imageUrl: string, pins: ComponentPin[], labels: Record<ComponentKey, string>, filename: string) {
   const image = new Image()
   image.crossOrigin = 'anonymous'
@@ -516,13 +519,21 @@ export default function Step6Download() {
     currentOffering?.selectedComponents ?? []
   )
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null)
+  const [isGeneratingBrochure, setIsGeneratingBrochure] = useState(false)
   const guestFinalizeState = useRef<Record<string, 'running' | 'done'>>({})
 
   useEffect(() => {
     if (!currentOffering?.outputVideoUrl) {
-      toast('Generate the video preview before opening Downloads.', 'destructive')
-      goToStep(5)
-      navigate(`/projects/${projectId}/offerings/${offeringId}/step/5`, { replace: true })
+      if (currentOffering?.outputImageUrl) {
+        if (currentOffering.status !== "complete") {
+          completeOffering().catch(() => {})
+        }
+        setRendered(true)
+        return
+      }
+      toast("Generate the image preview before opening Downloads.", "destructive")
+      goToStep(3)
+      navigate("/projects/" + projectId + "/offerings/" + offeringId + "/step/3", { replace: true })
       return
     }
 
@@ -627,6 +638,11 @@ export default function Step6Download() {
       return
     }
 
+    if (isGuest && !downloadUrl && url && type !== "video") {
+      downloadFromUrl(url, filename)
+      return
+    }
+
     if (isGuest) {
       const sessionId = await getGuestSessionId()
       const base = import.meta.env.VITE_API_BASE_URL || '/api/v1'
@@ -647,16 +663,36 @@ export default function Step6Download() {
     downloadFromUrl(href, filename)
   }
 
-  const handleBrochureDownload = async () => {
-    if (!offering) {
+  const handleGenerateBrochure = async () => {
+    if (!offeringId) {
       toast('Brochure data is not available yet', 'destructive')
       return
     }
+    if (isGuest) {
+      toast('Please sign in to generate a brochure.', 'destructive')
+      return
+    }
+
+    const brochureTab = window.open('about:blank', '_blank')
+    if (!brochureTab) {
+      toast('Please allow pop-ups to open the brochure website.', 'destructive')
+      return
+    }
+
     try {
-      toast('Generating brochure PDF...')
-      await withTimeout(generateBrochurePdf(offering), 30000, 'Brochure PDF generation timed out')
+      setIsGeneratingBrochure(true)
+      toast('Preparing brochure website...')
+      const { data } = await apiClient.post<{ redirectUrl: string; correlationId?: string }>(
+        `/offerings/${offeringId}/brochure-redirect`
+      )
+      brochureTab.location.href = data.redirectUrl
     } catch (error) {
-      toast(error instanceof Error ? error.message : 'Brochure PDF could not be generated', 'destructive')
+      brochureTab.close()
+      const responseMessage = (error as { response?: { data?: { message?: string; error?: string } } }).response?.data
+      const message = responseMessage?.message || responseMessage?.error || 'Could not generate brochure. Please try again.'
+      toast(message, 'destructive')
+    } finally {
+      setIsGeneratingBrochure(false)
     }
   }
 
@@ -694,7 +730,7 @@ export default function Step6Download() {
       icon: ImageIcon,
       title: 'Rendered Image',
       subtitle: 'High-quality composite render',
-      url: isGuest ? downloadUrl : offering?.outputImageUrl ?? null,
+      url: isGuest && downloadUrl ? downloadUrl : offering?.outputImageUrl ?? null,
       file: 'final_output.png',
       type: 'image' as const,
       highlight: false,
@@ -703,7 +739,7 @@ export default function Step6Download() {
       icon: Layers,
       title: 'Image with Callouts',
       subtitle: 'Render with annotation overlay',
-      url: isGuest ? downloadUrl : offering?.outputImageUrl ?? null,
+      url: isGuest && downloadUrl ? downloadUrl : offering?.outputImageUrl ?? null,
       file: 'salesnxt-callouts.png',
       type: 'annotations' as const,
       highlight: true,
@@ -717,7 +753,7 @@ export default function Step6Download() {
       type: 'video' as const,
       highlight: false,
     },
-  ]
+  ].filter(d => d.type !== "video" || Boolean(offering?.outputVideoUrl))
 
   return (
     <div className="space-y-5">
@@ -810,12 +846,17 @@ export default function Step6Download() {
                 <p className="mt-0.5 text-[11px] text-[#8A9BB5]">Presentation-ready PDF document</p>
               </div>
               <button
-                onClick={handleBrochureDownload}
-                className="flex items-center gap-1.5 rounded-lg border border-[#E4EAF4] bg-white px-3 text-xs font-semibold text-[#4A5568] transition-all hover:bg-[#F4F7FC] hover:border-[#C8D5EC]"
+                onClick={handleGenerateBrochure}
+                disabled={isGeneratingBrochure}
+                className="flex items-center gap-1.5 rounded-lg border border-[#E4EAF4] bg-white px-3 text-xs font-semibold text-[#4A5568] transition-all hover:bg-[#F4F7FC] hover:border-[#C8D5EC] disabled:cursor-not-allowed disabled:opacity-60"
                 style={{ height: 32 }}
               >
-                <Download style={{ width: 11, height: 11 }} />
-                Download 
+                {isGeneratingBrochure ? (
+                  <Loader2 className="animate-spin" style={{ width: 11, height: 11 }} />
+                ) : (
+                  <ExternalLink style={{ width: 11, height: 11 }} />
+                )}
+                Generate Brochure
               </button>
             </div>
           </div>

@@ -16,19 +16,25 @@ const ENV_COMPONENTS: Record<Environment, ComponentKey[]> = {
 type ComponentAssetMap = Partial<Record<ComponentKey, string>>
 type PreviewImage = { title: string; subtitle: string; imageUrl: string }
 
+const UI_COMPONENTS = KONE_COMPONENTS.filter(component => component.key !== 'cop')
+const UI_ENVIRONMENTS = ENVIRONMENTS.filter(environment => environment.key !== 'car')
+const UI_COMPONENT_KEYS = new Set<ComponentKey>(UI_COMPONENTS.map(component => component.key))
+
 function getAvailableComponents(envs: Environment[]): ComponentKey[] {
   if (envs.length === 0) return []
-  return Array.from(new Set(envs.flatMap(e => ENV_COMPONENTS[e])))
+  return Array.from(new Set(envs.flatMap(e => ENV_COMPONENTS[e]))).filter(component => UI_COMPONENT_KEYS.has(component))
 }
 
 function normalizeEnvironments(envs: Environment[]): Environment[] {
-  return envs.length > 0 ? [envs[0]] : []
+  const visibleEnvironment = envs.find(env => UI_ENVIRONMENTS.some(item => item.key === env))
+  return visibleEnvironment ? [visibleEnvironment] : []
 }
 
 function withoutDoorCeilingConflict(components: ComponentKey[]): ComponentKey[] {
-  return components.includes('door') && components.includes('ceiling')
-    ? components.filter(c => c !== 'ceiling')
-    : components
+  const visibleComponents = components.filter(component => UI_COMPONENT_KEYS.has(component))
+  return visibleComponents.includes('door') && visibleComponents.includes('ceiling')
+    ? visibleComponents.filter(c => c !== 'ceiling')
+    : visibleComponents
 }
 
 function componentByKey(key: ComponentKey) {
@@ -205,7 +211,7 @@ export default function Step2Components() {
           <aside className="border-b border-[#EEF0F3] bg-[#FAFBFC] p-4 sm:p-5 lg:border-b-0 lg:border-r">
             <p className="label-caps mb-3">Where will this be used?</p>
             <div className="grid grid-cols-2 gap-2">
-              {ENVIRONMENTS.map(env => {
+              {UI_ENVIRONMENTS.map(env => {
                 const isSelected = envs.includes(env.key)
                 return (
                   <button
@@ -229,7 +235,7 @@ export default function Step2Components() {
             <div className="mt-6">
               <p className="label-caps mb-3">Components</p>
               <div className="space-y-2">
-                {KONE_COMPONENTS.map(comp => {
+                {UI_COMPONENTS.map(comp => {
                   const isAvailable = selectableComponents.includes(comp.key)
                   const isSelected = comps.includes(comp.key)
                   const isActive = activeComp === comp.key
@@ -313,7 +319,7 @@ export default function Step2Components() {
               )}
               {comps.length > 0 && (
                 <div className="flex max-w-full flex-wrap gap-2">
-                  {KONE_COMPONENTS.filter(c => comps.includes(c.key)).map(c => {
+                  {UI_COMPONENTS.filter(c => comps.includes(c.key)).map(c => {
                     const variant = selectedVariantFor(c.key, componentAssets)
                     return (
                       <button
