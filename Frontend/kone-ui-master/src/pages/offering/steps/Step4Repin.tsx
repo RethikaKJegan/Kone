@@ -136,6 +136,8 @@ export default function Step4Repin() {
   const [eraserMode, setEraserMode] = useState(false)
   const [placementPreview, setPlacementPreview] = useState(false)
   const [eraserBrushSize, setEraserBrushSize] = useState(48)
+  const [generationStartedAt, setGenerationStartedAt] = useState<number | null>(null)
+  const [generationElapsedSeconds, setGenerationElapsedSeconds] = useState(0)
 
   useEffect(() => {
     if (!latestVersion) return
@@ -178,6 +180,22 @@ export default function Step4Repin() {
     setEraserMode(false)
     setPlacementPreview(false)
   }, [sourceVersion])
+
+  useEffect(() => {
+    if (!isProcessing || offering?.pipelineStatus !== 'processing') {
+      setGenerationStartedAt(null)
+      setGenerationElapsedSeconds(0)
+      return
+    }
+
+    const startedAt = generationStartedAt ?? Date.now()
+    if (!generationStartedAt) setGenerationStartedAt(startedAt)
+    setGenerationElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)))
+    const timer = window.setInterval(() => {
+      setGenerationElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)))
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [isProcessing, offering?.pipelineStatus, generationStartedAt])
 
   useEffect(() => {
     let stopped = false
@@ -259,6 +277,7 @@ export default function Step4Repin() {
 
   const selectedSourcePreview = versions.find(v => v.version === sourceVersion)
   const previewImageUrl = useMemo(() => versionUrl(selectedSourcePreview, offering?.outputImageUrl), [selectedSourcePreview, offering?.outputImageUrl])
+  const parentFinalImagePath = selectedSourcePreview?.finalImagePath ?? selectedSourcePreview?.url ?? previewImageUrl ?? null
   const originalImageUrl = offering?.uploadedFileUrl ?? offering?.inputImagePath ?? null
   const sourceVersionComponent = selectedSourcePreview?.transform?.componentKey ?? null
   const sourceBaseMode: 'original' | 'version' = 'version'
@@ -275,20 +294,12 @@ export default function Step4Repin() {
   const isGeneratedComponentReEdit = isSameComponentReEdit || transformHasCleanBackground
   const canvasBaseBackgroundUrl = sourceVersion > 1 ? (previewImageUrl ?? originalImageUrl) : (originalImageUrl ?? previewImageUrl)
   const hasGeneratedRepinBackground = sourceVersion > 1
-  const sameComponentSourcePreview = isSameComponentReEdit && selectedSourcePreview?.sourceVersion
-    ? versions.find(item => Number(item.version) === Number(selectedSourcePreview.sourceVersion))
-    : null
-  const sameComponentSourceBackgroundUrl = sameComponentSourcePreview
-    ? versionUrl(sameComponentSourcePreview, originalImageUrl)
-    : null
   const manualEraserBackgroundUrl = hasManualEraserBackground(transform)
     ? transform?.repinBackgroundDisplayUrl ?? transform?.repinBackgroundUrl ?? null
     : null
-  const editingBackgroundUrl = manualEraserBackgroundUrl ?? (isGeneratedComponentReEdit
-    ? (repinBackgroundForEditing(transform, true) ?? sameComponentSourceBackgroundUrl ?? canvasBaseBackgroundUrl)
-    : sourceVersion > 1
-      ? canvasBaseBackgroundUrl
-      : (repinBackgroundForEditing(transform, hasGeneratedRepinBackground) ?? canvasBaseBackgroundUrl))
+  const editingBackgroundUrl = manualEraserBackgroundUrl ?? (sourceVersion > 1
+    ? canvasBaseBackgroundUrl
+    : (repinBackgroundForEditing(transform, hasGeneratedRepinBackground) ?? canvasBaseBackgroundUrl))
   const eraserBackgroundRevision = [
     transform?.eraserHistory?.length ?? 0,
     transform?.repinBackgroundDisplayUrl ?? transform?.repinBackgroundUrl ?? '',
@@ -471,27 +482,39 @@ export default function Step4Repin() {
       return
     }
 
+    const capturedSourceVersion = sourceVersion
+    const capturedTargetVersion = targetVersion
+    const capturedParentFinalImagePath = parentFinalImagePath
+    const capturedSourceVersionComponent = sourceVersionComponent
     const submittedTransforms = components
       .map(comp => {
         const item = repinTransforms[comp] ?? (comp === selectedComp ? transform : defaultTransformFor(comp))
         if (!item) return null
-        const sameComponent = sourceVersion > 1 && (sourceVersionComponent === comp || Boolean(item.repinBackgroundDisplayUrl || item.repinBackgroundUrl))
+        const activeComponent = comp === selectedComp
+        const sameComponent = capturedSourceVersion > 1 && capturedSourceVersionComponent === comp
+        const magicEraserApplied = activeComponent && hasManualEraserBackground(item)
         return {
-          ...transformForRepinSubmit(item, hasGeneratedRepinBackground || sameComponent),
+          ...transformForRepinSubmit(item, activeComponent && (magicEraserApplied || sameComponent)),
           componentKey: comp,
           componentType: comp,
-          sourceVersion,
-          targetVersion,
+          sourceVersion: capturedSourceVersion,
+          targetVersion: capturedTargetVersion,
           rotation: item.rotation || 0,
           skewX: item.skewX || 0,
           skewY: item.skewY || 0,
           editableLayerUrl: sameComponent ? item.editableLayerUrl ?? null : null,
-          repinBackgroundUrl: item.repinBackgroundUrl ?? null,
-          repinBackgroundDisplayUrl: item.repinBackgroundDisplayUrl ?? null,
-          feedbackOption: feedbackOptions[0] ?? null,
-          feedbackOptions,
+          repinBackgroundUrl: activeComponent && (magicEraserApplied || sameComponent) ? item.repinBackgroundUrl ?? null : null,
+          repinBackgroundDisplayUrl: activeComponent && (magicEraserApplied || sameComponent) ? item.repinBackgroundDisplayUrl ?? null : null,
+          feedbackOption: activeComponent ? feedbackOptions[0] ?? null : null,
+          feedbackOptions: activeComponent ? feedbackOptions : [],
           sourceBaseMode,
-          sourceVersionComponent,
+          sourceVersionComponent: capturedSourceVersionComponent,
+          parentVersionId: capturedSourceVersion,
+          parentFinalImagePath: capturedParentFinalImagePath,
+          activeComponentId: selectedComp,
+          activeComponentType: selectedComp,
+          currentComponentMaskOrCrop: activeComponent ? (item.originalBbox ?? null) : null,
+          magicEraserApplied,
         }
       })
       .filter(Boolean) as RepinTransform[]
@@ -500,6 +523,8 @@ export default function Step4Repin() {
     if (!primaryPayload) return
 
     try {
+      setGenerationStartedAt(Date.now())
+      setGenerationElapsedSeconds(0)
       persistTransforms(Object.fromEntries(submittedTransforms.map(item => [item.componentKey, item])) as Partial<Record<ComponentKey, RepinTransform>>)
       await submitRepinPreview(primaryPayload, submittedTransforms)
       toast("Generating combined repin preview")
@@ -756,7 +781,7 @@ export default function Step4Repin() {
               )}
             >
               {canvasConfirmed ? <Wand2 style={{ width: 13, height: 13 }} /> : <Check style={{ width: 13, height: 13 }} />}
-              {isProcessing ? 'Generating Version...' : canvasConfirmed ? 'Generate Version' : 'Confirm Position'}
+              {isProcessing ? `Generating Version... ${generationElapsedSeconds}s` : canvasConfirmed ? 'Generate Version' : 'Confirm Position'}
             </button>
             <div className="grid grid-cols-2 gap-2">
               <button

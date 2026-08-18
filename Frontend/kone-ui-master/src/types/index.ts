@@ -94,6 +94,12 @@ export interface RepinTransform {
   feedbackOptions?: RepinFeedbackOption[]
   sourceBaseMode?: 'original' | 'version'
   sourceVersionComponent?: ComponentKey | null
+  parentVersionId?: number | null
+  parentFinalImagePath?: string | null
+  activeComponentId?: ComponentKey | null
+  activeComponentType?: ComponentKey | null
+  currentComponentMaskOrCrop?: [number, number, number, number] | null
+  magicEraserApplied?: boolean
 }
 
 export interface PreviewVersion {
@@ -101,6 +107,9 @@ export interface PreviewVersion {
   url: string
   createdAt?: string
   sourceVersion?: number
+  parentVersionId?: number | null
+  parentFinalImagePath?: string | null
+  finalImagePath?: string | null
   transform?: RepinTransform
   feedbackOption?: RepinFeedbackOption | null
   feedbackOptions?: RepinFeedbackOption[]

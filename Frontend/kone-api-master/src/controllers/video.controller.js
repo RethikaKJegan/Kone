@@ -305,7 +305,7 @@ const hasManualEraserBackground = (item = {}) => Array.isArray(item.eraserHistor
 const isSameComponentReEdit = (item = {}) => item.sourceVersionComponent && item.componentKey && String(item.sourceVersionComponent).toLowerCase() === String(item.componentKey).toLowerCase();
 
 const withLocalRepinFiles = (item = {}) => {
-  const useRepinBackground = Boolean(item.repinBackgroundPath || item.repinBackgroundUrl) || hasManualEraserBackground(item) || isSameComponentReEdit(item);
+  const useRepinBackground = hasManualEraserBackground(item) || isSameComponentReEdit(item);
   return {
     ...item,
     editableLayerPath: item.editableLayerPath || localStoragePathFromUrl(item.editableLayerUrl),
@@ -320,6 +320,42 @@ const localOutputPathFromUrl = (url) => {
   const outputRoot = path.resolve(__dirname, '..', '..', 'output');
   const localPath = path.resolve(outputRoot, pathname.replace('/output/', ''));
   return localPath.startsWith(outputRoot) ? localPath : null;
+};
+
+const resolveRepinParentImage = async ({ offering, imageId, requestedVersion }) => {
+  const outputDir = getOutputDir(imageId);
+  const versions = normalizePreviewVersions(offering, offering.previewImagePath || offering.outputImagePath || offering.outputImageUrl)
+    .filter((version) => Number(version.version) >= 1 && version.url);
+  const latestVersion = versions.reduce((latest, version) => (Number(version.version) > Number(latest?.version || 0) ? version : latest), null);
+  const requested = Number(requestedVersion) || Number(latestVersion?.version) || 1;
+  const selectedVersion = versions.find((version) => Number(version.version) === requested) || latestVersion;
+  const parentVersion = Number(selectedVersion?.version) || requested || 1;
+  const urlPath = localOutputPathFromUrl(selectedVersion?.url);
+  const versionFilePath = parentVersion > 1
+    ? path.join(outputDir, `final_output_v${parentVersion}.png`)
+    : path.join(outputDir, 'final_output.png');
+  const candidates = [urlPath, versionFilePath, path.join(outputDir, 'final_output.png')].filter(Boolean);
+  const resolvedPath = await candidates.reduce(async (foundPromise, candidate) => {
+    const found = await foundPromise;
+    if (found) return found;
+    return (await fileExists(candidate)) ? candidate : null;
+  }, Promise.resolve(null));
+  if (resolvedPath) {
+    return {
+      parentVersion,
+      parentFinalImagePath: selectedVersion?.url || `/output/${imageId}/${path.basename(resolvedPath)}`,
+      parentLocalPath: resolvedPath,
+    };
+  }
+
+  if (!versions.length) {
+    const fallbackInput = getUploadInputPath(imageId);
+    if (await fileExists(fallbackInput)) {
+      return { parentVersion: 1, parentFinalImagePath: fallbackInput, parentLocalPath: fallbackInput };
+    }
+  }
+
+  throw new Error(`Final image for Version ${parentVersion} was not found`);
 };
 
 const fileExists = async (filePath) => {
@@ -491,9 +527,22 @@ const mergeComponentPins = (existingPins = [], updatedPins = []) => {
   return Array.from(byKey.values());
 };
 
-const runLogicRepin = async ({ imageId, userId, transform, transforms = [], componentAssets, environments, previewRequestKey }) => {
-  const logicTransform = withLocalRepinFiles(transform);
-  const logicTransforms = transforms.map((item) => withLocalRepinFiles(item));
+const runLogicRepin = async ({ imageId, userId, offering, transform, transforms = [], componentAssets, environments, previewRequestKey }) => {
+  const parent = await resolveRepinParentImage({ offering, imageId, requestedVersion: transform.parentVersionId || transform.sourceVersion });
+  const normalizedTransforms = (transforms.length ? transforms : [transform]).map((item) => ({
+    ...item,
+    sourceVersion: parent.parentVersion,
+    parentVersionId: parent.parentVersion,
+    parentFinalImagePath: parent.parentFinalImagePath,
+  }));
+  const normalizedTransform = normalizedTransforms.find((item) => item.componentKey === transform.componentKey) || {
+    ...transform,
+    sourceVersion: parent.parentVersion,
+    parentVersionId: parent.parentVersion,
+    parentFinalImagePath: parent.parentFinalImagePath,
+  };
+  const logicTransform = withLocalRepinFiles(normalizedTransform);
+  const logicTransforms = normalizedTransforms.map((item) => withLocalRepinFiles(item));
   const repinComponents = Array.from(new Set((logicTransforms.length ? logicTransforms : [logicTransform])
     .map((item) => item?.componentKey)
     .filter(Boolean)));
@@ -504,14 +553,18 @@ const runLogicRepin = async ({ imageId, userId, transform, transforms = [], comp
   const outputDir = getOutputDir(imageId);
   await Promise.all([uploadsDir, previewDir, pipelineDir, outputDir].map((dir) => fsPromises.mkdir(dir, { recursive: true })));
 
-  const fallbackInput = getUploadInputPath(imageId);
-  const sourcePath = logicTransform.sourceBaseMode === 'original'
-    ? fallbackInput
-    : (logicTransform.sourceVersion > 1
-        ? path.join(outputDir, `final_output_v${logicTransform.sourceVersion}.png`)
-        : path.join(outputDir, 'final_output.png'));
-  const sourceImage = (await fileExists(sourcePath)) ? sourcePath : ((await fileExists(path.join(outputDir, 'final_output.png'))) ? path.join(outputDir, 'final_output.png') : fallbackInput);
+  const sourceImage = parent.parentLocalPath;
   await fsPromises.copyFile(sourceImage, path.join(uploadsDir, `repin_source_v${logicTransform.sourceVersion}.png`));
+
+  console.log('[REPIN_VERSION]', JSON.stringify({
+    visualizationId: imageId,
+    newVersionId: Number(logicTransform.targetVersion),
+    parentVersionId: parent.parentVersion,
+    parentFinalImagePath: parent.parentFinalImagePath,
+    actualFireRedInputPath: sourceImage,
+    activeComponentType: logicTransform.componentType || logicTransform.componentKey,
+    magicEraserApplied: hasManualEraserBackground(logicTransform),
+  }));
 
   const { data } = await axios.post(
     `${LOGIC_URL}/repin-components`,
@@ -562,6 +615,10 @@ const runLogicRepin = async ({ imageId, userId, transform, transforms = [], comp
     fullPreviewUrl: `/output/${imageId}/${versionFile}`,
     transform: logicTransformResult,
     pins: await componentPinsFromPlacement(storageDir),
+    parentVersionId: parent.parentVersion,
+    parentFinalImagePath: parent.parentFinalImagePath,
+    actualFireRedInputPath: data.actual_firered_input_path || sourceImage,
+    generatedFinalImagePath: data.generated_final_image_path || path.join(outputDir, versionFile),
   };
 };
 
@@ -574,14 +631,17 @@ const startRepinRun = ({ offeringId, imageId, userId, transform, transforms = []
       const offering = await getOwnedOffering(offeringId, userId);
       if (!offering) throw new Error('Invalid offeringId');
       if (Number(transform.targetVersion) > 5) throw new Error('Version limit reached. Choose the best saved version to continue.');
-      const placement = await runLogicRepin({ imageId, userId, transform, transforms, componentAssets, environments, previewRequestKey });
+      const placement = await runLogicRepin({ imageId, userId, offering, transform, transforms, componentAssets, environments, previewRequestKey });
       const versionUrl = `${placement.previewUrl}?v=${Date.now()}`;
       const versions = normalizePreviewVersions(offering, offering.previewImagePath || offering.outputImagePath || offering.outputImageUrl);
       const nextVersion = {
         version: Number(transform.targetVersion),
         url: versionUrl,
-        sourceVersion: Number(transform.sourceVersion),
-        transform: placement.transform || transform,
+        sourceVersion: Number(placement.parentVersionId),
+        parentVersionId: Number(placement.parentVersionId),
+        parentFinalImagePath: placement.parentFinalImagePath,
+        finalImagePath: placement.fullPreviewUrl,
+        transform: placement.transform || { ...transform, sourceVersion: Number(placement.parentVersionId), parentVersionId: Number(placement.parentVersionId), parentFinalImagePath: placement.parentFinalImagePath },
         feedbackOption: transform.feedbackOption || null,
         feedbackOptions: Array.isArray(transform.feedbackOptions) ? transform.feedbackOptions : (transform.feedbackOption ? [transform.feedbackOption] : []),
         createdAt: new Date(),
@@ -589,7 +649,18 @@ const startRepinRun = ({ offeringId, imageId, userId, transform, transforms = []
       const withoutTarget = versions.filter((version) => Number(version.version) !== Number(transform.targetVersion));
       withoutTarget.push(nextVersion);
       withoutTarget.sort((a, b) => Number(a.version) - Number(b.version));
-      await Offering.findByIdAndUpdate(offeringId, {
+      console.log('[REPIN_VERSION]', JSON.stringify({
+        visualizationId: imageId,
+        newVersionId: Number(transform.targetVersion),
+        parentVersionId: placement.parentVersionId,
+        parentFinalImagePath: placement.parentFinalImagePath,
+        actualFireRedInputPath: placement.actualFireRedInputPath,
+        activeComponentType: transform.componentType || transform.componentKey,
+        magicEraserApplied: hasManualEraserBackground(transform),
+        generatedFinalImagePath: placement.generatedFinalImagePath,
+      }));
+      const updateFilter = previewRequestKey ? { _id: offeringId, previewRequestKey } : { _id: offeringId };
+      const updatedOffering = await Offering.findOneAndUpdate(updateFilter, {
         componentPins: mergeComponentPins(offering.componentPins, placement.pins),
         outputImageUrl: versionUrl,
         outputImagePath: placement.fullPreviewUrl || placement.currentPreviewUrl,
@@ -605,8 +676,11 @@ const startRepinRun = ({ offeringId, imageId, userId, transform, transforms = []
         lastError: null,
         previewRequestKey,
       });
+      if (!updatedOffering) {
+        console.warn('[REPIN_VERSION] stale render ignored', JSON.stringify({ visualizationId: imageId, newVersionId: Number(transform.targetVersion), previewRequestKey }));
+      }
     } catch (error) {
-      await Offering.findByIdAndUpdate(offeringId, {
+      await Offering.findOneAndUpdate(previewRequestKey ? { _id: offeringId, previewRequestKey } : { _id: offeringId }, {
         pipelineStatus: 'failed',
         lastError: error.message,
         previewRequestKey,
@@ -1239,23 +1313,24 @@ const repinEraser = async (req, res) => {
     await Promise.all([uploadsDir, previewDir, outputDir].map((dir) => fsPromises.mkdir(dir, { recursive: true })));
 
     const fallbackInput = getUploadInputPath(imageId);
-    const sourcePath = sourceBaseMode === 'original'
-      ? fallbackInput
-      : (Number(sourceVersion) > 1
-          ? path.join(outputDir, `final_output_v${sourceVersion}.png`)
-          : path.join(outputDir, 'final_output.png'));
-    const sourceImage = (await fileExists(sourcePath)) ? sourcePath : ((await fileExists(path.join(outputDir, 'final_output.png'))) ? path.join(outputDir, 'final_output.png') : fallbackInput);
-    await fsPromises.copyFile(sourceImage, path.join(uploadsDir, `repin_source_v${sourceVersion}.png`));
+    const parent = await resolveRepinParentImage({ offering, imageId, requestedVersion: sourceVersion });
+    const sourceImage = sourceBaseMode === 'original' ? fallbackInput : parent.parentLocalPath;
+    await fsPromises.copyFile(sourceImage, path.join(uploadsDir, `repin_source_v${parent.parentVersion}.png`));
 
     const { data } = await axios.post(`${LOGIC_URL}/repin-erase`, {
       session_id: `auth_${req.user.id}`,
       project_id: imageId,
       project_name: imageId,
       storage_dir: storageDir,
-      source_version: sourceVersion,
+      source_version: parent.parentVersion,
       source_base_mode: sourceBaseMode,
       mask_data_url: maskDataUrl,
-      transform: withLocalRepinFiles(transform),
+      transform: withLocalRepinFiles({
+        ...transform,
+        sourceVersion: parent.parentVersion,
+        parentVersionId: parent.parentVersion,
+        parentFinalImagePath: parent.parentFinalImagePath,
+      }),
     }, { timeout: 0 });
 
     if (!data?.ok) throw new Error(data?.error || 'Magic Eraser failed');

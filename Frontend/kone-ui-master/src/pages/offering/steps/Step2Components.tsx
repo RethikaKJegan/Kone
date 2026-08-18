@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { Check, Eye, Search } from 'lucide-react'
 import { useOfferingStore } from '../../../store/offeringStore'
-import { KONE_COMPONENTS, ENVIRONMENTS } from '../../../lib/constants'
+import { KONE_COMPONENTS } from '../../../lib/constants'
 import { cn } from '../../../lib/utils'
 import { toast } from '../../../hooks/useToast'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../../components/ui/dialog'
@@ -17,7 +17,6 @@ type ComponentAssetMap = Partial<Record<ComponentKey, string>>
 type PreviewImage = { title: string; subtitle: string; imageUrl: string }
 
 const UI_COMPONENTS = KONE_COMPONENTS.filter(component => component.key !== 'cop')
-const UI_ENVIRONMENTS = ENVIRONMENTS.filter(environment => environment.key !== 'car')
 const UI_COMPONENT_KEYS = new Set<ComponentKey>(UI_COMPONENTS.map(component => component.key))
 
 function getAvailableComponents(envs: Environment[]): ComponentKey[] {
@@ -25,9 +24,8 @@ function getAvailableComponents(envs: Environment[]): ComponentKey[] {
   return Array.from(new Set(envs.flatMap(e => ENV_COMPONENTS[e]))).filter(component => UI_COMPONENT_KEYS.has(component))
 }
 
-function normalizeEnvironments(envs: Environment[]): Environment[] {
-  const visibleEnvironment = envs.find(env => UI_ENVIRONMENTS.some(item => item.key === env))
-  return visibleEnvironment ? [visibleEnvironment] : []
+function normalizeEnvironments(): Environment[] {
+  return ['lobby']
 }
 
 function withoutDoorCeilingConflict(components: ComponentKey[]): ComponentKey[] {
@@ -76,7 +74,7 @@ export default function Step2Components() {
   const { currentOffering, setComponents, goToStep } = useOfferingStore()
 
   const initialComponents = withoutDoorCeilingConflict(currentOffering?.selectedComponents ?? [])
-  const [envs, setEnvs] = useState<Environment[]>(normalizeEnvironments(currentOffering?.environments ?? []))
+  const [envs, setEnvs] = useState<Environment[]>(normalizeEnvironments())
   const [comps, setComps] = useState<ComponentKey[]>(initialComponents)
   const [componentAssets, setComponentAssets] = useState<ComponentAssetMap>(
     normalizeAssetMap(initialComponents, currentOffering?.selectedComponentAssets ?? {})
@@ -88,7 +86,7 @@ export default function Step2Components() {
   useEffect(() => {
     if (currentOffering) {
       const nextComponents = withoutDoorCeilingConflict(currentOffering.selectedComponents)
-      setEnvs(normalizeEnvironments(currentOffering.environments))
+      setEnvs(normalizeEnvironments())
       setComps(nextComponents)
       setComponentAssets(normalizeAssetMap(nextComponents, currentOffering.selectedComponentAssets ?? {}))
       setActiveComp(current => current && nextComponents.includes(current) ? current : nextComponents[0] ?? null)
@@ -101,16 +99,6 @@ export default function Step2Components() {
     if (c === 'ceiling' && comps.includes('door')) return false
     return true
   })
-
-  const toggleEnv = (k: Environment) => {
-    const newEnvs = [k]
-    const newAvailable = getAvailableComponents(newEnvs)
-    const newComps = withoutDoorCeilingConflict(comps.filter(c => newAvailable.includes(c)))
-    setEnvs(newEnvs)
-    setComps(newComps)
-    setComponentAssets(prev => normalizeAssetMap(newComps, prev))
-    setActiveComp(current => current && newComps.includes(current) ? current : newComps[0] ?? null)
-  }
 
   const toggleComp = (k: ComponentKey) => {
     const nextComps = (() => {
@@ -159,15 +147,6 @@ export default function Step2Components() {
     goToStep(1)
   }
 
-  const envHint =
-    envs.includes('car') && envs.includes('lobby')
-      ? 'COP, Elevator Interior, LCI, and Door are available'
-      : envs.includes('car')
-        ? 'COP is available for Car'
-        : envs.includes('lobby')
-          ? 'LCI, Door, and Elevator Interior are available for Lobby'
-          : 'Select at least one environment'
-
   const activeVariants = activeComp && comps.includes(activeComp) ? variantsFor(activeComp) : []
   const filteredActiveVariants = activeVariants.filter(variant =>
     variant.label.toLowerCase().includes(optionQuery.trim().toLowerCase())
@@ -209,37 +188,13 @@ export default function Step2Components() {
 
         <div className="grid min-h-[620px] lg:grid-cols-[300px_minmax(0,1fr)]">
           <aside className="border-b border-[#EEF0F3] bg-[#FAFBFC] p-4 sm:p-5 lg:border-b-0 lg:border-r">
-            <p className="label-caps mb-3">Where will this be used?</p>
-            <div className="grid grid-cols-2 gap-2">
-              {UI_ENVIRONMENTS.map(env => {
-                const isSelected = envs.includes(env.key)
-                return (
-                  <button
-                    key={env.key}
-                    onClick={() => toggleEnv(env.key)}
-                    aria-pressed={isSelected}
-                    className={cn(
-                      'inline-flex h-10 items-center justify-center rounded-lg border text-sm font-semibold transition-all duration-[150ms] select-none',
-                      isSelected
-                        ? 'border-[#1450F5] bg-[#1450F5] text-white shadow-sm'
-                        : 'border-[#E4E4E4] bg-white text-[#374151] hover:border-[#1450F5]/40 hover:text-[#1450F5]'
-                    )}
-                  >
-                    {env.label}
-                  </button>
-                )
-              })}
-            </div>
-            <p className="mt-2 min-h-[32px] text-[12px] leading-4 text-[#8A9BB5]">{envHint}</p>
-
-            <div className="mt-6">
+            <div>
               <p className="label-caps mb-3">Components</p>
               <div className="space-y-2">
                 {UI_COMPONENTS.map(comp => {
                   const isAvailable = selectableComponents.includes(comp.key)
                   const isSelected = comps.includes(comp.key)
                   const isActive = activeComp === comp.key
-                  const selectedVariant = selectedVariantFor(comp.key, componentAssets)
                   const cardImage = componentThumbnailFor(comp.key)
                   return (
                     <button
@@ -276,9 +231,6 @@ export default function Step2Components() {
                       <span className="min-w-0 flex-1">
                         <span className={cn('block text-[13px] font-semibold leading-4', isSelected ? 'text-[#1450F5]' : 'text-[#111827]')}>
                           {comp.label}
-                        </span>
-                        <span className="mt-0.5 block truncate text-[11px] text-[#8A9BB5]">
-                          {isSelected && selectedVariant ? selectedVariant.label : isAvailable ? comp.description : 'Unavailable'}
                         </span>
                       </span>
                       {isSelected && (

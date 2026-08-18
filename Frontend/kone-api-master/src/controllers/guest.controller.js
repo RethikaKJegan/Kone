@@ -81,7 +81,7 @@ function isSameComponentReEdit(item = {}) {
 }
 
 function withLocalRepinFiles(item = {}) {
-  const useRepinBackground = Boolean(item.repinBackgroundPath || item.repinBackgroundUrl) || hasManualEraserBackground(item) || isSameComponentReEdit(item);
+  const useRepinBackground = hasManualEraserBackground(item) || isSameComponentReEdit(item);
   return {
     ...item,
     editableLayerPath: item.editableLayerPath || localStoragePathFromUrl(item.editableLayerUrl),

@@ -57,6 +57,12 @@ const repinTransform = Joi.object().keys({
   feedbackOptions: Joi.array().items(Joi.string().valid('edge_alignment', 'perspective_depth', 'lighting_shadow', 'material_reflections', 'seamless_blending')).default([]),
   sourceBaseMode: Joi.string().valid('original', 'version').default('version'),
   sourceVersionComponent: Joi.string().valid('ceiling', 'lci', 'door', 'cop').allow(null, ''),
+  parentVersionId: Joi.number().integer().min(1).max(5).allow(null),
+  parentFinalImagePath: Joi.string().allow(null, ''),
+  activeComponentId: Joi.string().valid('ceiling', 'lci', 'door', 'cop').allow(null, ''),
+  activeComponentType: Joi.string().valid('ceiling', 'lci', 'door', 'cop').allow(null, ''),
+  currentComponentMaskOrCrop: Joi.array().ordered(Joi.number(), Joi.number(), Joi.number(), Joi.number()).allow(null),
+  magicEraserApplied: Joi.boolean().default(false),
 });
 
 const selectComponents = {

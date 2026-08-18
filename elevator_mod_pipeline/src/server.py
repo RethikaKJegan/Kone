@@ -142,6 +142,31 @@ def _source_image_for_repin(storage: Path, preview_dir: Path, source_version: in
     return source_image_path
 
 
+def _has_manual_eraser_background(transform: dict[str, Any]) -> bool:
+    history = transform.get("eraserHistory")
+    return isinstance(history, list) and len(history) > 1
+
+
+def _should_apply_repin_background(transform: dict[str, Any]) -> bool:
+    component_key = str(transform.get("componentKey") or transform.get("componentType") or "").lower()
+    source_component = str(transform.get("sourceVersionComponent") or "").lower()
+    return _has_manual_eraser_background(transform) or bool(component_key and source_component == component_key)
+
+
+def _composite_repin_background_region(base_image: Image.Image, background_path: Path, component_mask: Image.Image | None) -> Image.Image:
+    if component_mask is None or not background_path.exists():
+        return base_image
+    erased_image = Image.open(background_path).convert("RGB")
+    if erased_image.size != base_image.size:
+        erased_image = erased_image.resize(base_image.size, Image.Resampling.LANCZOS)
+    mask = component_mask.convert("L")
+    if mask.size != base_image.size:
+        mask = mask.resize(base_image.size, Image.Resampling.NEAREST)
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=2))
+    result = base_image.convert("RGB").copy()
+    result.paste(erased_image, (0, 0), mask)
+    return result
+
 
 def _restore_original_repin_footprint(base_image: Image.Image, storage: Path, transform: dict[str, Any]) -> Image.Image:
     original_path = storage / "uploads" / "input.jpg"
@@ -1584,15 +1609,13 @@ def repin_components(payload: ProjectPayload):
             raise ValueError("Version limit reached. Choose the best saved version to continue.")
 
         source_base_mode = str(target_transform.get("sourceBaseMode") or "version").lower()
+        parent_version_id = target_transform.get("parentVersionId") or source_version
+        parent_final_image_path = target_transform.get("parentFinalImagePath")
         repin_background_path = target_transform.get("repinBackgroundPath")
-        if repin_background_path and Path(str(repin_background_path)).exists():
-            source_image_path = Path(str(repin_background_path))
-        else:
-            source_image_path = _source_image_for_repin(storage, preview_dir, source_version, source_base_mode)
+        source_image_path = _source_image_for_repin(storage, preview_dir, source_version, source_base_mode)
 
         transforms = [target_transform]
         placed_image = Image.open(source_image_path).convert("RGB")
-        placed_image = _restore_original_repin_footprint(placed_image, storage, target_transform)
         target_transform = _with_lci_cop_homography_points(target_transform, placed_image)
         transforms = [target_transform]
         placements = []
@@ -1611,6 +1634,15 @@ def repin_components(payload: ProjectPayload):
                 placed_image.size,
             )
             component_masks.append(component_mask)
+
+            active_repin_background_path = transform.get("repinBackgroundPath")
+            magic_eraser_applied = _has_manual_eraser_background(transform)
+            if active_repin_background_path and _should_apply_repin_background(transform):
+                placed_image = _composite_repin_background_region(
+                    placed_image,
+                    Path(str(active_repin_background_path)),
+                    component_mask,
+                )
 
             placed_image, bbox = _place_manual_component(
                 placed_image,
@@ -1637,6 +1669,16 @@ def repin_components(payload: ProjectPayload):
         placed_path = pipeline_dir / f"repin_v{target_version}_placed.png"
         output_path = preview_dir / f"final_output_v{target_version}.png"
         placed_image.save(placed_path)
+        print(json.dumps({
+            "event": "repin_source_selected",
+            "visualizationId": payload.project_id,
+            "newVersionId": target_version,
+            "parentVersionId": parent_version_id,
+            "parentFinalImagePath": parent_final_image_path or str(source_image_path),
+            "actualFireRedInputPath": str(placed_path),
+            "activeComponentType": target_transform.get("componentType") or target_transform.get("componentKey"),
+            "magicEraserApplied": _has_manual_eraser_background(target_transform),
+        }), flush=True)
         target_key = str(target_transform.get("componentKey") or target_transform.get("componentType") or "").lower()
         target_index = next(
             (index for index, placement in enumerate(placements) if str(placement.get("id") or placement.get("component_type") or "").lower() == target_key),
@@ -1670,7 +1712,22 @@ def repin_components(payload: ProjectPayload):
             "firered_realism_refine": used_firered,
             "source_base_mode": source_base_mode,
             "lama_used": False,
+            "parent_version_id": parent_version_id,
+            "parent_final_image_path": parent_final_image_path or str(source_image_path),
+            "actual_firered_input_path": str(placed_path),
         }, indent=2), encoding="utf-8")
+
+        print(json.dumps({
+            "event": "repin_generation_saved",
+            "visualizationId": payload.project_id,
+            "newVersionId": target_version,
+            "parentVersionId": parent_version_id,
+            "parentFinalImagePath": parent_final_image_path or str(source_image_path),
+            "actualFireRedInputPath": str(placed_path),
+            "activeComponentType": target_transform.get("componentType") or target_transform.get("componentKey"),
+            "magicEraserApplied": _has_manual_eraser_background(target_transform),
+            "generatedFinalImagePath": str(output_path),
+        }), flush=True)
 
         status = public_status("preview_ready")
         status.update({
@@ -1685,10 +1742,22 @@ def repin_components(payload: ProjectPayload):
                 "feedbackOption": target_transform.get("feedbackOption"),
                 "feedbackOptions": target_transform.get("feedbackOptions") or ([target_transform.get("feedbackOption")] if target_transform.get("feedbackOption") else []),
                 "sourceBaseMode": source_base_mode,
+                "parentVersionId": parent_version_id,
+                "parentFinalImagePath": parent_final_image_path or str(source_image_path),
+                "finalImagePath": str(output_path),
             }],
         })
         write_status(payload.storage_dir, status)
-        return {"ok": True, "status": "preview_ready", "preview_url": status["preview_url"], "repin_pass": target_version}
+        return {
+            "ok": True,
+            "status": "preview_ready",
+            "preview_url": status["preview_url"],
+            "repin_pass": target_version,
+            "preview_versions": status["preview_versions"],
+            "parent_final_image_path": parent_final_image_path or str(source_image_path),
+            "actual_firered_input_path": str(placed_path),
+            "generated_final_image_path": str(output_path),
+        }
     except Exception as exc:
         write_status(payload.storage_dir, public_status("failed", str(exc)))
         return {"ok": False, "status": "failed", "error": str(exc)}
