@@ -242,6 +242,7 @@ const triggerRender = catchAsync(async (req, res) => {
   const destDir = path.join(__dirname, '..', '..', 'output', safeName, offeringId);
   const destImagePath = path.join(destDir, 'final_output.png');
   const destVideoPath = path.join(destDir, 'elevator_animation.mp4');
+  const destVideoMetaPath = path.join(destDir, 'elevator_animation.json');
 
   if (imageId) {
     const srcDir = path.join(__dirname, '..', '..', 'output', imageId);
@@ -258,7 +259,12 @@ const triggerRender = catchAsync(async (req, res) => {
     outputImageUrl = `/output/${safeName}/${offeringId}/final_output.png`;
   }
   if (await exists(destVideoPath)) {
-    outputVideoUrl = `/output/${safeName}/${offeringId}/elevator_animation.mp4`;
+    const videoMeta = await readJsonIfExists(destVideoMetaPath);
+    const expectedMotion = offering.videoMotionStyle || 'zoom-in';
+    const expectedQuality = offering.videoQuality || '1080p';
+    if (videoMeta.motion === expectedMotion && videoMeta.quality === expectedQuality) {
+      outputVideoUrl = `/output/${safeName}/${offeringId}/elevator_animation.mp4`;
+    }
   }
 
   const updated = await offeringService.triggerRender(offeringId, outputImageUrl, outputVideoUrl);

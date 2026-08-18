@@ -58,7 +58,7 @@ export default function ProjectsPage() {
         <div className="mb-8 flex items-start justify-between">
           <div>
             <h1 style={{ fontSize: 30, fontWeight: 700, letterSpacing: '-0.03em', color: '#000000', lineHeight: 1.1 }}>My Projects</h1>
-            <p className="mt-2 text-base text-[#6B7280]">Each project holds your visualisation outputs and generated offerings.</p>
+            <p className="mt-2 text-base text-[#6B7280]">Each project holds one image workflow and its generated outputs.</p>
           </div>
           {!creating && (
             <button
@@ -176,15 +176,10 @@ export default function ProjectsPage() {
                 </h3>
                 {/* Meta */}
                 <p className="mt-2 text-sm text-[#9CA3AF]">Created {formatDate(project.createdAt)}</p>
-                {project.offeringCount > 0 && (
-                  <p className="mt-0.5 text-sm text-[#9CA3AF]">
-                    {project.offeringCount} offering{project.offeringCount !== 1 ? 's' : ''}
-                  </p>
-                )}
                 {/* CTA */}
                 <p className="mt-5 text-sm font-semibold transition-colors duration-[120ms]"
                   style={{ color: '#1450F5' }}>
-                  {project.offeringCount > 0 ? 'View offerings →' : 'Start creating →'}
+                  {project.status === 'draft' ? 'Start creating →' : 'Continue →'}
                 </p>
               </div>
             ))}

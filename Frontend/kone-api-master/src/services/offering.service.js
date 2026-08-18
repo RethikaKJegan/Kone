@@ -12,6 +12,8 @@ const AI_PLACEMENT_DEFAULTS = {
 };
 
 const createOffering = async (projectId) => {
+  const existing = await Offering.findOne({ projectId }).sort({ createdAt: -1 });
+  if (existing) return normalizeOfferingStatus(existing);
   return Offering.create({ projectId });
 };
 
@@ -56,8 +58,9 @@ const normalizeOfferingStatus = async (offering) => {
 };
 
 const getOfferingsByProject = async (projectId) => {
-  const offerings = await Offering.find({ projectId }).sort({ createdAt: -1 });
-  return Promise.all(offerings.map(normalizeOfferingStatus));
+  const offering = await Offering.findOne({ projectId }).sort({ createdAt: -1 });
+  if (!offering) return [];
+  return [await normalizeOfferingStatus(offering)];
 };
 
 const getOfferingById = async (id) => {
@@ -113,6 +116,24 @@ const updateOffering = async (id, updateBody) => {
     delete allowedBody.renderComplete;
   }
 
+  if (allowedBody.videoMotionStyle || allowedBody.videoQuality) {
+    const existing = await Offering.findById(id).select('videoMotionStyle videoQuality');
+    const motionChanged =
+      allowedBody.videoMotionStyle !== undefined &&
+      existing &&
+      allowedBody.videoMotionStyle !== existing.videoMotionStyle;
+    const qualityChanged =
+      allowedBody.videoQuality !== undefined &&
+      existing &&
+      allowedBody.videoQuality !== existing.videoQuality;
+
+    if (motionChanged || qualityChanged || allowedBody.pipelineStatus === 'processing') {
+      allowedBody.outputVideoUrl = null;
+      allowedBody.outputVideoPath = null;
+      allowedBody.downloadUrl = null;
+    }
+  }
+
   if (
     !allowedBody.status &&
     (allowedBody.imageId ||
@@ -155,11 +176,43 @@ const runAIPlacement = async (id) => {
 };
 
 const triggerRender = async (id, outputImageUrl = null, outputVideoUrl = null) => {
+  const existing = await Offering.findById(id);
+  if (!existing) return null;
+
+  const waitingForVideo =
+    existing.pipelineStatus === 'processing' &&
+    (existing.savedStep || 1) >= 5 &&
+    !outputVideoUrl;
+  const failedVideo =
+    existing.pipelineStatus === 'failed' &&
+    (existing.savedStep || 1) >= 5 &&
+    !outputVideoUrl;
+
   const update = {
-    savedStep: 4,
-    pipelineStatus: outputVideoUrl ? 'video_ready' : 'preview_ready',
+    savedStep: outputVideoUrl
+      ? Math.max(existing.savedStep || 1, 5)
+      : waitingForVideo || failedVideo
+        ? existing.savedStep
+        : Math.max(existing.savedStep || 1, 4),
+    pipelineStatus: outputVideoUrl
+      ? 'video_ready'
+      : waitingForVideo
+        ? 'processing'
+        : failedVideo
+          ? 'failed'
+          : 'preview_ready',
     status: 'active',
   };
+
+  if (failedVideo && existing.lastError) {
+    update.lastError = existing.lastError;
+  }
+
+  if (!outputVideoUrl && !waitingForVideo && (existing.savedStep || 1) >= 5) {
+    update.outputVideoUrl = null;
+    update.outputVideoPath = null;
+    update.downloadUrl = null;
+  }
   if (outputImageUrl) {
     update.outputImageUrl = outputImageUrl;
     update.outputImagePath = outputImageUrl;

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { Loader2, Play } from 'lucide-react'
 import apiClient from '../../../api/client'
@@ -50,9 +50,11 @@ export default function Step5Video() {
   const [quality, setQuality] = useState<Quality>(currentOffering?.videoQuality ?? '1080p')
   const [playing, setPlaying] = useState(false)
   const activeVideoGeneration = currentOffering ? videoGenerations[currentOffering.id] : undefined
+  const resumePollingRef = useRef(false)
   const [loadFailed, setLoadFailed] = useState(false)
   const [progressNow, setProgressNow] = useState(Date.now())
-  const generating = Boolean(activeVideoGeneration)
+  const persistedGenerating = Boolean(currentOffering?.pipelineStatus === 'processing' && currentOffering?.savedStep === 5 && !currentOffering?.outputVideoUrl)
+  const generating = Boolean(activeVideoGeneration || persistedGenerating)
   const generationStartedAt = activeVideoGeneration?.startedAt ?? null
   const selectedVideoMatchesOffering = currentOffering?.videoMotionStyle === motion
     && currentOffering?.videoQuality === quality
@@ -60,17 +62,47 @@ export default function Step5Video() {
     && selectedVideoMatchesOffering
     && !loadFailed
 
+  const clearStaleVideoForSelection = (nextMotion: MotionStyle, nextQuality: Quality) => {
+    if (!currentOffering) return
+    setCurrentOffering({
+      ...currentOffering,
+      videoMotionStyle: nextMotion,
+      videoQuality: nextQuality,
+      outputVideoUrl: null,
+      outputVideoPath: null,
+      videoGenerated: false,
+      downloadUrl: null,
+      pipelineStatus: currentOffering.outputImageUrl ? 'preview_ready' : currentOffering.pipelineStatus,
+    })
+    if (!isGuestSession()) {
+      apiClient.patch(`/offerings/${currentOffering.id}`, {
+        videoMotionStyle: nextMotion,
+        videoQuality: nextQuality,
+        outputVideoUrl: null,
+        outputVideoPath: null,
+        downloadUrl: null,
+        pipelineStatus: currentOffering.outputImageUrl ? 'preview_ready' : currentOffering.pipelineStatus,
+        lastError: null,
+      }).catch(() => {})
+    }
+  }
+
   const selectMotion = (value: MotionStyle) => {
+    if (generating) return
     setMotion(value)
     setLoadFailed(false)
+    if (value !== motion) clearStaleVideoForSelection(value, quality)
   }
 
   const selectQuality = (value: Quality) => {
+    if (generating) return
     setQuality(value)
     setLoadFailed(false)
+    if (value !== quality) clearStaleVideoForSelection(motion, value)
   }
 
   const handlePlay = () => {
+    if (generating) return
     setPlaying(true)
     setTimeout(() => setPlaying(false), 4000)
   }
@@ -95,6 +127,122 @@ export default function Step5Video() {
     return () => window.clearInterval(interval)
   }, [generating])
 
+  useEffect(() => {
+    if (!currentOffering || generating || isGuestSession()) return
+    let cancelled = false
+
+    const validateStoredVideo = async () => {
+      if (!currentOffering.outputVideoUrl) return
+      try {
+        const { data } = await apiClient.post<Offering>(`/offerings/${currentOffering.id}/render`)
+        if (cancelled) return
+        if (!data.outputVideoUrl) {
+          setCurrentOffering({
+            ...data,
+            outputVideoUrl: null,
+            outputVideoPath: null,
+            videoGenerated: false,
+            downloadUrl: null,
+          })
+        }
+      } catch {
+        // Leave the current page usable; generate will replace stale state.
+      }
+    }
+
+    validateStoredVideo()
+    return () => {
+      cancelled = true
+    }
+  }, [currentOffering?.id, currentOffering?.outputVideoUrl, generating, setCurrentOffering])
+
+  useEffect(() => {
+    if (!currentOffering || !persistedGenerating || activeVideoGeneration) return
+    startVideoGeneration(currentOffering.id, {
+      startedAt: Date.now(),
+      motion: currentOffering.videoMotionStyle,
+      quality: currentOffering.videoQuality,
+    })
+  }, [activeVideoGeneration, currentOffering, persistedGenerating, startVideoGeneration])
+
+  useEffect(() => {
+    if (!currentOffering || !generating || isGuestSession()) return undefined
+    let cancelled = false
+
+    const pollExistingVideo = async () => {
+      if (resumePollingRef.current) return
+      resumePollingRef.current = true
+      try {
+        const { data } = await apiClient.post<Offering>(`/offerings/${currentOffering.id}/render`)
+        if (cancelled) return
+        if (data.outputVideoUrl) {
+          setLoadFailed(false)
+          finishVideoGeneration(currentOffering.id)
+          setCurrentOffering({
+            ...data,
+            outputVideoUrl: `${data.outputVideoUrl}${data.outputVideoUrl.includes('?') ? '&' : '?'}v=${Date.now()}`,
+            videoGenerated: true,
+            pipelineStatus: 'video_ready',
+          })
+        } else if (data.pipelineStatus === 'failed') {
+          finishVideoGeneration(currentOffering.id)
+          setLoadFailed(true)
+          setCurrentOffering(data)
+          toast(data.lastError || 'Video generation failed', 'destructive')
+        }
+      } catch {
+        // Keep polling; the long-running generation may still be active.
+      } finally {
+        resumePollingRef.current = false
+      }
+    }
+
+    pollExistingVideo()
+    const interval = window.setInterval(pollExistingVideo, 3000)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [currentOffering, finishVideoGeneration, generating, setCurrentOffering])
+
+  useEffect(() => {
+    if (!currentOffering || !generating || !isGuestSession() || !projectId) return undefined
+    let cancelled = false
+
+    const pollGuestVideo = async () => {
+      try {
+        const sessionId = await getGuestSessionId()
+        const { data } = await apiClient.get('/guest/status', {
+          params: { session_id: sessionId, project_id: projectId },
+        })
+        if (cancelled) return
+        if (data.status === 'video_ready' && data.video_url) {
+          setLoadFailed(false)
+          finishVideoGeneration(currentOffering.id)
+          setCurrentOffering({
+            ...currentOffering,
+            outputVideoUrl: `${data.video_url}?v=${Date.now()}`,
+            videoGenerated: true,
+            pipelineStatus: 'video_ready',
+          })
+        } else if (data.status === 'failed') {
+          finishVideoGeneration(currentOffering.id)
+          setLoadFailed(true)
+          toast(data.error || 'Video generation failed', 'destructive')
+        }
+      } catch {
+        // Keep polling; refresh recovery is best-effort for guest sessions.
+      }
+    }
+
+    pollGuestVideo()
+    const interval = window.setInterval(pollGuestVideo, 3000)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [currentOffering, finishVideoGeneration, generating, projectId, setCurrentOffering])
+
   const startGenerationTimer = (startedAt = Date.now()) => {
     setProgressNow(startedAt)
     if (currentOffering) {
@@ -103,6 +251,7 @@ export default function Step5Video() {
   }
 
   const handleGeneratePreview = async () => {
+    if (generating) return
     const videoOptions = isDoorFunctionality
       ? { engine: 'wan2.2', mode: 'door_functionality', duration_seconds: 8, speed: currentOffering?.videoSpeed, quality }
       : { engine: 'wan2.2', motion, speed: currentOffering?.videoSpeed, quality }
@@ -167,14 +316,23 @@ export default function Step5Video() {
         ...currentOffering,
         videoMotionStyle: motion,
         videoQuality: quality,
+        outputVideoUrl: null,
+        outputVideoPath: null,
+        videoGenerated: false,
+        downloadUrl: null,
         pipelineStatus: 'processing',
+        savedStep: 5,
       })
 
       try {
         await apiClient.patch(`/offerings/${currentOffering.id}`, {
           videoMotionStyle: motion,
           videoQuality: quality,
+          outputVideoUrl: null,
+          outputVideoPath: null,
+          downloadUrl: null,
           pipelineStatus: 'processing',
+          savedStep: 5,
           lastError: null,
         })
 
@@ -182,24 +340,24 @@ export default function Step5Video() {
           imageId: effectiveImageId,
           offeringId: currentOffering.id,
           sourceImageUrl:
-          currentOffering.outputImagePath
-          ?? currentOffering.outputImageUrl,
+            currentOffering.previewImagePath
+            ?? currentOffering.outputImageUrl
+            ?? currentOffering.outputImagePath,
           videoOptions,
           }, { timeout: 0 })
 
-        const { data } = await apiClient.post<Offering>(`/offerings/${currentOffering.id}/render`)
-        if (!data.outputVideoUrl) {
-          throw new Error('Video file was not generated. Check the API and Python logic terminals.')
-        }
-
         setLoadFailed(false)
         setCurrentOffering({
-          ...data,
+          ...currentOffering,
           videoMotionStyle: motion,
           videoQuality: quality,
-          outputVideoUrl: `${data.outputVideoUrl}${data.outputVideoUrl.includes('?') ? '&' : '?'}v=${Date.now()}`,
-          videoGenerated: true,
-          pipelineStatus: 'video_ready',
+          outputVideoUrl: null,
+          outputVideoPath: null,
+          videoGenerated: false,
+          downloadUrl: null,
+          pipelineStatus: 'processing',
+          savedStep: 5,
+          lastError: null,
         })
       } catch (error) {
         setLoadFailed(true)
@@ -219,15 +377,15 @@ export default function Step5Video() {
           pipelineStatus: 'failed',
           lastError: message,
         }).catch(() => {})
-        toast(message, 'destructive')
-      } finally {
         finishVideoGeneration(currentOffering.id)
+        toast(message, 'destructive')
       }
       return
     }
   }
 
   const handleSkipVideoGeneration = () => {
+    if (generating) return
     if (!currentOffering?.outputImageUrl) {
       toast("Generate the image preview before skipping video generation.", "destructive")
       return
@@ -255,6 +413,7 @@ export default function Step5Video() {
   }
 
   const handleBack = () => {
+    if (generating) return
     navigate(`/projects/${projectId}/offerings/${offeringId}/step/3`)
     goToStep(3)
   }
@@ -267,7 +426,13 @@ export default function Step5Video() {
     <div className="rounded-xl border border-[#E9ECEF] bg-white p-8 shadow-sm">
       <div className="mb-6 flex items-start justify-between">
         <h2 className="text-heading text-[15px] font-semibold text-[#111827]">5 &nbsp; Video Settings</h2>
-        <button onClick={handleBack} className="text-xs font-medium text-[#9CA3AF] transition-colors duration-[120ms] hover:text-[#6B7280]">Back</button>
+        <button
+          onClick={handleBack}
+          disabled={generating}
+          className="text-xs font-medium text-[#9CA3AF] transition-colors duration-[120ms] hover:text-[#6B7280] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-[#9CA3AF]"
+        >
+          Back
+        </button>
       </div>
       <p className="mb-5 text-sm font-medium text-[#374151]">
         Select your required motion style and quality, then click Generate Preview to see the video.
@@ -346,8 +511,10 @@ export default function Step5Video() {
                   className={cn(
                     btnBase,
                     'px-3',
-                    motion === s.value ? btnActive : btnInactive
+                    motion === s.value ? btnActive : btnInactive,
+                    generating && 'cursor-not-allowed opacity-50 hover:border-[#E4E4E4]'
                   )}
+                  disabled={generating}
                   style={{ height: 34 }}
                 >
                   {s.label}
@@ -363,7 +530,8 @@ export default function Step5Video() {
                 <button
                   key={q}
                   onClick={() => selectQuality(q as Quality)}
-                  className={cn(btnBase, 'text-xs', quality === q ? btnActive : btnInactive)}
+                  className={cn(btnBase, 'text-xs', quality === q ? btnActive : btnInactive, generating && 'cursor-not-allowed opacity-50 hover:border-[#E4E4E4]')}
+                  disabled={generating}
                   style={{ height: 34 }}
                 >
                   {q}

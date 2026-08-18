@@ -80,7 +80,7 @@ const router = createBrowserRouter([
           },
           {
             path: '/projects/:projectId/offerings/new',
-            element: <Suspense fallback={<FullPageLoader />}><OfferingShell /></Suspense>,
+            element: <Suspense fallback={<FullPageLoader />}><ProjectDetailPage /></Suspense>,
           },
         ],
       },

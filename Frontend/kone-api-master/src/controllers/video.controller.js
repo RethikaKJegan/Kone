@@ -898,6 +898,113 @@ const qualityDimensions = (quality) => {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+
+const videoRenderJobs = new Map();
+
+const videoJobKey = ({ imageId, offeringId, motion, quality }) => [
+  imageId || 'image',
+  offeringId || 'guest',
+  motion || 'zoom-in',
+  quality || '1080p',
+].join(':');
+
+const videoOutputUrlForImage = (imageId) => `/output/${imageId}/elevator_animation.mp4`;
+
+const finalizeVideoArtifacts = async ({ imageId, userId, job, outputDir, offeringId }) => {
+  const finalVideoPath = path.join(outputDir, 'elevator_animation.mp4');
+
+  if (offeringId && await fileExists(finalVideoPath)) {
+    const offering = await getOwnedOffering(offeringId, userId);
+
+    if (offering) {
+      const videoBlobPath = finalVideoBlobPath({
+        userId,
+        projectId: offering.projectId,
+        offeringId,
+        fileName: 'final-video.mp4',
+      });
+
+      const originalBlobPath = uploadedImageBlobPath({
+        userId,
+        projectId: offering.projectId,
+        offeringId,
+        fileName: 'original-image.jpg',
+      });
+
+      const selectedBlobPath = selectedImageBlobPath({
+        userId,
+        projectId: offering.projectId,
+        offeringId,
+        fileName: 'selected-for-video.png',
+      });
+
+      const originalInputPath = getUploadInputPath(imageId);
+      if (await fileExists(originalInputPath)) {
+        const originalUploadResult = await uploadFileToAzure(originalInputPath, originalBlobPath, 'image/jpeg');
+        if (originalUploadResult.success) {
+          await Offering.findByIdAndUpdate(offeringId, {
+            uploadedImageBlobPath: originalUploadResult.blobPath,
+            'azureSyncStatus.uploadedImage': 'success',
+          });
+        } else {
+          console.warn('[Azure] Original image backup upload failed/skipped:', originalUploadResult);
+        }
+      } else {
+        console.warn('[Azure] Original image backup upload skipped: local input missing', originalInputPath);
+      }
+
+      const project = await Project.findById(offering.projectId);
+      const user = await User.findById(userId);
+
+      const videoMetadata = {
+        userId,
+        projectId: String(offering.projectId),
+        offeringId,
+        personName: user?.name || '',
+        projectName: project?.name || '',
+        beforeBlobPath: originalBlobPath,
+        afterBlobPath: selectedBlobPath,
+        videoBlobPath,
+      };
+
+      uploadFileToAzure(finalVideoPath, videoBlobPath, 'video/mp4', videoMetadata)
+        .then(async (result) => {
+          if (!result.success) {
+            console.warn('[Azure] Final video copy failed/skipped:', result);
+            return;
+          }
+
+          console.log('[Azure] Copied final video with metadata:', result.blobPath);
+
+          await Offering.findByIdAndUpdate(offeringId, {
+            finalVideoBlobPath: result.blobPath,
+            'azureSyncStatus.finalVideo': 'success',
+          });
+        })
+        .catch((error) => {
+          console.error('[Azure] Final video copy crashed:', error.message);
+        });
+    }
+  }
+
+  await fsPromises.writeFile(
+    path.join(outputDir, 'pipeline_manifest.json'),
+    JSON.stringify(
+      {
+        imageId,
+        generatedAt: new Date().toISOString(),
+        environment: job.environment,
+        components: job.components,
+        files: ['01_original.jpg', 'final_output.png', 'elevator_animation.mp4'],
+      },
+      null,
+      2
+    )
+  );
+
+  guestJobs.delete(imageId);
+};
+
 const isComfyAlive = async () => {
   try {
     await axios.get(`${COMFY_URL}/system_stats`, { timeout: 2500 });
@@ -1348,11 +1455,39 @@ const repinEraser = async (req, res) => {
 /* STEP 4 - Generate Video */
 const generateVideo = async (req, res) => {
   try {
-    const { imageId } = req.body;
-
-    const { sourceImageUrl, videoOptions = {} } = req.body;
-    let job = await getOrRecoverJob(imageId, req.user.id);
+    const { imageId, sourceImageUrl, videoOptions = {}, offeringId } = req.body;
+    const motion = videoMotionForOptions(videoOptions);
+    const quality = videoOptions.quality || '1080p';
+    const renderKey = videoJobKey({ imageId, offeringId, motion, quality });
     const outputDir = getOutputDir(imageId);
+    const outputVideoPath = path.join(outputDir, 'elevator_animation.mp4');
+    const metadataPath = path.join(outputDir, 'elevator_animation.json');
+    const existingMeta = await readJsonIfExists(metadataPath);
+
+    if (
+      await isValidVideoFile(outputVideoPath) &&
+      existingMeta.motion === motion &&
+      existingMeta.quality === quality
+    ) {
+      return res.status(200).json({
+        success: true,
+        status: 'complete',
+        message: 'Video already generated',
+        data: { imageId, videoUrl: videoOutputUrlForImage(imageId) },
+      });
+    }
+
+    const existingRender = videoRenderJobs.get(renderKey);
+    if (existingRender) {
+      return res.status(202).json({
+        success: true,
+        status: 'processing',
+        message: 'Video generation is already running',
+        data: { imageId, renderKey, startedAt: existingRender.startedAt },
+      });
+    }
+
+    let job = await getOrRecoverJob(imageId, req.user.id);
 
     if (!job) {
       const sourceImagePath = localOutputPathFromUrl(sourceImageUrl);
@@ -1373,43 +1508,29 @@ const generateVideo = async (req, res) => {
         });
       }
     }
+
     if (job.userId !== req.user.id) {
-      return res.status(403).json({
-        success: false,
-        message: 'Forbidden',
-      });
+      return res.status(403).json({ success: false, message: 'Forbidden' });
     }
 
     await fsPromises.mkdir(outputDir, { recursive: true });
 
     const requestedSourcePath = localOutputPathFromUrl(sourceImageUrl);
-
     let inputPath = requestedSourcePath && (await fileExists(requestedSourcePath))
       ? requestedSourcePath
       : job.inputPath;
 
-    // The UI displays compressed *_web.jpg previews. Wan must receive
-    // the full-resolution PNG for the exact version selected by the user.
     if (inputPath && /_web\.(jpg|jpeg)$/i.test(inputPath)) {
-      const selectedVersionFullResolutionPath = inputPath.replace(
-        /_web\.(jpg|jpeg)$/i,
-        '.png'
-      );
-
+      const selectedVersionFullResolutionPath = inputPath.replace(/_web\.(jpg|jpeg)$/i, '.png');
       if (await fileExists(selectedVersionFullResolutionPath)) {
         inputPath = selectedVersionFullResolutionPath;
       }
     }
 
-    // Preserve 01_original.jpg, final_output.png and all version files.
-    // Use a dedicated staging copy containing the selected full-resolution
-    // version for this Wan generation.
     const videoInputPath = path.join(outputDir, 'video_input.png');
-
     if (path.resolve(inputPath) !== path.resolve(videoInputPath)) {
       await fsPromises.copyFile(inputPath, videoInputPath);
     }
-    const offeringId = req.body.offeringId;
 
     if (offeringId) {
       const offering = await getOwnedOffering(offeringId, req.user.id);
@@ -1431,110 +1552,36 @@ const generateVideo = async (req, res) => {
       }
     }
 
-    await generateComfyVideo({
-      inputPath: videoInputPath,
-      outputDir,
-      videoOptions,
-    });
-    const finalVideoPath = path.join(outputDir, 'elevator_animation.mp4');
+    await fsPromises.rm(outputVideoPath, { force: true }).catch(() => {});
+    await fsPromises.rm(metadataPath, { force: true }).catch(() => {});
 
-    if (offeringId && await fileExists(finalVideoPath)) {
-      const offering = await getOwnedOffering(offeringId, req.user.id);
-
-      if (offering) {
-        const videoBlobPath = finalVideoBlobPath({
-          userId: req.user.id,
-          projectId: offering.projectId,
-          offeringId,
-          fileName: 'final-video.mp4',
-        });
-
-        const originalBlobPath = uploadedImageBlobPath({
-          userId: req.user.id,
-          projectId: offering.projectId,
-          offeringId,
-          fileName: 'original-image.jpg',
-        });
-
-        const selectedBlobPath = selectedImageBlobPath({
-          userId: req.user.id,
-          projectId: offering.projectId,
-          offeringId,
-          fileName: 'selected-for-video.png',
-        });
-
-        const originalInputPath = getUploadInputPath(imageId);
-        if (await fileExists(originalInputPath)) {
-          const originalUploadResult = await uploadFileToAzure(originalInputPath, originalBlobPath, 'image/jpeg');
-          if (originalUploadResult.success) {
-            await Offering.findByIdAndUpdate(offeringId, {
-              uploadedImageBlobPath: originalUploadResult.blobPath,
-              'azureSyncStatus.uploadedImage': 'success',
-            });
-          } else {
-            console.warn('[Azure] Original image backup upload failed/skipped:', originalUploadResult);
-          }
-        } else {
-          console.warn('[Azure] Original image backup upload skipped: local input missing', originalInputPath);
+    const renderPromise = (async () => {
+      try {
+        await generateComfyVideo({ inputPath: videoInputPath, outputDir, videoOptions });
+        await finalizeVideoArtifacts({ imageId, userId: req.user.id, job, outputDir, offeringId });
+      } catch (error) {
+        console.error('[Video] Generation failed:', error.message);
+        if (offeringId) {
+          await Offering.findByIdAndUpdate(offeringId, {
+            pipelineStatus: 'failed',
+            lastError: error.message,
+          }).catch(() => {});
         }
-
-        const project = await Project.findById(offering.projectId);
-        const user = await User.findById(req.user.id);
-
-        const videoMetadata = {
-          userId: req.user.id,
-          projectId: String(offering.projectId),
-          offeringId,
-          personName: user?.name || req.user.name || '',
-          projectName: project?.name || '',
-          beforeBlobPath: originalBlobPath,
-          afterBlobPath: selectedBlobPath,
-          videoBlobPath,
-        };
-
-        uploadFileToAzure(finalVideoPath, videoBlobPath, 'video/mp4', videoMetadata)
-          .then(async (result) => {
-            if (!result.success) {
-              console.warn('[Azure] Final video copy failed/skipped:', result);
-              return;
-            }
-
-            console.log('[Azure] Copied final video with metadata:', result.blobPath);
-
-            await Offering.findByIdAndUpdate(offeringId, {
-              finalVideoBlobPath: result.blobPath,
-              'azureSyncStatus.finalVideo': 'success',
-            });
-          })
-          .catch((error) => {
-            console.error('[Azure] Final video copy crashed:', error.message);
-          });
+      } finally {
+        videoRenderJobs.delete(renderKey);
       }
-    }
+    })();
 
-    // Write manifest
-    await fsPromises.writeFile(
-      path.join(outputDir, 'pipeline_manifest.json'),
-      JSON.stringify(
-        {
-          imageId,
-          generatedAt: new Date().toISOString(),
-          environment: job.environment,
-          components: job.components,
-          files: ['01_original.jpg', 'final_output.png', 'elevator_animation.mp4'],
-        },
-        null,
-        2
-      )
-    );
+    videoRenderJobs.set(renderKey, {
+      startedAt: new Date().toISOString(),
+      promise: renderPromise,
+    });
 
-    // Clear memory
-    guestJobs.delete(imageId);
-
-    return res.status(200).json({
+    return res.status(202).json({
       success: true,
-      message: 'Video generated successfully',
-      data: { imageId },
+      status: 'processing',
+      message: 'Video generation started',
+      data: { imageId, renderKey },
     });
   } catch (error) {
     return res.status(500).json({

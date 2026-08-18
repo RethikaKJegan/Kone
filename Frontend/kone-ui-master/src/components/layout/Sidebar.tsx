@@ -9,7 +9,7 @@ import type { OfferingStep } from '../../types'
 
 export function Sidebar() {
   const { user, isGuest, signOut } = useAuthStore()
-  const { currentStep, currentOffering, goToStep } = useOfferingStore()
+  const { currentStep, currentOffering, goToStep, videoGenerations } = useOfferingStore()
   const navigate = useNavigate()
 
   const offeringMatch = useMatch('/projects/:projectId/offerings/:offeringId/*')
@@ -34,7 +34,16 @@ export function Sidebar() {
     return completed
   }
 
+  const videoGenerationLocked = Boolean(
+    currentOffering &&
+    (videoGenerations[currentOffering.id] || (currentOffering.pipelineStatus === 'processing' && currentOffering.savedStep === 5 && !currentOffering.outputVideoUrl))
+  )
+
   const handleStepClick = (step: OfferingStep) => {
+    if (videoGenerationLocked) {
+      toast('Video generation is running. Please wait until it finishes.', 'destructive')
+      return
+    }
     if (step === 6 && !currentOffering?.outputVideoUrl) {
       toast('Generate the video preview before opening Downloads.', 'destructive')
       return
@@ -61,13 +70,20 @@ export function Sidebar() {
           <div className="px-3 pt-3 max-xl:hidden">
             <Link
               to={`/projects/${projectId}`}
-              className="flex items-center gap-2 rounded-[6px] px-3 py-2 transition-all duration-150 hover:bg-white/[0.06]"
+              onClick={event => {
+                if (!videoGenerationLocked) return
+                event.preventDefault()
+                toast('Video generation is running. Please wait until it finishes.', 'destructive')
+              }}
+              className={cn(
+                'flex items-center gap-2 rounded-[6px] px-3 py-2 transition-all duration-150 hover:bg-white/[0.06]',
+                videoGenerationLocked && 'cursor-not-allowed opacity-40 hover:bg-transparent'
+              )}
               style={{ fontSize: 12, fontWeight: 500, color: 'rgba(255,255,255,0.45)' }}
-              onMouseEnter={e => (e.currentTarget.style.color = '#1450F5')}
+              onMouseEnter={e => { if (!videoGenerationLocked) e.currentTarget.style.color = '#1450F5' }}
               onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
             >
-              <ArrowLeft style={{ width: 13, height: 13 }} />
-              Back to Project
+      
             </Link>
           </div>
 
@@ -81,7 +97,7 @@ export function Sidebar() {
             <StepProgress
               currentStep={currentStep}
               completedSteps={completedSteps}
-              onStepClick={handleStepClick}
+              onStepClick={videoGenerationLocked ? undefined : handleStepClick}
               hiddenSteps={hiddenSteps}
             />
           </div>
@@ -94,14 +110,16 @@ export function Sidebar() {
               return (
                 <button
                   key={step}
-                  onClick={() => (isCompleted || isCurrent) && handleStepClick(step)}
+                  onClick={() => !videoGenerationLocked && (isCompleted || isCurrent) && handleStepClick(step)}
+                  disabled={videoGenerationLocked || (!isCompleted && !isCurrent)}
                   className={cn(
                     'flex h-7 w-7 items-center justify-center rounded-full border text-[10px] font-bold transition-all duration-150',
                     isCompleted
                       ? 'border-[#16A34A] bg-[#16A34A] text-white'
                       : isCurrent
                         ? 'border-[#1450F5] bg-[#1450F5] text-white shadow-[0_0_10px_rgba(20,80,245,0.5)]'
-                        : 'border-white/20 text-white/30'
+                        : 'border-white/20 text-white/30',
+                    videoGenerationLocked && 'cursor-not-allowed opacity-40'
                   )}
                 >
                   {step}

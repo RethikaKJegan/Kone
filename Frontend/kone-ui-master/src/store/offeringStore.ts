@@ -31,6 +31,14 @@ function setGuestData(key: string, value: unknown) {
   }
 }
 
+function getStoredVideoGenerations(): Record<string, VideoGenerationState> {
+  return getGuestData<Record<string, VideoGenerationState>>('video_generations') ?? {}
+}
+
+function saveVideoGenerations(videoGenerations: Record<string, VideoGenerationState>) {
+  setGuestData('video_generations', videoGenerations)
+}
+
 function refreshProjects() {
   if (!isGuestSession()) {
     useProjectStore.getState().fetchProjects().catch(() => {})
@@ -217,7 +225,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
   currentOffering: null,
   currentStep: initialOfferingStep(),
   isProcessing: false,
-  videoGenerations: {},
+  videoGenerations: getStoredVideoGenerations(),
 
   fetchOfferings: async projectId => {
     if (isGuestSession()) {
@@ -331,15 +339,18 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
     return { ...writeOfferingState(state, { ...normalized, savedStep }), currentStep: savedStep }
   }),
 
-  startVideoGeneration: (offeringId, generation) => set(state => ({
-    videoGenerations: {
+  startVideoGeneration: (offeringId, generation) => set(state => {
+    const videoGenerations = {
       ...state.videoGenerations,
       [offeringId]: generation,
-    },
-  })),
+    }
+    saveVideoGenerations(videoGenerations)
+    return { videoGenerations }
+  }),
 
   finishVideoGeneration: offeringId => set(state => {
     const { [offeringId]: _finished, ...videoGenerations } = state.videoGenerations
+    saveVideoGenerations(videoGenerations)
     return { videoGenerations }
   }),
 
@@ -757,7 +768,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
           await apiClient.post('/video/generate', {
             imageId,
             offeringId: currentOffering.id,
-            sourceImageUrl:  currentOffering.outputImagePath ?? currentOffering.outputImageUrl ?? currentOffering.uploadedFileUrl ?? undefined,
+            sourceImageUrl:  currentOffering.previewImagePath ?? currentOffering.outputImageUrl ?? currentOffering.outputImagePath ?? currentOffering.uploadedFileUrl ?? undefined,
             videoOptions: {
               motion: currentOffering.videoMotionStyle,
               speed: currentOffering.videoSpeed,

@@ -172,7 +172,7 @@ function getSelectedBrochureIds(offering: NonNullable<ReturnType<typeof useOffer
 }
 
 function fullResolutionOutputUrl(offering: NonNullable<ReturnType<typeof useOfferingStore.getState>['currentOffering']> | null | undefined) {
-  return offering?.outputImagePath ?? offering?.outputImageUrl ?? null
+  return offering?.previewImagePath ?? offering?.outputImageUrl ?? offering?.outputImagePath ?? null
 }
 
 function inputImageUrl(offering: NonNullable<ReturnType<typeof useOfferingStore.getState>['currentOffering']>) {
