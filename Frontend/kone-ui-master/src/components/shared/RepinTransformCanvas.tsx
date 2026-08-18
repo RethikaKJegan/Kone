@@ -170,24 +170,22 @@ export function repinTransformFromPin(
   if (pin?.bbox && pin.bbox.length === 4 && pin.imageWidth && pin.imageHeight) {
     const sourceWidth = pin.imageWidth
     const sourceHeight = pin.imageHeight
-    const scaleX = imageSize.width / Math.max(1, sourceWidth)
-    const scaleY = imageSize.height / Math.max(1, sourceHeight)
     const [x1, y1, x2, y2] = pin.bbox
     const base = {
       componentKey,
       componentType: componentKey,
       sourceVersion,
       targetVersion,
-      x: round(clamp(x1 * scaleX, 0, Math.max(0, imageSize.width - MIN_SIZE))),
-      y: round(clamp(y1 * scaleY, 0, Math.max(0, imageSize.height - MIN_SIZE))),
-      width: round(clamp((x2 - x1) * scaleX, MIN_SIZE, imageSize.width)),
-      height: round(clamp((y2 - y1) * scaleY, MIN_SIZE, imageSize.height)),
+      x: round(clamp(x1, 0, Math.max(0, sourceWidth - MIN_SIZE))),
+      y: round(clamp(y1, 0, Math.max(0, sourceHeight - MIN_SIZE))),
+      width: round(clamp(x2 - x1, MIN_SIZE, sourceWidth)),
+      height: round(clamp(y2 - y1, MIN_SIZE, sourceHeight)),
       rotation: 0,
       skewX: 0,
       skewY: 0,
       coordinateSpace: 'pixels' as const,
-      imageWidth: imageSize.width,
-      imageHeight: imageSize.height,
+      imageWidth: sourceWidth,
+      imageHeight: sourceHeight,
       originalBbox: pin.bbox,
       originalImageWidth: sourceWidth,
       originalImageHeight: sourceHeight,

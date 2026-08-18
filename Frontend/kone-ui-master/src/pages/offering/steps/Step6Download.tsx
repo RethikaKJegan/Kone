@@ -171,6 +171,10 @@ function getSelectedBrochureIds(offering: NonNullable<ReturnType<typeof useOffer
   return [...new Set(selectedComponentKeys.map(key => componentKeyToBrochureId[key]))]
 }
 
+function fullResolutionOutputUrl(offering: NonNullable<ReturnType<typeof useOfferingStore.getState>['currentOffering']> | null | undefined) {
+  return offering?.outputImagePath ?? offering?.outputImageUrl ?? null
+}
+
 function inputImageUrl(offering: NonNullable<ReturnType<typeof useOfferingStore.getState>['currentOffering']>) {
   if (offering.inputImagePath) return offering.inputImagePath
   if (offering.imageId) return `/uploads/${offering.imageId}/input.jpg`
@@ -199,7 +203,7 @@ async function generateBrochurePdf(offering: NonNullable<ReturnType<typeof useOf
   const selectedIds = getSelectedBrochureIds(offering)
   const primary = componentBrochureData[selectedIds[selectedIds.length - 1] ?? 'cop']
   const beforeImage = await imageUrlToDataUrl(inputImageUrl(offering))
-  const afterImage = await imageUrlToDataUrl(offering.outputImageUrl ?? offering.uploadedFileUrl)
+  const afterImage = await imageUrlToDataUrl(fullResolutionOutputUrl(offering) ?? offering.uploadedFileUrl)
   const componentImages = Object.fromEntries(
     await Promise.all(Object.values(componentBrochureData).map(async component => [component.id, await imageUrlToDataUrl(componentAsset(component.id))]))
   ) as Record<ComponentBrochureId, string>
@@ -625,7 +629,7 @@ export default function Step6Download() {
 
   const handleDownload = async (url: string | null, filename: string, type: DownloadType) => {
     if (type === 'annotations') {
-      const imageUrl = offering?.outputImageUrl ?? offering?.uploadedFileUrl ?? null
+      const imageUrl = fullResolutionOutputUrl(offering) ?? offering?.uploadedFileUrl ?? null
       if (!imageUrl) {
         toast('Output file not available yet')
         return
@@ -730,7 +734,7 @@ export default function Step6Download() {
       icon: ImageIcon,
       title: 'Rendered Image',
       subtitle: 'High-quality composite render',
-      url: isGuest && downloadUrl ? downloadUrl : offering?.outputImageUrl ?? null,
+      url: isGuest && downloadUrl ? downloadUrl : fullResolutionOutputUrl(offering),
       file: 'final_output.png',
       type: 'image' as const,
       highlight: false,
@@ -739,7 +743,7 @@ export default function Step6Download() {
       icon: Layers,
       title: 'Image with Callouts',
       subtitle: 'Render with annotation overlay',
-      url: isGuest && downloadUrl ? downloadUrl : offering?.outputImageUrl ?? null,
+      url: isGuest && downloadUrl ? downloadUrl : fullResolutionOutputUrl(offering),
       file: 'salesnxt-callouts.png',
       type: 'annotations' as const,
       highlight: true,
