@@ -526,31 +526,6 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
               const img = event.currentTarget
               const nextSize = { width: img.naturalWidth || imageSize.width, height: img.naturalHeight || imageSize.height }
               setImageSize(nextSize)
-              if (transform.coordinateSpace !== 'pixels' || transform.imageWidth !== nextSize.width || transform.imageHeight !== nextSize.height) {
-                const scaleX = nextSize.width / Math.max(1, transform.imageWidth || nextSize.width)
-                const scaleY = nextSize.height / Math.max(1, transform.imageHeight || nextSize.height)
-                onChange({
-                  ...transform,
-                  x: round(transform.x * scaleX),
-                  y: round(transform.y * scaleY),
-                  width: round(transform.width * scaleX),
-                  height: round(transform.height * scaleY),
-                  points: validQuadPoints(transform.points)
-                    ? transform.points.map(point => ({ x: round(point.x * scaleX), y: round(point.y * scaleY) })) as QuadPoints
-                    : pointsFromRect({
-                      x: round(transform.x * scaleX),
-                      y: round(transform.y * scaleY),
-                      width: round(transform.width * scaleX),
-                      height: round(transform.height * scaleY),
-                    }),
-                  rotation: transform.rotation || 0,
-                  skewX: transform.skewX || 0,
-                  skewY: transform.skewY || 0,
-                  coordinateSpace: 'pixels',
-                  imageWidth: nextSize.width,
-                  imageHeight: nextSize.height,
-                })
-              }
             }}
           />
         ) : <div className="h-full w-full bg-[#1A1A1A]" />}
