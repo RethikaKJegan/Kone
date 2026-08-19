@@ -37,7 +37,11 @@ function eraserEntryFromTransform(transform: RepinTransform) {
 }
 
 function hasManualEraserBackground(transform: RepinTransform | null | undefined) {
-  return Boolean(transform?.eraserHistory && transform.eraserHistory.length > 1)
+  return Boolean(
+    (transform?.eraserHistory && transform.eraserHistory.length > 1) ||
+    (transform?.magicEraserApplied && transform?.repinBackgroundUrl) ||
+    transform?.repinBackgroundUrl
+  )
 }
 
 function repinBackgroundForEditing(transform: RepinTransform | null | undefined, allowGeneratedBackground = false) {

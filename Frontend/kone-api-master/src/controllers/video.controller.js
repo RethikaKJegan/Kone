@@ -301,7 +301,11 @@ const localStoragePathFromUrl = (url) => {
   const resolved = path.resolve(storageRoot, pathname.replace('/storage/', ''));
   return resolved.startsWith(storageRoot) ? resolved : null;
 };
-const hasManualEraserBackground = (item = {}) => Array.isArray(item.eraserHistory) && item.eraserHistory.length > 1;
+const hasManualEraserBackground = (item = {}) => Boolean(
+  (Array.isArray(item.eraserHistory) && item.eraserHistory.length > 1) ||
+  (item.magicEraserApplied && item.repinBackgroundUrl) ||
+  item.repinBackgroundUrl
+);
 const isSameComponentReEdit = (item = {}) => item.sourceVersionComponent && item.componentKey && String(item.sourceVersionComponent).toLowerCase() === String(item.componentKey).toLowerCase();
 
 const withLocalRepinFiles = (item = {}) => {

@@ -160,7 +160,11 @@ def _source_image_for_repin(storage: Path, preview_dir: Path, source_version: in
 
 def _has_manual_eraser_background(transform: dict[str, Any]) -> bool:
     history = transform.get("eraserHistory")
-    return isinstance(history, list) and len(history) > 1
+    return (
+        (isinstance(history, list) and len(history) > 1)
+        or bool(transform.get("magicEraserApplied") and transform.get("repinBackgroundPath"))
+        or bool(transform.get("repinBackgroundPath"))
+    )
 
 
 def _should_apply_repin_background(transform: dict[str, Any]) -> bool:
@@ -1632,6 +1636,17 @@ def repin_components(payload: ProjectPayload):
 
         transforms = [target_transform]
         placed_image = Image.open(source_image_path).convert("RGB")
+        full_repin_background_applied = False
+        if repin_background_path:
+            repin_background_source = Path(str(repin_background_path))
+            history = target_transform.get("eraserHistory")
+            magic_eraser_background = bool(target_transform.get("magicEraserApplied")) or (isinstance(history, list) and len(history) > 1)
+            if magic_eraser_background and repin_background_source.exists():
+                erased_image = Image.open(repin_background_source).convert("RGB")
+                if erased_image.size != placed_image.size:
+                    erased_image = erased_image.resize(placed_image.size, Image.Resampling.LANCZOS)
+                placed_image = erased_image
+                full_repin_background_applied = True
         target_transform = _with_lci_cop_homography_points(target_transform, placed_image)
         transforms = [target_transform]
         placements = []
@@ -1653,7 +1668,7 @@ def repin_components(payload: ProjectPayload):
 
             active_repin_background_path = transform.get("repinBackgroundPath")
             magic_eraser_applied = _has_manual_eraser_background(transform)
-            if active_repin_background_path and _should_apply_repin_background(transform):
+            if active_repin_background_path and not full_repin_background_applied and _should_apply_repin_background(transform):
                 placed_image = _composite_repin_background_region(
                     placed_image,
                     Path(str(active_repin_background_path)),
