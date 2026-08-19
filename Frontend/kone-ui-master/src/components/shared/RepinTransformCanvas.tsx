@@ -258,7 +258,11 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
   const [imageSize, setImageSize] = useState({ width: transform.imageWidth || 1000, height: transform.imageHeight || 750 })
 
   const normalized = useMemo(() => {
-    const fallback = repinTransformFromPin(transform.componentKey, transform.sourceVersion, transform.targetVersion, null, imageSize)
+    const transformImageSize = {
+      width: Math.max(1, finiteNumber(transform.imageWidth, imageSize.width)),
+      height: Math.max(1, finiteNumber(transform.imageHeight, imageSize.height)),
+    }
+    const fallback = repinTransformFromPin(transform.componentKey, transform.sourceVersion, transform.targetVersion, null, transformImageSize)
     const rawX = finiteNumber(transform.x, fallback.x)
     const rawY = finiteNumber(transform.y, fallback.y)
     const rawWidth = finiteNumber(transform.width, fallback.width)
@@ -268,18 +272,21 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
       rawHeight >= MIN_SIZE &&
       rawX >= 0 &&
       rawY >= 0 &&
-      rawX <= imageSize.width - MIN_SIZE &&
-      rawY <= imageSize.height - MIN_SIZE
+      rawX <= transformImageSize.width - MIN_SIZE &&
+      rawY <= transformImageSize.height - MIN_SIZE
     const base = isUsable ? transform : fallback
-    const x = round(clamp(finiteNumber(base.x, fallback.x), 0, Math.max(0, imageSize.width - MIN_SIZE)))
-    const y = round(clamp(finiteNumber(base.y, fallback.y), 0, Math.max(0, imageSize.height - MIN_SIZE)))
+    const x = round(clamp(finiteNumber(base.x, fallback.x), 0, Math.max(0, transformImageSize.width - MIN_SIZE)))
+    const y = round(clamp(finiteNumber(base.y, fallback.y), 0, Math.max(0, transformImageSize.height - MIN_SIZE)))
     const rectBase = {
       x,
       y,
-      width: round(clamp(finiteNumber(base.width, fallback.width), MIN_SIZE, imageSize.width - x)),
-      height: round(clamp(finiteNumber(base.height, fallback.height), MIN_SIZE, imageSize.height - y)),
+      width: round(clamp(finiteNumber(base.width, fallback.width), MIN_SIZE, transformImageSize.width - x)),
+      height: round(clamp(finiteNumber(base.height, fallback.height), MIN_SIZE, transformImageSize.height - y)),
     }
-    const points = clampPoints(validQuadPoints(base.points) ? base.points : pointsFromRect(rectBase), imageSize)
+    const sourcePoints = clampPoints(validQuadPoints(base.points) ? base.points : pointsFromRect(rectBase), transformImageSize)
+    const scaleX = imageSize.width / transformImageSize.width
+    const scaleY = imageSize.height / transformImageSize.height
+    const points = sourcePoints.map(point => ({ x: round(point.x * scaleX), y: round(point.y * scaleY) })) as QuadPoints
     const bbox = boundingBoxFromPoints(points, imageSize)
     return {
       ...base,
