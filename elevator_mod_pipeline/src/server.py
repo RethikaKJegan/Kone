@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
+import fcntl
 import io
 import json
 import os
@@ -24,6 +26,20 @@ from input_validation import validate_elevator_or_cop_upload, validate_input_ima
 
 app = FastAPI()
 PIPELINE_LOCK = threading.Lock()
+FIRERED_LOCK = threading.Lock()
+FIRERED_LOCK_PATH = Path(os.environ.get("FIRERED_REPIN_LOCK_PATH", "/tmp/kone_firered_repin.lock"))
+
+@contextmanager
+def firered_repin_lock():
+    FIRERED_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with FIRERED_LOCK:
+        with FIRERED_LOCK_PATH.open("w") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
 
 
 def _run_pipeline_in_process(config_path: Path) -> None:
@@ -1686,7 +1702,8 @@ def repin_components(payload: ProjectPayload):
         )
         target_bbox = placements[target_index]["final_insertion_bbox"] if target_index >= 0 else None
         target_mask = component_masks[target_index] if target_index >= 0 else None
-        used_firered = _run_firered_if_available(placed_path, output_path, target_transform, target_bbox, target_mask)
+        with firered_repin_lock():
+            used_firered = _run_firered_if_available(placed_path, output_path, target_transform, target_bbox, target_mask)
         if not used_firered:
             placed_image.save(output_path)
         editable_layer_url = target_transform.get("editableLayerUrl")

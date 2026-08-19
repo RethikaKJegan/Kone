@@ -547,9 +547,11 @@ const runLogicRepin = async ({ imageId, userId, offering, transform, transforms 
     .map((item) => item?.componentKey)
     .filter(Boolean)));
   const storageDir = getLogicStorageDir(userId, imageId);
-  const uploadsDir = path.join(storageDir, 'uploads');
-  const previewDir = path.join(storageDir, 'preview');
-  const pipelineDir = path.join(storageDir, 'pipeline');
+  const repinJobId = crypto.randomUUID();
+  const jobStorageDir = path.join(storageDir, 'repin_jobs', repinJobId);
+  const uploadsDir = path.join(jobStorageDir, 'uploads');
+  const previewDir = path.join(jobStorageDir, 'preview');
+  const pipelineDir = path.join(jobStorageDir, 'pipeline');
   const outputDir = getOutputDir(imageId);
   await Promise.all([uploadsDir, previewDir, pipelineDir, outputDir].map((dir) => fsPromises.mkdir(dir, { recursive: true })));
 
@@ -572,7 +574,7 @@ const runLogicRepin = async ({ imageId, userId, offering, transform, transforms 
       session_id: `auth_${userId}`,
       project_id: imageId,
       project_name: imageId,
-      storage_dir: storageDir,
+      storage_dir: jobStorageDir,
       selected_components: repinComponents.length ? repinComponents : [transform.componentKey],
       component_assets: componentAssets,
       environments,
@@ -594,7 +596,7 @@ const runLogicRepin = async ({ imageId, userId, offering, transform, transforms 
   const publicLogicUrl = (value) => {
     if (!value || typeof value !== 'string') return value;
     if (value.startsWith('/storage/') || value.startsWith('/output/') || value.startsWith('http://') || value.startsWith('https://')) return value;
-    return storagePublicUrl(path.join(storageDir, value));
+    return storagePublicUrl(path.join(jobStorageDir, value));
   };
   const logicPreviewVersion = Array.isArray(data.preview_versions)
     ? data.preview_versions.find((version) => Number(version.version) === Number(logicTransform.targetVersion))
@@ -614,7 +616,7 @@ const runLogicRepin = async ({ imageId, userId, offering, transform, transforms 
     currentPreviewUrl: webCurrentCreated ? `/output/${imageId}/final_output_web.jpg` : `/output/${imageId}/final_output.png`,
     fullPreviewUrl: `/output/${imageId}/${versionFile}`,
     transform: logicTransformResult,
-    pins: await componentPinsFromPlacement(storageDir),
+    pins: await componentPinsFromPlacement(jobStorageDir),
     parentVersionId: parent.parentVersion,
     parentFinalImagePath: parent.parentFinalImagePath,
     actualFireRedInputPath: data.actual_firered_input_path || sourceImage,
