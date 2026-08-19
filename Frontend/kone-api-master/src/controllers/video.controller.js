@@ -901,6 +901,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const videoRenderJobs = new Map();
 
+const isVideoCancelError = (error) => error?.name === 'AbortError' || error?.code === 'ABORT_ERR';
+
 const videoJobKey = ({ imageId, offeringId, motion, quality }) => [
   imageId || 'image',
   offeringId || 'guest',
@@ -1043,7 +1045,7 @@ const ensureComfyRunning = async () => {
   return comfyStartPromise;
 };
 
-const generateComfyVideo = async ({ inputPath, outputDir, videoOptions }) => {
+const generateComfyVideo = async ({ inputPath, outputDir, videoOptions, signal }) => {
   await ensureComfyRunning();
 
   const pythonPath = (await fileExists(COMFY_PYTHON)) ? COMFY_PYTHON : '/usr/bin/python3';
@@ -1105,6 +1107,7 @@ const generateComfyVideo = async ({ inputPath, outputDir, videoOptions }) => {
         cwd: COMFY_ROOT,
         timeout: 0,
         maxBuffer: 1024 * 1024 * 20,
+        signal,
       }
     );
   } catch (error) {
@@ -1555,11 +1558,18 @@ const generateVideo = async (req, res) => {
     await fsPromises.rm(outputVideoPath, { force: true }).catch(() => {});
     await fsPromises.rm(metadataPath, { force: true }).catch(() => {});
 
+    const abortController = new AbortController();
     const renderPromise = (async () => {
       try {
-        await generateComfyVideo({ inputPath: videoInputPath, outputDir, videoOptions });
+        await generateComfyVideo({ inputPath: videoInputPath, outputDir, videoOptions, signal: abortController.signal });
         await finalizeVideoArtifacts({ imageId, userId: req.user.id, job, outputDir, offeringId });
       } catch (error) {
+        if (abortController.signal.aborted || isVideoCancelError(error)) {
+          console.log('[Video] Generation cancelled:', renderKey);
+          await fsPromises.rm(outputVideoPath, { force: true }).catch(() => {});
+          await fsPromises.rm(metadataPath, { force: true }).catch(() => {});
+          return;
+        }
         console.error('[Video] Generation failed:', error.message);
         if (offeringId) {
           await Offering.findByIdAndUpdate(offeringId, {
@@ -1575,12 +1585,66 @@ const generateVideo = async (req, res) => {
     videoRenderJobs.set(renderKey, {
       startedAt: new Date().toISOString(),
       promise: renderPromise,
+      controller: abortController,
+      userId: req.user.id,
     });
 
     return res.status(202).json({
       success: true,
       status: 'processing',
       message: 'Video generation started',
+      data: { imageId, renderKey },
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+const cancelVideo = async (req, res) => {
+  try {
+    const { imageId, videoOptions = {}, offeringId } = req.body;
+    const motion = videoMotionForOptions(videoOptions);
+    const quality = videoOptions.quality || '1080p';
+    const renderKey = videoJobKey({ imageId, offeringId, motion, quality });
+    const running = videoRenderJobs.get(renderKey);
+
+    if (!running) {
+      return res.status(200).json({
+        success: true,
+        status: 'idle',
+        message: 'No video generation is running',
+        data: { imageId, renderKey },
+      });
+    }
+
+    if (running.userId !== req.user.id) {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+
+    running.controller.abort();
+    await axios.post(COMFY_URL + '/interrupt', {}, { timeout: 2500 }).catch(() => {});
+
+    if (offeringId) {
+      const offering = await getOwnedOffering(offeringId, req.user.id);
+      if (offering) {
+        await Offering.findByIdAndUpdate(offeringId, {
+          outputVideoUrl: null,
+          outputVideoPath: null,
+          videoGenerated: false,
+          downloadUrl: null,
+          pipelineStatus: offering.outputImageUrl ? 'preview_ready' : 'uploaded',
+          lastError: null,
+        });
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      status: 'cancelled',
+      message: 'Video generation cancelled',
       data: { imageId, renderKey },
     });
   } catch (error) {
@@ -1599,4 +1663,5 @@ module.exports = {
   repinPreview,
   repinEraser,
   generateVideo,
+  cancelVideo,
 };

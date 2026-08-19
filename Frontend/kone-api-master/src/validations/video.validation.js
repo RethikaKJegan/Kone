@@ -19,6 +19,14 @@ const imageIdBody = {
   }),
 };
 
+const cancelVideo = {
+  body: Joi.object().keys({
+    imageId: Joi.string().required(),
+    offeringId: Joi.string(),
+    videoOptions: Joi.object().unknown(true),
+  }),
+};
+
 const selectEnvironment = {
   body: Joi.object().keys({
     imageId: Joi.string().required(),
@@ -103,6 +111,7 @@ const repinPreview = {
 
 module.exports = {
   imageIdBody,
+  cancelVideo,
   selectEnvironment,
   selectComponents,
   repinPreview,

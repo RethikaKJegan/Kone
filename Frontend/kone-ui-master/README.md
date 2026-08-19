@@ -33,6 +33,7 @@ npm run dev        # starts on localhost:3000 with mock API
 | Email | Password |
 |---|---|
 | `pavan@bellcorpstudio.com` | `password123` |
+| `demo@bellcorpstudio.com` | `demo12345` |
 | `any@kone.com` | any non-empty password |
 
 Or click **Continue as guest** — no account needed.

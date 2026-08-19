@@ -10,10 +10,23 @@ export const SEEDED_USER: User = {
   avatarInitials: 'PK',
 }
 
+export const SECOND_DEMO_USER: User = {
+  id: 'user-2',
+  email: 'demo@bellcorpstudio.com',
+  name: 'Demo User',
+  role: 'authenticated',
+  company: 'KONE',
+  avatarInitials: 'DU',
+}
+
 export const users: Map<string, User & { password: string }> = new Map([
   [
     'pavan@bellcorpstudio.com',
     { ...SEEDED_USER, password: 'password123' },
+  ],
+  [
+    'demo@bellcorpstudio.com',
+    { ...SECOND_DEMO_USER, password: 'demo12345' },
   ],
 ])
 

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Loader2, Play } from 'lucide-react'
+import { Loader2, Play, Square } from 'lucide-react'
 import apiClient from '../../../api/client'
 import { getGuestSessionId, isGuestSession } from '../../../api/guestWorkflow'
 import { useOfferingStore } from '../../../store/offeringStore'
@@ -52,6 +52,7 @@ export default function Step5Video() {
   const activeVideoGeneration = currentOffering ? videoGenerations[currentOffering.id] : undefined
   const resumePollingRef = useRef(false)
   const [loadFailed, setLoadFailed] = useState(false)
+  const [canceling, setCanceling] = useState(false)
   const [progressNow, setProgressNow] = useState(Date.now())
   const persistedGenerating = Boolean(currentOffering?.pipelineStatus === 'processing' && currentOffering?.savedStep === 5 && !currentOffering?.outputVideoUrl)
   const generating = Boolean(activeVideoGeneration || persistedGenerating)
@@ -384,6 +385,42 @@ export default function Step5Video() {
     }
   }
 
+  const handleCancelVideoGeneration = async () => {
+    if (!generating || !currentOffering || !effectiveImageId || isGuestSession()) return
+    const videoOptions = isDoorFunctionality
+      ? { engine: "wan2.2", mode: "door_functionality", duration_seconds: 8, speed: currentOffering.videoSpeed, quality }
+      : { engine: "wan2.2", motion, speed: currentOffering.videoSpeed, quality }
+
+    setCanceling(true)
+    try {
+      await apiClient.post("/video/cancel", {
+        imageId: effectiveImageId,
+        offeringId: currentOffering.id,
+        videoOptions,
+      })
+      finishVideoGeneration(currentOffering.id)
+      setLoadFailed(false)
+      setCurrentOffering({
+        ...currentOffering,
+        outputVideoUrl: null,
+        outputVideoPath: null,
+        videoGenerated: false,
+        downloadUrl: null,
+        pipelineStatus: currentOffering.outputImageUrl ? "preview_ready" : "uploaded",
+        lastError: null,
+      })
+      toast("Video generation cancelled")
+    } catch (error) {
+      const responseMessage = typeof error === "object" && error !== null && "response" in error
+        ? (error as { response?: { data?: { message?: string; error?: string } } }).response?.data?.message
+          ?? (error as { response?: { data?: { message?: string; error?: string } } }).response?.data?.error
+        : null
+      toast(responseMessage || (error instanceof Error ? error.message : "Could not cancel video generation"), "destructive")
+    } finally {
+      setCanceling(false)
+    }
+  }
+
   const handleSkipVideoGeneration = () => {
     if (generating) return
     if (!currentOffering?.outputImageUrl) {
@@ -550,6 +587,15 @@ export default function Step5Video() {
           style={{ height: 38 }}
         >
           Skip video generation
+        </button>
+        <button
+          onClick={handleCancelVideoGeneration}
+          disabled={!generating || canceling || isGuestSession() || !effectiveImageId}
+          className="inline-flex items-center gap-2 rounded-lg border border-[#FCA5A5] bg-white px-6 text-[13px] font-semibold text-[#DC2626] transition-all duration-[150ms] hover:bg-[#FEF2F2] disabled:cursor-not-allowed disabled:opacity-40"
+          style={{ height: 38 }}
+        >
+          {canceling ? <Loader2 className="animate-spin" style={{ width: 13, height: 13 }} /> : <Square style={{ width: 12, height: 12 }} />}
+          Cancel
         </button>
         <button
           onClick={handleGeneratePreview}
