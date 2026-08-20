@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import apiClient from '../api/client'
 import { getGuestSessionId, isGuestSession } from '../api/guestWorkflow'
+import { safeSystemErrorMessage } from '../lib/safeErrors'
 import { KONE_COMPONENTS } from '../lib/constants'
 import { useProjectStore } from './projectStore'
 import type { Offering, OfferingStep, Environment, ComponentKey, ComponentPin, RepinTransform } from '../types'
@@ -646,11 +647,8 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       }
     } catch (error) {
       set({ isProcessing: false })
-      const response = error && typeof error === 'object' && 'response' in error
-        ? (error as { response?: { data?: { message?: string; error?: string } } }).response
-        : null
-      const message = response?.data?.message || response?.data?.error
-      throw new Error(message || (error instanceof Error ? error.message : 'Could not start repin preview'))
+      console.error('[offeringStore] Could not start repin preview', error)
+      throw new Error(safeSystemErrorMessage())
     }
   },
 
@@ -711,11 +709,8 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       return nextTransform
     } catch (error) {
       set({ isProcessing: false })
-      const response = error && typeof error === 'object' && 'response' in error
-        ? (error as { response?: { data?: { message?: string; error?: string } } }).response
-        : null
-      const message = response?.data?.message || response?.data?.error
-      throw new Error(message || (error instanceof Error ? error.message : 'Magic Eraser failed'))
+      console.error('[offeringStore] Magic Eraser failed', error)
+      throw new Error(safeSystemErrorMessage())
     }
   },
 

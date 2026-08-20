@@ -36,6 +36,7 @@ export interface ComponentVariant {
   id: string
   label: string
   imageUrl: string
+  group?: string
 }
 
 export interface ComponentPin {

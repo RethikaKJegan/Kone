@@ -7,6 +7,7 @@ import { useOfferingStore } from '../../../store/offeringStore'
 import { RepinTransformCanvas, repinTransformFromPin } from '../../../components/shared/RepinTransformCanvas'
 import { KONE_COMPONENTS } from '../../../lib/constants'
 import { toast } from '../../../hooks/useToast'
+import { safeSystemErrorMessage } from '../../../lib/safeErrors'
 import { cn } from '../../../lib/utils'
 import type { ComponentKey, ComponentPin, PreviewVersion, RepinFeedbackOption, RepinTransform } from '../../../types'
 
@@ -239,8 +240,8 @@ export default function Step4Repin() {
           }
           if (data.status === 'failed') {
             useOfferingStore.setState({ isProcessing: false })
-            setCurrentOffering({ ...offering, pipelineStatus: 'failed', renderComplete: false, lastError: data.error })
-            toast(data.error || 'Repin preview failed', 'destructive')
+            setCurrentOffering({ ...offering, pipelineStatus: 'failed', renderComplete: false, lastError: safeSystemErrorMessage() })
+            toast(safeSystemErrorMessage(), 'destructive')
             return
           }
         } else {
@@ -266,7 +267,7 @@ export default function Step4Repin() {
           if (data.pipelineStatus === 'failed') {
             useOfferingStore.setState({ isProcessing: false })
             setCurrentOffering({ ...data, renderComplete: false })
-            toast(data.lastError || 'Repin preview failed', 'destructive')
+            toast(safeSystemErrorMessage(), 'destructive')
             return
           }
         }
@@ -379,7 +380,8 @@ export default function Step4Repin() {
       setPlacementPreview(false)
       toast('Magic Eraser cleaned the selected area')
     } catch (error) {
-      toast(error instanceof Error ? error.message : 'Magic Eraser failed', 'destructive')
+      console.error('[Step4Repin] Magic Eraser failed', error)
+      toast(safeSystemErrorMessage(), 'destructive')
     }
   }
 
@@ -533,7 +535,8 @@ export default function Step4Repin() {
       await submitRepinPreview(primaryPayload, submittedTransforms)
       toast("Generating combined repin preview")
     } catch (error) {
-      toast(error instanceof Error ? error.message : "Could not start repin preview", "destructive")
+      console.error('[Step4Repin] Could not start repin preview', error)
+      toast(safeSystemErrorMessage(), "destructive")
     }
   }
 
@@ -592,6 +595,7 @@ export default function Step4Repin() {
         <div>
           <h2 className="text-heading text-[15px] font-semibold text-[#111827]">4 &nbsp; Repin</h2>
           <p className="mt-1 text-[12px] text-[#9CA3AF]">Adjust component geometry, then generate a realistic preview.</p>
+          <p className="mt-2 text-[12px] font-semibold text-[#1450F5]">Edit one component at a time</p>
         </div>
         <button onClick={handleBack} className="text-xs font-medium text-[#9CA3AF] transition-colors duration-[120ms] hover:text-[#6B7280]">Back</button>
       </div>

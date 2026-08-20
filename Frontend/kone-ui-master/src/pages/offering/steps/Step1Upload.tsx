@@ -6,6 +6,7 @@ import { getGuestSessionId, isGuestSession } from '../../../api/guestWorkflow'
 import { useOfferingStore } from '../../../store/offeringStore'
 import { UploadZone } from '../../../components/shared/UploadZone'
 import { toast } from '../../../hooks/useToast'
+import { safeSystemErrorMessage } from '../../../lib/safeErrors'
 import type { Offering } from '../../../types'
 
 type RestoreState = {
@@ -54,8 +55,9 @@ export default function Step1Upload() {
     setPrecheckReason(null)
     try {
       await setUpload(file)
-    } catch {
-      toast('Upload failed. Check that API is running on port 4000 and UI mock API is disabled.', 'destructive')
+    } catch (error) {
+      console.error('[Step1Upload] Upload failed', error)
+      toast(safeSystemErrorMessage(), 'destructive')
     }
   }
 

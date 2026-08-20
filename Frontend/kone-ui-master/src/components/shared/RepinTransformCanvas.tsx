@@ -97,19 +97,6 @@ function quadCenter(points: QuadPoints): QuadPoint {
   return points.reduce((acc, point) => ({ x: acc.x + point.x / 4, y: acc.y + point.y / 4 }), { x: 0, y: 0 })
 }
 
-function rotatePoints(points: QuadPoints, center: QuadPoint, radians: number): QuadPoints {
-  const cos = Math.cos(radians)
-  const sin = Math.sin(radians)
-  return points.map(point => {
-    const x = point.x - center.x
-    const y = point.y - center.y
-    return {
-      x: center.x + x * cos - y * sin,
-      y: center.y + x * sin + y * cos,
-    }
-  }) as QuadPoints
-}
-
 function scalePointsFromAnchor(points: QuadPoints, anchorIndex: number, dragIndex: number, target: QuadPoint): QuadPoints {
   const anchor = points[anchorIndex]
   const startDrag = points[dragIndex]
@@ -451,7 +438,6 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
         const delta = nextAngle - startAngle
         setTransform({
           ...drag.start,
-          points: rotatePoints(startPoints, center, delta),
           rotation: (drag.start.rotation || 0) + (delta * 180) / Math.PI,
         })
         return
@@ -558,7 +544,13 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
                 clipPath: "polygon(" + box.relativePolygon + ")",
               }}
             >
-              <img src={layer.componentImageUrl} alt={layer.label} className="h-full w-full object-fill" draggable={false} />
+              <img
+                src={layer.componentImageUrl}
+                alt={layer.label}
+                className="h-full w-full object-fill"
+                draggable={false}
+                style={{ transform: 'rotate(' + finiteNumber(layer.transform.rotation, 0) + 'deg)', transformOrigin: 'center' }}
+              />
             </div>
           )
         })}
@@ -579,6 +571,7 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
               alt={label}
               className="h-full w-full object-fill"
               draggable={false}
+              style={{ transform: 'rotate(' + finiteNumber(normalized.rotation, 0) + 'deg)', transformOrigin: 'center' }}
               onLoad={event => rememberAssetAspectRatio(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight)}
             />
           </div>

@@ -7,6 +7,7 @@ import { useOfferingStore } from '../../../store/offeringStore'
 import { VIDEO_MOTION_STYLES, VIDEO_QUALITIES } from '../../../lib/constants'
 import { cn } from '../../../lib/utils'
 import { toast } from '../../../hooks/useToast'
+import { safeSystemErrorMessage } from '../../../lib/safeErrors'
 import type { Offering } from '../../../types'
 
 type MotionStyle = Offering['videoMotionStyle']
@@ -189,7 +190,7 @@ export default function Step5Video() {
           finishVideoGeneration(currentOffering.id)
           setLoadFailed(true)
           setCurrentOffering(data)
-          toast(data.lastError || 'Video generation failed', 'destructive')
+          toast(safeSystemErrorMessage(), 'destructive')
         }
       } catch {
         // Keep polling; the long-running generation may still be active.
@@ -229,7 +230,7 @@ export default function Step5Video() {
         } else if (data.status === 'failed') {
           finishVideoGeneration(currentOffering.id)
           setLoadFailed(true)
-          toast(data.error || 'Video generation failed', 'destructive')
+          toast(safeSystemErrorMessage(), 'destructive')
         }
       } catch {
         // Keep polling; refresh recovery is best-effort for guest sessions.
@@ -283,7 +284,7 @@ export default function Step5Video() {
 
           if (data.status === 'failed') {
             setLoadFailed(true)
-            toast(data.error || 'Video generation failed', 'destructive')
+            toast(safeSystemErrorMessage(), 'destructive')
             return
           }
 
@@ -291,10 +292,11 @@ export default function Step5Video() {
         }
 
         setLoadFailed(true)
-        toast('Video generation timed out. Check the API and logic terminals.', 'destructive')
+        toast(safeSystemErrorMessage(), 'destructive')
       } catch (error) {
         setLoadFailed(true)
-        toast(error instanceof Error ? error.message : 'Video generation failed', 'destructive')
+        console.error('[Step5Video] Video generation failed', error)
+        toast(safeSystemErrorMessage(), 'destructive')
       } finally {
         finishVideoGeneration(currentOffering.id)
       }
@@ -362,11 +364,8 @@ export default function Step5Video() {
         })
       } catch (error) {
         setLoadFailed(true)
-        const responseMessage = typeof error === 'object' && error !== null && 'response' in error
-          ? (error as { response?: { data?: { message?: string; error?: string } } }).response?.data?.message
-            ?? (error as { response?: { data?: { message?: string; error?: string } } }).response?.data?.error
-          : null
-        const message = summarizeVideoError(responseMessage || (error instanceof Error ? error.message : 'Video generation failed'))
+        console.error('[Step5Video] Video generation failed', error)
+        const message = safeSystemErrorMessage()
         setCurrentOffering({
           ...currentOffering,
           videoMotionStyle: motion,
@@ -411,11 +410,8 @@ export default function Step5Video() {
       })
       toast("Video generation cancelled")
     } catch (error) {
-      const responseMessage = typeof error === "object" && error !== null && "response" in error
-        ? (error as { response?: { data?: { message?: string; error?: string } } }).response?.data?.message
-          ?? (error as { response?: { data?: { message?: string; error?: string } } }).response?.data?.error
-        : null
-      toast(responseMessage || (error instanceof Error ? error.message : "Could not cancel video generation"), "destructive")
+      console.error('[Step5Video] Could not cancel video generation', error)
+      toast(safeSystemErrorMessage(), "destructive")
     } finally {
       setCanceling(false)
     }
@@ -622,14 +618,3 @@ export default function Step5Video() {
   )
 }
 
-function summarizeVideoError(message: string) {
-  if (message.includes('No CUDA GPUs are available') || message.includes('sees no GPU')) {
-    return 'Wan2.2 needs CUDA, but the Wan Python environment cannot see a GPU. Check the Python logic terminal.'
-  }
-  const missingModule = message.match(/No module named ['"]([^'"]+)['"]/)
-  if (missingModule?.[1]) {
-    return `Wan2.2 is missing Python dependency: ${missingModule[1]}`
-  }
-  const firstLine = message.split('\n').find(line => line.trim())?.trim() || message
-  return firstLine.length > 240 ? `${firstLine.slice(0, 237)}...` : firstLine
-}

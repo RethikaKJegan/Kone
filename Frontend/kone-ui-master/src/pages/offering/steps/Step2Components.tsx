@@ -15,6 +15,10 @@ const ENV_COMPONENTS: Record<Environment, ComponentKey[]> = {
 
 type ComponentAssetMap = Partial<Record<ComponentKey, string>>
 type PreviewImage = { title: string; subtitle: string; imageUrl: string }
+function displayImageUrl(imageUrl: string | null | undefined, version: string) {
+  if (!imageUrl) return imageUrl
+  return imageUrl.startsWith('/components/') ? `${imageUrl}?v=${version}` : imageUrl
+}
 
 const UI_COMPONENTS = KONE_COMPONENTS.filter(component => component.key !== 'cop')
 const UI_COMPONENT_KEYS = new Set<ComponentKey>(UI_COMPONENTS.map(component => component.key))
@@ -68,6 +72,19 @@ function normalizeAssetMap(components: ComponentKey[], assets: ComponentAssetMap
   ) as ComponentAssetMap
 }
 
+function groupedVariants(variants: ComponentVariant[]) {
+  return variants.reduce<{ group: string | null; variants: ComponentVariant[] }[]>((groups, variant) => {
+    const group = variant.group ?? null
+    const existing = groups.find(item => item.group === group)
+    if (existing) {
+      existing.variants.push(variant)
+    } else {
+      groups.push({ group, variants: [variant] })
+    }
+    return groups
+  }, [])
+}
+
 export default function Step2Components() {
   const { projectId, offeringId } = useParams()
   const navigate = useNavigate()
@@ -82,6 +99,7 @@ export default function Step2Components() {
   const [activeComp, setActiveComp] = useState<ComponentKey | null>(initialComponents[0] ?? null)
   const [previewImage, setPreviewImage] = useState<PreviewImage | null>(null)
   const [optionQuery, setOptionQuery] = useState('')
+  const [componentImageVersion] = useState(() => String(Date.now()))
 
   useEffect(() => {
     if (currentOffering) {
@@ -151,6 +169,7 @@ export default function Step2Components() {
   const filteredActiveVariants = activeVariants.filter(variant =>
     variant.label.toLowerCase().includes(optionQuery.trim().toLowerCase())
   )
+  const activeVariantGroups = groupedVariants(filteredActiveVariants)
 
   return (
     <>
@@ -163,7 +182,7 @@ export default function Step2Components() {
                 <DialogDescription>{previewImage.subtitle}</DialogDescription>
               </DialogHeader>
               <div className="flex max-h-[72vh] items-center justify-center overflow-hidden rounded-lg border border-[#E4E4E4] bg-[#F5F6F8] p-3">
-                <img src={previewImage.imageUrl} alt={previewImage.title} className="max-h-[68vh] w-full object-contain" />
+                <img src={displayImageUrl(previewImage.imageUrl, componentImageVersion)} alt={previewImage.title} className="max-h-[68vh] w-full object-contain" />
               </div>
             </>
           )}
@@ -218,7 +237,7 @@ export default function Step2Components() {
                       <span className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-md bg-[#F1F3F6]">
                         {cardImage ? (
                           <img
-                            src={cardImage}
+                            src={displayImageUrl(cardImage, componentImageVersion)}
                             alt={comp.label}
                             className="h-full w-full object-contain p-1.5"
                             loading="lazy"
@@ -285,7 +304,7 @@ export default function Step2Components() {
                           activeComp === c.key ? 'border-[#1450F5] bg-[#1450F5]/5' : 'border-[#D7E0FF] bg-white hover:bg-[#1450F5]/5'
                         )}
                       >
-                        {variant?.imageUrl && <img src={variant.imageUrl} alt={variant.label} className="h-5 w-5 rounded-sm object-cover" />}
+                        {variant?.imageUrl && <img src={displayImageUrl(variant.imageUrl, componentImageVersion)} alt={variant.label} className="h-5 w-5 rounded-sm object-cover" />}
                         <span className="truncate text-[12px] font-semibold text-[#1450F5]">{variant?.label ?? c.label}</span>
                       </button>
                     )
@@ -296,62 +315,68 @@ export default function Step2Components() {
 
             {activeComp && activeVariants.length > 0 ? (
               filteredActiveVariants.length > 0 ? (
-              <div className={cn(
-                'max-h-none overflow-y-auto p-4 sm:p-5 lg:max-h-[560px]',
-                activeComp === 'ceiling' ? 'grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3' : activeComp === 'cop' || activeComp === 'door' ? 'grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3' : 'grid grid-cols-3 gap-2 sm:grid-cols-4 xl:grid-cols-5'
-              )}>
-                {filteredActiveVariants.map(variant => {
-                  const isSelected = componentAssets[activeComp] === variant.imageUrl
-                  return (
-                    <div
-                      key={variant.id}
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => selectVariant(activeComp, variant)}
-                      onKeyDown={event => {
-                        if (event.key === 'Enter' || event.key === ' ') {
-                          event.preventDefault()
-                          selectVariant(activeComp, variant)
-                        }
-                      }}
-                      aria-pressed={isSelected}
-                      className={cn(
-                        'group flex flex-col overflow-hidden rounded-lg border-2 bg-white text-left transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1450F5] focus-visible:ring-offset-2',
-                        activeComp === 'ceiling' ? 'h-[188px]' : activeComp === 'cop' || activeComp === 'door' ? 'h-[232px]' : 'h-[104px]',
-                        isSelected ? 'border-[#1450F5] shadow-md shadow-[#1450F5]/10' : 'border-[#E9ECEF] hover:border-[#1450F5]/40 hover:shadow-sm'
-                      )}
-                    >
-                      <div className={cn(
-                        'relative flex items-center justify-center overflow-hidden bg-[#F5F6F8]',
-                        activeComp === 'ceiling' ? 'h-[158px]' : activeComp === 'cop' || activeComp === 'door' ? 'h-[198px]' : 'h-[78px]'
-                      )}>
-                        <img src={variant.imageUrl} alt={variant.label} className="max-h-full max-w-full object-contain p-2 transition-transform duration-300 group-hover:scale-[1.03]" loading="lazy" />
-                        <button
-                          type="button"
-                          onClick={event => {
-                            event.stopPropagation()
-                            setPreviewImage({ title: variant.label, subtitle: componentByKey(activeComp)?.label ?? 'Component option', imageUrl: variant.imageUrl })
-                          }}
-                          className="absolute left-2 top-2 flex h-8 w-8 items-center justify-center rounded-full bg-black/65 text-white opacity-0 shadow-sm transition-opacity duration-[120ms] hover:bg-black/80 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-[#1450F5] focus:ring-offset-2 group-hover:opacity-100"
-                          aria-label={'Preview ' + variant.label}
-                          title={'Preview ' + variant.label}
-                        >
-                          <Eye style={{ width: 15, height: 15 }} />
-                        </button>
-                        {isSelected && (
-                          <div className="absolute right-2 top-2 flex h-[22px] w-[22px] items-center justify-center rounded-full bg-[#1450F5] shadow-sm">
-                            <Check style={{ width: 12, height: 12, color: '#fff', strokeWidth: 3 }} />
+              <div className="max-h-none overflow-y-auto p-4 sm:p-5 lg:max-h-[560px]">
+                {activeVariantGroups.map(({ group, variants }) => (
+                  <section key={group ?? 'ungrouped'} className="mb-5 last:mb-0">
+                    {group && <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.12em] text-[#475569]">{group}</p>}
+                    <div className={cn(
+                      activeComp === 'ceiling' ? 'grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3' : activeComp === 'cop' || activeComp === 'door' ? 'grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3' : 'grid grid-cols-3 gap-2 sm:grid-cols-4 xl:grid-cols-5'
+                    )}>
+                      {variants.map(variant => {
+                        const isSelected = componentAssets[activeComp] === variant.imageUrl
+                        return (
+                          <div
+                            key={variant.id}
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => selectVariant(activeComp, variant)}
+                            onKeyDown={event => {
+                              if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault()
+                                selectVariant(activeComp, variant)
+                              }
+                            }}
+                            aria-pressed={isSelected}
+                            className={cn(
+                              'group flex flex-col overflow-hidden rounded-lg border-2 bg-white text-left transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1450F5] focus-visible:ring-offset-2',
+                              activeComp === 'ceiling' ? 'h-[188px]' : activeComp === 'cop' || activeComp === 'door' ? 'h-[232px]' : 'h-[104px]',
+                              isSelected ? 'border-[#1450F5] shadow-md shadow-[#1450F5]/10' : 'border-[#E9ECEF] hover:border-[#1450F5]/40 hover:shadow-sm'
+                            )}
+                          >
+                            <div className={cn(
+                              'relative flex items-center justify-center overflow-hidden bg-[#F5F6F8]',
+                              activeComp === 'ceiling' ? 'h-[158px]' : activeComp === 'cop' || activeComp === 'door' ? 'h-[198px]' : 'h-[78px]'
+                            )}>
+                              <img src={displayImageUrl(variant.imageUrl, componentImageVersion)} alt={variant.label} className="max-h-full max-w-full object-contain p-2 transition-transform duration-300 group-hover:scale-[1.03]" loading="lazy" />
+                              <button
+                                type="button"
+                                onClick={event => {
+                                  event.stopPropagation()
+                                  setPreviewImage({ title: variant.label, subtitle: componentByKey(activeComp)?.label ?? 'Component option', imageUrl: variant.imageUrl })
+                                }}
+                                className="absolute left-2 top-2 flex h-8 w-8 items-center justify-center rounded-full bg-black/65 text-white opacity-0 shadow-sm transition-opacity duration-[120ms] hover:bg-black/80 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-[#1450F5] focus:ring-offset-2 group-hover:opacity-100"
+                                aria-label={'Preview ' + variant.label}
+                                title={'Preview ' + variant.label}
+                              >
+                                <Eye style={{ width: 15, height: 15 }} />
+                              </button>
+                              {isSelected && (
+                                <div className="absolute right-2 top-2 flex h-[22px] w-[22px] items-center justify-center rounded-full bg-[#1450F5] shadow-sm">
+                                  <Check style={{ width: 12, height: 12, color: '#fff', strokeWidth: 3 }} />
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex h-6 shrink-0 items-center border-t border-[#E1E6ED] bg-white px-2">
+                              <p className={cn('truncate text-[10px] font-semibold leading-3', isSelected ? 'text-[#1450F5]' : 'text-[#111827]')} title={variant.label}>
+                                {variant.label}
+                              </p>
+                            </div>
                           </div>
-                        )}
-                      </div>
-                      <div className="flex h-6 shrink-0 items-center border-t border-[#E1E6ED] bg-white px-2">
-                        <p className={cn('truncate text-[10px] font-semibold leading-3', isSelected ? 'text-[#1450F5]' : 'text-[#111827]')} title={variant.label}>
-                          {variant.label}
-                        </p>
-                      </div>
+                        )
+                      })}
                     </div>
-                  )
-                })}
+                  </section>
+                ))}
               </div>
               ) : (
                 <div className="flex min-h-[360px] items-center justify-center p-8 text-center">

@@ -9,6 +9,7 @@ import { AIBadge } from '../../../components/shared/AIBadge'
 import { Skeleton } from '../../../components/ui/skeleton'
 import { KONE_COMPONENTS } from '../../../lib/constants'
 import { toast } from '../../../hooks/useToast'
+import { safeSystemErrorMessage } from '../../../lib/safeErrors'
 import type { ComponentKey, ComponentPin } from '../../../types'
 
 const COMP_LABELS = Object.fromEntries(KONE_COMPONENTS.map(c => [c.key, c.label])) as Record<ComponentKey, string>
@@ -97,7 +98,7 @@ export default function Step3Place() {
               await new Promise(resolve => setTimeout(resolve, 2000))
               continue
             }
-            toast(data.error || 'Preview generation failed')
+            toast(safeSystemErrorMessage(), 'destructive')
             return
           }
         } else {
@@ -122,7 +123,7 @@ export default function Step3Place() {
           }
           if (data.pipelineStatus === 'failed') {
             setCurrentOffering({ ...data, renderComplete: false })
-            toast(data.lastError || 'Preview generation failed')
+            toast(safeSystemErrorMessage(), 'destructive')
             return
           }
         }

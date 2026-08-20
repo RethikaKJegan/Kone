@@ -8,6 +8,7 @@ import { useAuthStore } from '../../../store/authStore'
 import { AnnotatedPreview } from '../../../components/shared/AnnotatedPreview'
 import { KONE_COMPONENTS } from '../../../lib/constants'
 import { toast } from '../../../hooks/useToast'
+import { safeSystemErrorMessage } from '../../../lib/safeErrors'
 import { cn } from '../../../lib/utils'
 import type { ComponentKey, ComponentPin } from '../../../types'
 
@@ -578,14 +579,15 @@ export default function Step6Download() {
               toast('Your outputs are ready to download')
               return
             }
-            if (data.status === 'failed') throw new Error(data.error || 'Finalize failed')
+            if (data.status === 'failed') throw new Error(safeSystemErrorMessage())
             await new Promise(resolve => setTimeout(resolve, 1500))
           }
         })
         .catch(error => {
           if (cancelled) return
           delete guestFinalizeState.current[finalizeKey]
-          toast(error.message || 'Final files are not ready')
+          console.error('[Step6Download] Finalize failed', error)
+          toast(safeSystemErrorMessage(), 'destructive')
         })
       return () => {
         cancelled = true
@@ -637,7 +639,8 @@ export default function Step6Download() {
       try {
         await downloadAnnotatedImage(imageUrl, pins, COMP_LABELS, filename)
       } catch (error) {
-        toast(error instanceof Error ? error.message : 'Annotated image is not available', 'destructive')
+        console.error('[Step6Download] Annotated image download failed', error)
+        toast('Annotated image is not available', 'destructive')
       }
       return
     }
@@ -692,9 +695,8 @@ export default function Step6Download() {
       brochureTab.location.href = data.redirectUrl
     } catch (error) {
       brochureTab.close()
-      const responseMessage = (error as { response?: { data?: { message?: string; error?: string } } }).response?.data
-      const message = responseMessage?.message || responseMessage?.error || 'Could not generate brochure. Please try again.'
-      toast(message, 'destructive')
+      console.error('[Step6Download] Could not generate brochure', error)
+      toast(safeSystemErrorMessage(), 'destructive')
     } finally {
       setIsGeneratingBrochure(false)
     }

@@ -7,7 +7,9 @@ import { useOfferingStore } from '../../store/offeringStore'
 import { useProjectStore } from '../../store/projectStore'
 import { TopBar } from '../../components/layout/TopBar'
 import { Skeleton } from '../../components/ui/skeleton'
+import { SystemIssue } from '../../components/shared/SystemIssue'
 import { toast } from '../../hooks/useToast'
+import { safeSystemErrorMessage } from '../../lib/safeErrors'
 import type { Offering, OfferingStep } from '../../types'
 import Step1 from './steps/Step1Upload'
 import Step2 from './steps/Step2Components'
@@ -110,7 +112,8 @@ export default function OfferingShell() {
         setLoadState('ready')
       } catch (error) {
         if (cancelled) return
-        const message = error instanceof Error ? error.message : 'Could not load this workflow.'
+        console.error('[OfferingShell] Could not load workflow', error)
+        const message = safeSystemErrorMessage()
         setLoadState('error')
         setLoadError(message)
         toast(message, 'destructive')
@@ -152,25 +155,22 @@ export default function OfferingShell() {
       <div className="flex min-h-full flex-col">
         <TopBar crumbs={crumbs} />
         <div className="mx-auto w-full max-w-4xl px-6 pb-8 pt-6">
-          <div className="rounded-lg border border-[#E4E4E4] bg-white p-6">
-            <p className="text-sm font-semibold text-[#111827]">Could not open this workflow.</p>
-            <p className="mt-2 text-sm text-[#6B7280]">{loadError || 'Please retry the page load.'}</p>
-            <div className="mt-5 flex flex-wrap gap-3">
-              <button
-                type="button"
-                onClick={() => setRetryNonce(value => value + 1)}
-                className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#1450F5] px-4 text-sm font-semibold text-white transition-colors duration-[120ms] hover:bg-[#0f3fd1]"
-              >
-                <RefreshCw style={{ width: 15, height: 15 }} />
-                Retry
-              </button>
-              <Link
-                to="/projects"
-                className="inline-flex h-10 items-center rounded-lg border border-[#E4E4E4] bg-white px-4 text-sm font-semibold text-[#374151] transition-colors duration-[120ms] hover:border-[#1450F5]/40 hover:text-[#1450F5]"
-              >
-                Back to Projects
-              </Link>
-            </div>
+          <SystemIssue title="Could not open this workflow." message={loadError || safeSystemErrorMessage()} />
+          <div className="mt-5 flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={() => setRetryNonce(value => value + 1)}
+              className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#1450F5] px-4 text-sm font-semibold text-white transition-colors duration-[120ms] hover:bg-[#0f3fd1]"
+            >
+              <RefreshCw style={{ width: 15, height: 15 }} />
+              Retry
+            </button>
+            <Link
+              to="/projects"
+              className="inline-flex h-10 items-center rounded-lg border border-[#E4E4E4] bg-white px-4 text-sm font-semibold text-[#374151] transition-colors duration-[120ms] hover:border-[#1450F5]/40 hover:text-[#1450F5]"
+            >
+              Back to Projects
+            </Link>
           </div>
         </div>
       </div>
