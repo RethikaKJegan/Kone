@@ -112,6 +112,7 @@ export interface PreviewVersion {
   parentFinalImagePath?: string | null
   finalImagePath?: string | null
   transform?: RepinTransform
+  transforms?: RepinTransform[]
   feedbackOption?: RepinFeedbackOption | null
   feedbackOptions?: RepinFeedbackOption[]
   sourceBaseMode?: 'original' | 'version'
@@ -152,6 +153,7 @@ export interface Offering {
   previewRequestKey?: string | null
   previewVersions?: PreviewVersion[]
   repinPass?: number
+  selectedOutputVersion?: number
   repinTransforms?: Partial<Record<ComponentKey, RepinTransform>>
   videoGenerated?: boolean
   downloadUrl?: string | null

@@ -126,11 +126,17 @@ export default function Step4Repin() {
       ? [{ version: 1, url: offering.outputImageUrl }]
       : []
   const latestVersion = versions.reduce((max, version) => Math.max(max, version.version), versions.length ? 1 : 0)
-  const [selectedSourceVersion, setSelectedSourceVersion] = useState(latestVersion || 1)
+  const repinStateKey = offering?.id ? 'kone-repin-state:' + offering.id : null
+  const savedRepinState = (() => {
+    if (!repinStateKey || typeof window === 'undefined') return null
+    try { return JSON.parse(window.localStorage.getItem(repinStateKey) || 'null') } catch { return null }
+  })() as { sourceVersion?: number; selectedComp?: ComponentKey } | null
+  const [selectedSourceVersion, setSelectedSourceVersion] = useState(savedRepinState?.sourceVersion || latestVersion || 1)
   const sourceVersion = versions.some(version => version.version === selectedSourceVersion) ? selectedSourceVersion : latestVersion || 1
   const targetVersion = Math.min(latestVersion + 1, 5)
   const generationLimitReached = latestVersion >= 5
-  const [selectedComp, setSelectedComp] = useState<ComponentKey | null>(selectedComponents[0] ?? components[0] ?? null)
+  const savedSelectedComp = savedRepinState?.selectedComp && components.includes(savedRepinState.selectedComp) ? savedRepinState.selectedComp : null
+  const [selectedComp, setSelectedComp] = useState<ComponentKey | null>(savedSelectedComp ?? selectedComponents[0] ?? components[0] ?? null)
   const [repinTransforms, setLocalRepinTransforms] = useState<Partial<Record<ComponentKey, RepinTransform>>>(offering?.repinTransforms ?? {})
   const [transformHistory, setTransformHistory] = useState<Record<string, RepinTransform[]>>({})
   const [feedbackOptions, setFeedbackOptions] = useState<RepinFeedbackOption[]>(['seamless_blending'])
@@ -142,6 +148,11 @@ export default function Step4Repin() {
   const [eraserBrushSize, setEraserBrushSize] = useState(48)
   const [generationStartedAt, setGenerationStartedAt] = useState<number | null>(null)
   const [generationElapsedSeconds, setGenerationElapsedSeconds] = useState(0)
+
+  useEffect(() => {
+    if (!repinStateKey || typeof window === 'undefined') return
+    window.localStorage.setItem(repinStateKey, JSON.stringify({ sourceVersion, selectedComp }))
+  }, [repinStateKey, sourceVersion, selectedComp])
 
   useEffect(() => {
     if (!latestVersion) return
@@ -224,7 +235,7 @@ export default function Step4Repin() {
               pipelineStatus: 'preview_ready',
               videoGenerated: false,
               downloadUrl: null,
-              componentPins: data.component_pins ?? offering.componentPins,
+              componentPins: offering.componentPins,
               previewVersions: data.preview_versions
                 ? [
                     ...(offering.previewVersions ?? []).filter(existing => !data.preview_versions.some((next: PreviewVersion) => next.version === existing.version)),
@@ -363,9 +374,8 @@ export default function Step4Repin() {
     }
     setPlacementPreview(false)
     setCanvasConfirmed(false)
-    // Keep intermediate canvas movements local so dragging remains smooth
-    // without sending an API request for every pointer movement.
-    setLocalRepinTransforms({
+    // Persist canvas edits so refresh and back-forward navigation restore the same repin state.
+    persistTransforms({
       ...repinTransforms,
       [next.componentKey]: next,
     })
@@ -555,7 +565,10 @@ export default function Step4Repin() {
 
   const handleUseVersion = (version: PreviewVersion) => {
     if (!offering) return
-    setCurrentOffering({ ...offering, outputImageUrl: version.url, previewImagePath: version.url, outputVideoUrl: null, videoGenerated: false, downloadUrl: null })
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('kone-selected-output-version:' + offering.id, String(version.version))
+    }
+    setCurrentOffering({ ...offering, selectedOutputVersion: version.version, outputImageUrl: version.url, previewImagePath: version.url, outputVideoUrl: null, videoGenerated: false, downloadUrl: null })
     goToStep(5)
     navigate(`/projects/${projectId}/offerings/${offeringId}/step/5`)
   }

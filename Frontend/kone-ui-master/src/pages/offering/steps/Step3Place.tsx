@@ -90,6 +90,7 @@ export default function Step3Place() {
               videoGenerated: false,
               downloadUrl: null,
               componentPins: data.component_pins ?? [],
+              previewVersions: data.preview_versions ?? currentOffering.previewVersions,
             })
             return
           }
@@ -150,6 +151,8 @@ export default function Step3Place() {
   const allPlaced = components.every(k => pins.some(p => p.componentKey === k))
   const placedCount = components.filter(k => pins.some(p => p.componentKey === k)).length
   const hasMissingPlacements = components.length > 0 && !allPlaced
+  const previewStepVersion = offering?.previewVersions?.find(version => Number(version.version) === 1)
+  const previewStepImageUrl = previewStepVersion?.url ?? offering?.outputImageUrl ?? offering?.uploadedFileUrl ?? null
 
   const handleContinue = () => {
     goToStep(5)
@@ -220,7 +223,7 @@ export default function Step3Place() {
             </div>
           ) : (
             <ImageCanvas
-              imageUrl={offering?.outputImageUrl ?? offering?.uploadedFileUrl ?? null}
+              imageUrl={previewStepImageUrl}
               pins={pins}
               selectedComponent={null}
               labels={COMP_LABELS}

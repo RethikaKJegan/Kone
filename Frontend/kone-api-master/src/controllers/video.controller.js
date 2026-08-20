@@ -303,8 +303,7 @@ const localStoragePathFromUrl = (url) => {
 };
 const hasManualEraserBackground = (item = {}) => Boolean(
   (Array.isArray(item.eraserHistory) && item.eraserHistory.length > 1) ||
-  (item.magicEraserApplied && item.repinBackgroundUrl) ||
-  item.repinBackgroundUrl
+  (item.magicEraserApplied && item.repinBackgroundUrl)
 );
 const isSameComponentReEdit = (item = {}) => item.sourceVersionComponent && item.componentKey && String(item.sourceVersionComponent).toLowerCase() === String(item.componentKey).toLowerCase();
 
@@ -541,12 +540,13 @@ const runLogicComponents = async ({
   }
 
   await fsPromises.copyFile(path.join(previewDir, 'final_output.png'), path.join(outputDir, 'final_output.png'));
-  const webPreviewCreated = await createWebPreview(path.join(outputDir, 'final_output.png'), path.join(outputDir, 'final_output_web.jpg'));
+  await fsPromises.copyFile(path.join(previewDir, 'final_output.png'), path.join(outputDir, 'final_output_v1.png'));
+  const webPreviewCreated = await createWebPreview(path.join(outputDir, 'final_output_v1.png'), path.join(outputDir, 'final_output_v1_web.jpg'));
   const pins = await componentPinsFromPlacement(storageDir);
   return {
     storageDir,
-    previewUrl: webPreviewCreated ? `/output/${imageId}/final_output_web.jpg` : `/output/${imageId}/final_output.png`,
-    fullPreviewUrl: `/output/${imageId}/final_output.png`,
+    previewUrl: webPreviewCreated ? '/output/' + imageId + '/final_output_v1_web.jpg' : '/output/' + imageId + '/final_output_v1.png',
+    fullPreviewUrl: '/output/' + imageId + '/final_output_v1.png',
     pins,
   };
 };
@@ -644,14 +644,16 @@ const runLogicRepin = async ({ imageId, userId, offering, transform, transforms 
   const logicPreviewVersion = Array.isArray(data.preview_versions)
     ? data.preview_versions.find((version) => Number(version.version) === Number(logicTransform.targetVersion))
     : null;
-  const logicTransformResult = logicPreviewVersion?.transform
-    ? {
-        ...logicPreviewVersion.transform,
-        editableLayerUrl: publicLogicUrl(logicPreviewVersion.transform.editableLayerUrl),
-        repinBackgroundUrl: publicLogicUrl(logicPreviewVersion.transform.repinBackgroundUrl),
-        repinBackgroundDisplayUrl: publicLogicUrl(logicPreviewVersion.transform.repinBackgroundDisplayUrl),
-      }
-    : null;
+  const publicLogicTransform = (item) => item ? ({
+    ...item,
+    editableLayerUrl: publicLogicUrl(item.editableLayerUrl),
+    repinBackgroundUrl: publicLogicUrl(item.repinBackgroundUrl),
+    repinBackgroundDisplayUrl: publicLogicUrl(item.repinBackgroundDisplayUrl),
+  }) : item;
+  const logicTransformResult = publicLogicTransform(logicPreviewVersion?.transform) || null;
+  const logicTransformsResult = Array.isArray(logicPreviewVersion?.transforms)
+    ? logicPreviewVersion.transforms.map(publicLogicTransform)
+    : [];
 
   return {
     storageDir,
@@ -659,6 +661,7 @@ const runLogicRepin = async ({ imageId, userId, offering, transform, transforms 
     currentPreviewUrl: webCurrentCreated ? `/output/${imageId}/final_output_web.jpg` : `/output/${imageId}/final_output.png`,
     fullPreviewUrl: `/output/${imageId}/${versionFile}`,
     transform: logicTransformResult,
+    transforms: logicTransformsResult,
     pins: await componentPinsFromPlacement(jobStorageDir),
     parentVersionId: parent.parentVersion,
     parentFinalImagePath: parent.parentFinalImagePath,
@@ -687,6 +690,7 @@ const startRepinRun = ({ offeringId, imageId, userId, transform, transforms = []
         parentFinalImagePath: placement.parentFinalImagePath,
         finalImagePath: placement.fullPreviewUrl,
         transform: placement.transform || { ...transform, sourceVersion: Number(placement.parentVersionId), parentVersionId: Number(placement.parentVersionId), parentFinalImagePath: placement.parentFinalImagePath },
+        transforms: placement.transforms || [],
         feedbackOption: transform.feedbackOption || null,
         feedbackOptions: Array.isArray(transform.feedbackOptions) ? transform.feedbackOptions : (transform.feedbackOption ? [transform.feedbackOption] : []),
         createdAt: new Date(),
@@ -706,7 +710,6 @@ const startRepinRun = ({ offeringId, imageId, userId, transform, transforms = []
       }));
       const updateFilter = previewRequestKey ? { _id: offeringId, previewRequestKey } : { _id: offeringId };
       const updatedOffering = await Offering.findOneAndUpdate(updateFilter, {
-        componentPins: mergeComponentPins(offering.componentPins, placement.pins),
         outputImageUrl: versionUrl,
         outputImagePath: placement.fullPreviewUrl || placement.currentPreviewUrl,
         previewImagePath: placement.currentPreviewUrl,

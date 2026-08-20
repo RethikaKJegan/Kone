@@ -1638,11 +1638,13 @@ def run_components(payload: ProjectPayload):
                 "Preview incomplete: missing selected component placement(s): " + ", ".join(missing_components)
             )
         final_output = pipeline_dir / "final_output.png"
-        shutil.copy2(final_output if final_output.exists() else input_image, preview_dir / "final_output.png")
+        source_preview = final_output if final_output.exists() else input_image
+        shutil.copy2(source_preview, preview_dir / "final_output.png")
+        shutil.copy2(source_preview, preview_dir / "final_output_v1.png")
         status = public_status("preview_ready")
         status.update({
             "preview_url": "preview/final_output.png",
-            "preview_versions": [{"version": 1, "url": "preview/final_output.png"}],
+            "preview_versions": [{"version": 1, "url": "preview/final_output_v1.png"}],
             "repin_pass": 1,
         })
         write_status(payload.storage_dir, status)
@@ -1842,6 +1844,7 @@ def repin_components(payload: ProjectPayload):
                 "url": f"preview/final_output_v{target_version}.png",
                 "sourceVersion": source_version,
                 "transform": target_transform,
+                "transforms": transforms,
                 "feedbackOption": target_transform.get("feedbackOption"),
                 "feedbackOptions": target_transform.get("feedbackOptions") or ([target_transform.get("feedbackOption")] if target_transform.get("feedbackOption") else []),
                 "sourceBaseMode": source_base_mode,

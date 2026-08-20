@@ -10,7 +10,7 @@ import { KONE_COMPONENTS } from '../../../lib/constants'
 import { toast } from '../../../hooks/useToast'
 import { safeSystemErrorMessage } from '../../../lib/safeErrors'
 import { cn } from '../../../lib/utils'
-import type { ComponentKey, ComponentPin } from '../../../types'
+import type { ComponentKey, ComponentPin, PreviewVersion, RepinTransform } from '../../../types'
 
 const COMP_LABELS = Object.fromEntries(KONE_COMPONENTS.map(c => [c.key, c.label])) as Record<ComponentKey, string>
 type DownloadType = 'image' | 'annotations' | 'video'
@@ -23,6 +23,49 @@ const componentKeyToBrochureId: Record<ComponentKey, ComponentBrochureId> = {
   lci: 'lci',
   ceiling: 'interior',
   door: 'door',
+}
+
+function stripQuery(value: string | null | undefined) {
+  return value ? value.split("?", 1)[0] : null
+}
+
+function clampPercent(value: number) {
+  return Math.max(0, Math.min(100, Math.round(value)))
+}
+
+function transformToPin(transform: RepinTransform): ComponentPin {
+  const imageWidth = Number(transform.imageWidth || 0)
+  const imageHeight = Number(transform.imageHeight || 0)
+  const points = transform.points
+  if (points && points.length === 4) {
+    const centerX = points.reduce((sum, point) => sum + Number(point.x || 0), 0) / points.length
+    const centerY = points.reduce((sum, point) => sum + Number(point.y || 0), 0) / points.length
+    const usePixels = transform.coordinateSpace === "pixels" || imageWidth > 0 || imageHeight > 0
+    return {
+      componentKey: transform.componentKey,
+      x: clampPercent(usePixels && imageWidth > 0 ? (centerX / imageWidth) * 100 : centerX),
+      y: clampPercent(usePixels && imageHeight > 0 ? (centerY / imageHeight) * 100 : centerY),
+      aiPlaced: true,
+    }
+  }
+  const centerX = Number(transform.x || 0) + Number(transform.width || 0) / 2
+  const centerY = Number(transform.y || 0) + Number(transform.height || 0) / 2
+  const usePixels = transform.coordinateSpace === "pixels" || imageWidth > 0 || imageHeight > 0
+  return {
+    componentKey: transform.componentKey,
+    x: clampPercent(usePixels && imageWidth > 0 ? (centerX / imageWidth) * 100 : centerX),
+    y: clampPercent(usePixels && imageHeight > 0 ? (centerY / imageHeight) * 100 : centerY),
+    aiPlaced: true,
+  }
+}
+
+function pinsForSelectedVersion(version: PreviewVersion | undefined, fallbackPins: ComponentPin[]) {
+  if (!version || Number(version.version) === 1) return fallbackPins
+  const transforms = version.transforms && version.transforms.length ? version.transforms : (version.transform ? [version.transform] : [])
+  if (!transforms.length) return fallbackPins
+  const pinsByKey = new Map(fallbackPins.map(pin => [pin.componentKey, pin]))
+  transforms.forEach(transform => pinsByKey.set(transform.componentKey, transformToPin(transform)))
+  return Array.from(pinsByKey.values())
 }
 
 function downloadFromUrl(url: string, filename: string) {
@@ -633,7 +676,7 @@ export default function Step6Download() {
 
   const handleDownload = async (url: string | null, filename: string, type: DownloadType) => {
     if (type === 'annotations') {
-      const imageUrl = fullResolutionOutputUrl(offering) ?? offering?.uploadedFileUrl ?? null
+      const imageUrl = selectedOutputImageUrl ?? offering?.uploadedFileUrl ?? null
       if (!imageUrl) {
         toast('Output file not available yet')
         return
@@ -712,8 +755,23 @@ export default function Step6Download() {
   const toggleFilter = (k: ComponentKey) =>
     setActiveFilters(prev => prev.includes(k) ? prev.filter(f => f !== k) : [...prev, k])
 
-  const pins = currentOffering?.componentPins ?? []
   const offering = currentOffering
+  const basePins = currentOffering?.componentPins ?? []
+  const savedOutputVersion = offering?.id && typeof window !== 'undefined'
+    ? Number(window.localStorage.getItem('kone-selected-output-version:' + offering.id) || 0)
+    : 0
+  const selectedOutputVersion = Number(offering?.selectedOutputVersion || savedOutputVersion || 0)
+  const selectedImagePath = stripQuery(offering?.outputImageUrl ?? offering?.previewImagePath ?? null)
+  const selectedPreviewVersionByImage = offering?.previewVersions?.find(version => {
+    const versionUrl = stripQuery(version.url)
+    const finalPath = stripQuery(version.finalImagePath)
+    return Boolean(selectedImagePath && (versionUrl === selectedImagePath || finalPath === selectedImagePath))
+  })
+  const selectedPreviewVersion = (selectedOutputVersion
+    ? offering?.previewVersions?.find(version => Number(version.version) === selectedOutputVersion)
+    : undefined) ?? selectedPreviewVersionByImage
+  const selectedOutputImageUrl = selectedPreviewVersion?.url ?? offering?.outputImageUrl ?? offering?.previewImagePath ?? null
+  const pins = pinsForSelectedVersion(selectedPreviewVersion, basePins)
 
   // ─── Loading state ───────────────────────────────────────────────────────────
 
@@ -738,7 +796,7 @@ export default function Step6Download() {
       icon: ImageIcon,
       title: 'Rendered Image',
       subtitle: 'High-quality composite render',
-      url: isGuest && downloadUrl ? downloadUrl : fullResolutionOutputUrl(offering),
+      url: isGuest && downloadUrl ? downloadUrl : selectedOutputImageUrl,
       file: 'final_output.png',
       type: 'image' as const,
       highlight: false,
@@ -747,7 +805,7 @@ export default function Step6Download() {
       icon: Layers,
       title: 'Image with Callouts',
       subtitle: 'Render with annotation overlay',
-      url: isGuest && downloadUrl ? downloadUrl : fullResolutionOutputUrl(offering),
+      url: isGuest && downloadUrl ? downloadUrl : selectedOutputImageUrl,
       file: 'salesnxt-callouts.png',
       type: 'annotations' as const,
       highlight: true,
@@ -943,7 +1001,7 @@ export default function Step6Download() {
           </div>
           <div className="overflow-hidden rounded-xl border border-[#E8EDF5]">
             <AnnotatedPreview
-              imageUrl={offering?.outputImageUrl ?? offering?.uploadedFileUrl ?? null}
+              imageUrl={selectedOutputImageUrl ?? offering?.uploadedFileUrl ?? null}
               pins={pins}
               annotationsEnabled={annotationsOn}
               activeFilters={activeFilters}

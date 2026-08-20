@@ -73,7 +73,10 @@ function localStoragePathFromUrl(url) {
 }
 
 function hasManualEraserBackground(item = {}) {
-  return Array.isArray(item.eraserHistory) && item.eraserHistory.length > 1;
+  return (
+    (Array.isArray(item.eraserHistory) && item.eraserHistory.length > 1) ||
+    (item.magicEraserApplied && item.repinBackgroundUrl)
+  );
 }
 
 function isSameComponentReEdit(item = {}) {
@@ -484,6 +487,8 @@ const runRepin = catchAsync(async (req, res) => {
     .filter(Boolean)));
   const queueKey = root;
   const latestKey = previewRequestKey || null;
+  const previousStatus = await readStatus(root);
+  const previousPreviewVersions = Array.isArray(previousStatus.preview_versions) ? previousStatus.preview_versions : [];
   latestComponentRunKeys.set(queueKey, latestKey);
   await writeStatus(root, { status: 'processing', preview_url: null, video_url: null, download_url: null, error: null, preview_request_key: latestKey });
   const previousRun = componentRunQueues.get(queueKey) || Promise.resolve();
@@ -507,8 +512,11 @@ const runRepin = catchAsync(async (req, res) => {
         if (!data?.ok) throw new Error(data?.error || 'Repin preview failed');
         const current = await readStatus(root);
         if (latestComponentRunKeys.get(queueKey) === latestKey) {
-          const existingVersions = Array.isArray(current.preview_versions) ? current.preview_versions : [];
-          await writeStatus(root, { ...current, preview_request_key: latestKey, preview_versions: existingVersions });
+          const repinVersions = Array.isArray(current.preview_versions) ? current.preview_versions : [];
+          const versionsByNumber = new Map(previousPreviewVersions.map((version) => [Number(version.version), version]));
+          repinVersions.forEach((version) => versionsByNumber.set(Number(version.version), version));
+          const mergedVersions = Array.from(versionsByNumber.values()).sort((a, b) => Number(a.version) - Number(b.version));
+          await writeStatus(root, { ...current, preview_request_key: latestKey, preview_versions: mergedVersions });
         }
       } catch (error) {
         if (latestComponentRunKeys.get(queueKey) === latestKey) {
@@ -536,16 +544,18 @@ const status = catchAsync(async (req, res) => {
     if (value.startsWith('/storage/') || value.startsWith('/output/') || value.startsWith('http://') || value.startsWith('https://')) return value;
     return publicStorageUrl(sessionId, projectId, value);
   };
+  const publicVersionTransform = (item) => item ? ({
+    ...item,
+    editableLayerUrl: publicVersionUrl(item.editableLayerUrl),
+    repinBackgroundUrl: publicVersionUrl(item.repinBackgroundUrl),
+    repinBackgroundDisplayUrl: publicVersionUrl(item.repinBackgroundDisplayUrl),
+  }) : item;
   const previewVersions = Array.isArray(current.preview_versions)
     ? current.preview_versions.map((version) => ({
         ...version,
         url: publicVersionUrl(version.url),
-        transform: version.transform ? {
-          ...version.transform,
-          editableLayerUrl: publicVersionUrl(version.transform.editableLayerUrl),
-          repinBackgroundUrl: publicVersionUrl(version.transform.repinBackgroundUrl),
-          repinBackgroundDisplayUrl: publicVersionUrl(version.transform.repinBackgroundDisplayUrl),
-        } : version.transform,
+        transform: publicVersionTransform(version.transform),
+        transforms: Array.isArray(version.transforms) ? version.transforms.map(publicVersionTransform) : version.transforms,
       }))
     : undefined;
   res.send({
