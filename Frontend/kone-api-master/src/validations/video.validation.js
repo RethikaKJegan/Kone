@@ -35,8 +35,8 @@ const selectEnvironment = {
 };
 
 const repinTransform = Joi.object().keys({
-  componentKey: Joi.string().valid('ceiling', 'lci', 'door', 'cop').required(),
-  componentType: Joi.string().valid('ceiling', 'lci', 'door', 'cop').required(),
+  componentKey: Joi.string().valid('ceiling', 'kds', 'dcs1020', 'lci', 'door', 'cop').required(),
+  componentType: Joi.string().valid('ceiling', 'kds', 'dcs1020', 'lci', 'door', 'cop').required(),
   sourceVersion: Joi.number().integer().min(1).max(5).required(),
   targetVersion: Joi.number().integer().min(2).max(5).required(),
   x: Joi.number().required(),
@@ -64,11 +64,11 @@ const repinTransform = Joi.object().keys({
   feedbackOption: Joi.string().valid('edge_alignment', 'perspective_depth', 'lighting_shadow', 'material_reflections', 'seamless_blending').allow(null),
   feedbackOptions: Joi.array().items(Joi.string().valid('edge_alignment', 'perspective_depth', 'lighting_shadow', 'material_reflections', 'seamless_blending')).default([]),
   sourceBaseMode: Joi.string().valid('original', 'version').default('version'),
-  sourceVersionComponent: Joi.string().valid('ceiling', 'lci', 'door', 'cop').allow(null, ''),
+  sourceVersionComponent: Joi.string().valid('ceiling', 'kds', 'dcs1020', 'lci', 'door', 'cop').allow(null, ''),
   parentVersionId: Joi.number().integer().min(1).max(5).allow(null),
   parentFinalImagePath: Joi.string().allow(null, ''),
-  activeComponentId: Joi.string().valid('ceiling', 'lci', 'door', 'cop').allow(null, ''),
-  activeComponentType: Joi.string().valid('ceiling', 'lci', 'door', 'cop').allow(null, ''),
+  activeComponentId: Joi.string().valid('ceiling', 'kds', 'dcs1020', 'lci', 'door', 'cop').allow(null, ''),
+  activeComponentType: Joi.string().valid('ceiling', 'kds', 'dcs1020', 'lci', 'door', 'cop').allow(null, ''),
   currentComponentMaskOrCrop: Joi.array().ordered(Joi.number(), Joi.number(), Joi.number(), Joi.number()).allow(null),
   magicEraserApplied: Joi.boolean().default(false),
 });
@@ -77,7 +77,7 @@ const selectComponents = {
   body: Joi.object().keys({
     imageId: Joi.string().required(),
     offeringId: Joi.string().required(),
-    components: Joi.array().items(Joi.string().valid('ceiling', 'lci', 'door', 'cop')).min(1).required(),
+    components: Joi.array().items(Joi.string().valid('ceiling', 'kds', 'dcs1020', 'lci', 'door', 'cop')).min(1).required(),
     environments: Joi.array().items(Joi.string().valid('car', 'lobby')).default([]),
     component_assets: Joi.object().pattern(Joi.string(), Joi.string()).default({}),
     preview_request_key: Joi.string().allow(null, ''),
@@ -100,7 +100,7 @@ const repinPreview = {
   body: Joi.object().keys({
     imageId: Joi.string().required(),
     offeringId: Joi.string().required(),
-    components: Joi.array().items(Joi.string().valid('ceiling', 'lci', 'door', 'cop')).default([]),
+    components: Joi.array().items(Joi.string().valid('ceiling', 'kds', 'dcs1020', 'lci', 'door', 'cop')).default([]),
     environments: Joi.array().items(Joi.string().valid('car', 'lobby')).default([]),
     component_assets: Joi.object().pattern(Joi.string(), Joi.string()).default({}),
     preview_request_key: Joi.string().allow(null, ''),

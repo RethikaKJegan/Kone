@@ -312,7 +312,7 @@ async function componentPinsFromPlacement(root, urlFor = null) {
   const height = Number(detections.metadata?.image_height) || 0;
   if (!width || !height) return [];
 
-  const supported = new Set(['lci', 'cop', 'door', 'ceiling']);
+  const supported = new Set(['kds', 'dcs1020', 'lci', 'cop', 'door', 'ceiling']);
   return placements
     .map((placement) => {
       const componentKey = String(placement.id || '').toLowerCase();

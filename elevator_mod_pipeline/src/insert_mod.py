@@ -89,7 +89,7 @@ def preselect_mod_panel_placement(
     removal_mask: np.ndarray | None = None,
 ) -> list[int] | None:
     requested_type = cfg.get("_requested_component_type")
-    preselect_types = {"elevator_ceiling", "elevator_cabin", "elevator_door", "landing_call_indicator"}
+    preselect_types = {"elevator_ceiling", "elevator_cabin", "elevator_door", "landing_call_indicator", "destination_guidance_indicator"}
     if requested_type not in preselect_types and not _is_elevator_mod_panel_request(cfg, mod_path):
         return None
     if requested_type not in preselect_types:
@@ -221,6 +221,17 @@ def _target_box(width: int, height: int, detections: dict[str, Any], cfg: dict[s
                     "placement_mode": "existing_door",
                 }
                 return box, reason
+        if requested_type == "destination_guidance_indicator":
+            box, reason = select_destination_guidance_target_box(detections["detections"], width, height)
+            cfg["_placement_debug"] = {
+                "requested_component_type": requested_type,
+                "selected_replacement_target_type": "floor_indicator_display",
+                "selected_replacement_target_bbox": box,
+                "inpaint_bbox": box,
+                "scale_to_target_bbox": True,
+                "placement_mode": "destination_guidance_header",
+            }
+            return box, reason
         is_mod_panel_request = requested_type == "elevator_mod_panel" or (
             not requested_type and _needs_contextual_panel_fallback(ins.get("target_keywords", []))
         )
@@ -378,6 +389,48 @@ def select_interior_target_box(detections: list[dict[str, Any]], width: int, hei
         return padded_box([int(round(v)) for v in cabin["box_xyxy"]], width, height, 2), "detected_elevator_interior"
 
     raise RuntimeError("No valid elevator interior placement target detected")
+
+
+def select_destination_guidance_target_box(detections: list[dict[str, Any]], width: int, height: int) -> tuple[list[int], str]:
+    door_box, door_reason = select_door_opening_target_box(detections, width, height)
+    header_indicator = None
+    if door_box:
+        dx1, dy1, dx2, _ = [float(v) for v in door_box]
+        door_w = max(1.0, dx2 - dx1)
+        floor_indicators = [
+            det for det in detections
+            if str(det.get("normalized_component_type") or "").lower() == "floor_indicator_display"
+            and float(det.get("score", 0.0)) >= 0.20
+        ]
+        header_candidates = []
+        for det in floor_indicators:
+            x1, y1, x2, y2 = [float(v) for v in det.get("box_xyxy", [0, 0, 0, 0])]
+            cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+            if cy <= dy1 and dx1 - door_w * 0.25 <= cx <= dx2 + door_w * 0.25:
+                header_candidates.append(det)
+        if header_candidates:
+            header_indicator = max(header_candidates, key=lambda item: float(item.get("score", 0.0)))
+    if header_indicator:
+        return padded_box([int(round(v)) for v in header_indicator["box_xyxy"]], width, height, 4), "detected_header_floor_indicator_display"
+
+    if door_box:
+        x1, y1, x2, y2 = [float(v) for v in door_box]
+        door_w = max(1.0, x2 - x1)
+        header_h = max(height * 0.045, door_w * 0.12)
+        header_w = min(width * 0.44, max(door_w * 0.46, 80.0))
+        cx = (x1 + x2) * 0.5
+        gap = max(4.0, height * 0.012)
+        box = [
+            int(np.clip(cx - header_w * 0.5, 0, width - 1)),
+            int(np.clip(y1 - gap - header_h, 0, height - 2)),
+            int(np.clip(cx + header_w * 0.5, 1, width)),
+            int(np.clip(y1 - gap, 1, height)),
+        ]
+        if box[2] - box[0] > 8 and box[3] - box[1] > 8:
+            return box, f"synthesized_destination_guidance_above_door_from_{door_reason}"
+
+    fallback = [int(width * 0.36), int(height * 0.08), int(width * 0.64), int(height * 0.15)]
+    return fallback, "fallback_destination_guidance_top_header"
 
 
 def select_door_opening_target_box(detections: list[dict[str, Any]], width: int, height: int) -> tuple[list[int] | None, str]:

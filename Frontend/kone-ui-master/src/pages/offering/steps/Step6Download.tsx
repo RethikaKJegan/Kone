@@ -18,6 +18,8 @@ type ComponentBrochureId = 'cop' | 'lci' | 'interior' | 'door'
 
 const componentKeyToBrochureId: Record<ComponentKey, ComponentBrochureId> = {
   cop: 'cop',
+  kds: 'lci',
+  dcs1020: 'lci',
   lci: 'lci',
   ceiling: 'interior',
   door: 'door',

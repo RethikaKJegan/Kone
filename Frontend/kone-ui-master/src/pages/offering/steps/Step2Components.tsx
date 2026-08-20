@@ -10,17 +10,17 @@ import type { Environment, ComponentKey, ComponentVariant } from '../../../types
 
 const ENV_COMPONENTS: Record<Environment, ComponentKey[]> = {
   car: ['cop'],
-  lobby: ['lci', 'door', 'ceiling'],
+  lobby: ['kds', 'dcs1020', 'door', 'ceiling'],
 }
 
 type ComponentAssetMap = Partial<Record<ComponentKey, string>>
 type PreviewImage = { title: string; subtitle: string; imageUrl: string }
 function displayImageUrl(imageUrl: string | null | undefined, version: string) {
-  if (!imageUrl) return imageUrl
+  if (!imageUrl) return undefined
   return imageUrl.startsWith('/components/') ? `${imageUrl}?v=${version}` : imageUrl
 }
 
-const UI_COMPONENTS = KONE_COMPONENTS.filter(component => component.key !== 'cop')
+const UI_COMPONENTS = KONE_COMPONENTS.filter(component => component.key !== 'cop' && component.key !== 'lci')
 const UI_COMPONENT_KEYS = new Set<ComponentKey>(UI_COMPONENTS.map(component => component.key))
 
 function getAvailableComponents(envs: Environment[]): ComponentKey[] {
@@ -32,11 +32,21 @@ function normalizeEnvironments(): Environment[] {
   return ['lobby']
 }
 
-function withoutDoorCeilingConflict(components: ComponentKey[]): ComponentKey[] {
-  const visibleComponents = components.filter(component => UI_COMPONENT_KEYS.has(component))
-  return visibleComponents.includes('door') && visibleComponents.includes('ceiling')
-    ? visibleComponents.filter(c => c !== 'ceiling')
-    : visibleComponents
+const COMPONENT_SLOTS: { id: string; label: string; keys: ComponentKey[] }[] = [
+  { id: 'kds', label: 'KDS90/KDS330', keys: ['kds'] },
+  { id: 'dcs1020', label: 'DCS1020', keys: ['dcs1020'] },
+  { id: 'elevator', label: 'Door or Elevator Interior', keys: ['door', 'ceiling'] },
+]
+
+function slotForComponent(component: ComponentKey) {
+  return COMPONENT_SLOTS.find(slot => slot.keys.includes(component))
+}
+
+function normalizeSelectedComponents(components: ComponentKey[]): ComponentKey[] {
+  const visibleComponents = components
+    .map(component => component === 'lci' ? 'kds' : component)
+    .filter(component => UI_COMPONENT_KEYS.has(component))
+  return COMPONENT_SLOTS.flatMap(slot => visibleComponents.find(component => slot.keys.includes(component)) ?? [])
 }
 
 function componentByKey(key: ComponentKey) {
@@ -67,7 +77,7 @@ function selectedVariantFor(key: ComponentKey, assets: ComponentAssetMap) {
 function normalizeAssetMap(components: ComponentKey[], assets: ComponentAssetMap): ComponentAssetMap {
   return Object.fromEntries(
     components
-      .map(key => [key, assets[key] ?? defaultAssetFor(key)] as const)
+      .map(key => [key, assets[key] ?? (key === 'kds' ? assets.lci : undefined) ?? defaultAssetFor(key)] as const)
       .filter(([, value]) => Boolean(value))
   ) as ComponentAssetMap
 }
@@ -90,7 +100,7 @@ export default function Step2Components() {
   const navigate = useNavigate()
   const { currentOffering, setComponents, goToStep } = useOfferingStore()
 
-  const initialComponents = withoutDoorCeilingConflict(currentOffering?.selectedComponents ?? [])
+  const initialComponents = normalizeSelectedComponents(currentOffering?.selectedComponents ?? [])
   const [envs, setEnvs] = useState<Environment[]>(normalizeEnvironments())
   const [comps, setComps] = useState<ComponentKey[]>(initialComponents)
   const [componentAssets, setComponentAssets] = useState<ComponentAssetMap>(
@@ -103,7 +113,7 @@ export default function Step2Components() {
 
   useEffect(() => {
     if (currentOffering) {
-      const nextComponents = withoutDoorCeilingConflict(currentOffering.selectedComponents)
+      const nextComponents = normalizeSelectedComponents(currentOffering.selectedComponents)
       setEnvs(normalizeEnvironments())
       setComps(nextComponents)
       setComponentAssets(normalizeAssetMap(nextComponents, currentOffering.selectedComponentAssets ?? {}))
@@ -112,22 +122,13 @@ export default function Step2Components() {
   }, [currentOffering?.id])
 
   const availableComponents = getAvailableComponents(envs)
-  const selectableComponents = availableComponents.filter(c => {
-    if (c === 'door' && comps.includes('ceiling')) return false
-    if (c === 'ceiling' && comps.includes('door')) return false
-    return true
-  })
+  const selectableComponents = availableComponents
 
   const toggleComp = (k: ComponentKey) => {
-    const nextComps = (() => {
-      if (comps.includes(k)) return comps.filter(c => c !== k)
-      const next = k === 'door'
-        ? comps.filter(c => c !== 'ceiling')
-        : k === 'ceiling'
-          ? comps.filter(c => c !== 'door')
-          : comps
-      return [...next, k]
-    })()
+    const slot = slotForComponent(k)
+    const nextComps = comps.includes(k)
+      ? comps.filter(c => c !== k)
+      : [...comps.filter(c => !slot?.keys.includes(c)), k]
     setComps(nextComps)
     setComponentAssets(prev => normalizeAssetMap(nextComps, prev))
     setActiveComp(nextComps.includes(k) ? k : nextComps[0] ?? null)
@@ -135,7 +136,10 @@ export default function Step2Components() {
   }
 
   const selectVariant = (componentKey: ComponentKey, variant: ComponentVariant) => {
-    const nextComps = comps.includes(componentKey) ? comps : [...comps, componentKey]
+    const slot = slotForComponent(componentKey)
+    const nextComps = comps.includes(componentKey)
+      ? comps
+      : [...comps.filter(c => !slot?.keys.includes(c)), componentKey]
     setComps(nextComps)
     setComponentAssets(prev => normalizeAssetMap(nextComps, { ...prev, [componentKey]: variant.imageUrl }))
     setActiveComp(componentKey)
@@ -195,7 +199,7 @@ export default function Step2Components() {
             <h2 className="text-heading text-[15px] font-semibold text-[#111827]">
               2 &nbsp; Use Case & Components
             </h2>
-            <p className="mt-1 text-[12px] text-[#8A9BB5]">Choose a component group, then select the exact option.</p>
+            <p className="mt-1 text-[12px] text-[#8A9BB5]">Choose up to 3 components: KDS90/KDS330, DCS1020, and Door or Elevator Interior.</p>
           </div>
           <button
             onClick={handleBack}
@@ -399,7 +403,7 @@ export default function Step2Components() {
 
         <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-3 border-t border-[#E9ECEF] bg-white/95 px-5 py-4 backdrop-blur sm:px-6">
           <p className="text-[12px] font-medium text-[#8A9BB5]">
-            <span className="font-semibold text-[#111827]">{comps.length}</span> selected
+            <span className="font-semibold text-[#111827]">{comps.length}</span>/3 selected
             {comps.length > 0 ? ` for ${envs[0] ?? 'this use case'}` : ''}
           </p>
           <div className="flex items-center gap-3">

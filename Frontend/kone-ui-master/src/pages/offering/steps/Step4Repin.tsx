@@ -40,8 +40,7 @@ function eraserEntryFromTransform(transform: RepinTransform) {
 function hasManualEraserBackground(transform: RepinTransform | null | undefined) {
   return Boolean(
     (transform?.eraserHistory && transform.eraserHistory.length > 1) ||
-    (transform?.magicEraserApplied && transform?.repinBackgroundUrl) ||
-    transform?.repinBackgroundUrl
+    (transform?.magicEraserApplied && transform?.repinBackgroundUrl)
   )
 }
 
@@ -299,22 +298,28 @@ export default function Step4Repin() {
   const isGeneratedComponentReEdit = isSameComponentReEdit || transformHasCleanBackground
   const canvasBaseBackgroundUrl = sourceVersion > 1 ? (previewImageUrl ?? originalImageUrl) : (originalImageUrl ?? previewImageUrl)
   const hasGeneratedRepinBackground = sourceVersion > 1
+  const sharedEraserTransform = components
+    .map(comp => repinTransforms[comp])
+    .find(item => item && item.sourceVersion === sourceVersion && hasManualEraserBackground(item))
   const manualEraserBackgroundUrl = hasManualEraserBackground(transform)
     ? transform?.repinBackgroundDisplayUrl ?? transform?.repinBackgroundUrl ?? null
     : null
-  const editingBackgroundUrl = manualEraserBackgroundUrl ?? (sourceVersion > 1
+  const sharedEraserBackgroundUrl = sharedEraserTransform
+    ? sharedEraserTransform.repinBackgroundDisplayUrl ?? sharedEraserTransform.repinBackgroundUrl ?? null
+    : null
+  const editingBackgroundUrl = manualEraserBackgroundUrl ?? sharedEraserBackgroundUrl ?? (sourceVersion > 1
     ? canvasBaseBackgroundUrl
     : (repinBackgroundForEditing(transform, hasGeneratedRepinBackground) ?? canvasBaseBackgroundUrl))
   const eraserBackgroundRevision = [
-    transform?.eraserHistory?.length ?? 0,
-    transform?.repinBackgroundDisplayUrl ?? transform?.repinBackgroundUrl ?? '',
+    transform?.eraserHistory?.length ?? sharedEraserTransform?.eraserHistory?.length ?? 0,
+    transform?.repinBackgroundDisplayUrl ?? transform?.repinBackgroundUrl ?? sharedEraserTransform?.repinBackgroundDisplayUrl ?? sharedEraserTransform?.repinBackgroundUrl ?? '',
   ].join(':')
   const editingCanvasImageUrl = useMemo(() => {
     if (!editingBackgroundUrl) return null
-    if (!hasManualEraserBackground(transform)) return editingBackgroundUrl
+    if (!hasManualEraserBackground(transform) && !sharedEraserTransform) return editingBackgroundUrl
     const separator = editingBackgroundUrl.includes('?') ? '&' : '?'
     return editingBackgroundUrl + separator + 'magicEraserRevision=' + encodeURIComponent(eraserBackgroundRevision)
-  }, [editingBackgroundUrl, eraserBackgroundRevision, transform?.eraserHistory])
+  }, [editingBackgroundUrl, eraserBackgroundRevision, transform?.eraserHistory, sharedEraserTransform?.eraserHistory])
   const staticComponentLayers = components
     .filter(comp => comp !== selectedComp)
     .map(comp => {
@@ -498,9 +503,9 @@ export default function Step4Repin() {
         if (!item) return null
         const activeComponent = comp === selectedComp
         const sameComponent = capturedSourceVersion > 1 && capturedSourceVersionComponent === comp
-        const magicEraserApplied = activeComponent && hasManualEraserBackground(item)
+        const magicEraserApplied = hasManualEraserBackground(item)
         return {
-          ...transformForRepinSubmit(item, activeComponent && (magicEraserApplied || sameComponent)),
+          ...transformForRepinSubmit(item, magicEraserApplied || (activeComponent && sameComponent)),
           componentKey: comp,
           componentType: comp,
           sourceVersion: capturedSourceVersion,
@@ -509,8 +514,8 @@ export default function Step4Repin() {
           skewX: item.skewX || 0,
           skewY: item.skewY || 0,
           editableLayerUrl: sameComponent ? item.editableLayerUrl ?? null : null,
-          repinBackgroundUrl: activeComponent && (magicEraserApplied || sameComponent) ? item.repinBackgroundUrl ?? null : null,
-          repinBackgroundDisplayUrl: activeComponent && (magicEraserApplied || sameComponent) ? item.repinBackgroundDisplayUrl ?? null : null,
+          repinBackgroundUrl: magicEraserApplied || (activeComponent && sameComponent) ? item.repinBackgroundUrl ?? null : null,
+          repinBackgroundDisplayUrl: magicEraserApplied || (activeComponent && sameComponent) ? item.repinBackgroundDisplayUrl ?? null : null,
           feedbackOption: activeComponent ? feedbackOptions[0] ?? null : null,
           feedbackOptions: activeComponent ? feedbackOptions : [],
           sourceBaseMode,

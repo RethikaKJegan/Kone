@@ -123,6 +123,31 @@ COMPONENT_REPLACEMENT_PRESETS: dict[str, dict[str, Any]] = {
         ],
         "detection_labels": ["elevator_button_panel", "elevator call button panel", "elevator_door"],
     },
+    "kds": {
+        "id": "kds",
+        "asset": "tests/panels/mod_up.png",
+        "component_type": "landing_call_indicator",
+        "target_keywords": [
+            "elevator button panel",
+            "elevator call button panel",
+            "elevator call button",
+            "call button",
+        ],
+        "detection_labels": ["elevator_button_panel", "elevator call button panel", "elevator_door"],
+    },
+    "dcs1020": {
+        "id": "dcs1020",
+        "asset": "tests/panels/mod_up.png",
+        "component_type": "destination_guidance_indicator",
+        "target_keywords": [
+            "floor indicator display",
+            "destination operating panel",
+            "destination guidance panel",
+            "elevator header sign",
+            "above elevator door",
+        ],
+        "detection_labels": ["floor_indicator_display", "floor indicator display", "elevator_door"],
+    },
     "door": {
         "id": "door",
         "asset": "tests/panels/door_mod.png",
@@ -409,8 +434,16 @@ def replacement_configs(cfg: dict[str, Any]) -> list[dict[str, Any]]:
             for component in cfg.get("selected_components", [])
             if str(component).strip()
         ]
-        replacements = [_component_replacement(component, cfg) for component in selected]
-        replacements = [replacement for replacement in replacements if replacement is not None]
+        replacements: list[dict[str, Any]] = []
+        missing_components: list[str] = []
+        for component in selected:
+            replacement = _component_replacement(component, cfg)
+            if replacement is None:
+                missing_components.append(component)
+            else:
+                replacements.append(replacement)
+        if missing_components:
+            raise ValueError(f"Unsupported selected component(s): {', '.join(missing_components)}")
         if replacements:
             _extend_detection_labels(cfg, replacements)
             return replacements

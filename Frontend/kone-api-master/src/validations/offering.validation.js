@@ -12,8 +12,8 @@ const eraserHistoryEntry = Joi.object().keys({
 });
 
 const repinTransform = Joi.object().keys({
-  componentKey: Joi.string().valid('ceiling', 'lci', 'door', 'cop').required(),
-  componentType: Joi.string().valid('ceiling', 'lci', 'door', 'cop').required(),
+  componentKey: Joi.string().valid('ceiling', 'kds', 'dcs1020', 'lci', 'door', 'cop').required(),
+  componentType: Joi.string().valid('ceiling', 'kds', 'dcs1020', 'lci', 'door', 'cop').required(),
   sourceVersion: Joi.number().integer().min(1).max(5).required(),
   targetVersion: Joi.number().integer().min(2).max(5).required(),
   x: Joi.number().required(),
@@ -42,7 +42,7 @@ const repinTransform = Joi.object().keys({
     .allow(null),
   feedbackOptions: Joi.array().items(Joi.string().valid('edge_alignment', 'perspective_depth', 'lighting_shadow', 'material_reflections', 'seamless_blending')).default([]),
   sourceBaseMode: Joi.string().valid('original', 'version').default('version'),
-  sourceVersionComponent: Joi.string().valid('ceiling', 'lci', 'door', 'cop').allow(null, ''),
+  sourceVersionComponent: Joi.string().valid('ceiling', 'kds', 'dcs1020', 'lci', 'door', 'cop').allow(null, ''),
 });
 
 const previewVersion = Joi.object().keys({
@@ -56,7 +56,7 @@ const previewVersion = Joi.object().keys({
     .allow(null),
   feedbackOptions: Joi.array().items(Joi.string().valid('edge_alignment', 'perspective_depth', 'lighting_shadow', 'material_reflections', 'seamless_blending')).default([]),
   sourceBaseMode: Joi.string().valid('original', 'version').default('version'),
-  sourceVersionComponent: Joi.string().valid('ceiling', 'lci', 'door', 'cop').allow(null, ''),
+  sourceVersionComponent: Joi.string().valid('ceiling', 'kds', 'dcs1020', 'lci', 'door', 'cop').allow(null, ''),
 });
 
 const offeringId = {
@@ -115,7 +115,7 @@ const updateOffering = {
       previewRequestKey: Joi.string().allow(null, ''),
       previewVersions: Joi.array().items(previewVersion),
       repinPass: Joi.number().integer().min(0).max(5),
-      repinTransforms: Joi.object().pattern(Joi.string().valid('ceiling', 'lci', 'door', 'cop'), repinTransform),
+      repinTransforms: Joi.object().pattern(Joi.string().valid('ceiling', 'kds', 'dcs1020', 'lci', 'door', 'cop'), repinTransform),
       outputImageUrl: Joi.string().allow(null),
       outputVideoUrl: Joi.string().allow(null),
       downloadUrl: Joi.string().allow(null),

@@ -6,6 +6,8 @@ const fsPromises = fs.promises;
 
 const AI_PLACEMENT_DEFAULTS = {
   ceiling: { x: 50, y: 15 },
+  kds: { x: 20, y: 50 },
+  dcs1020: { x: 68, y: 46 },
   lci: { x: 20, y: 50 },
   door: { x: 80, y: 60 },
   cop: { x: 35, y: 70 },

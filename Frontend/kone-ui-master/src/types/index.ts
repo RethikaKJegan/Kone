@@ -22,7 +22,7 @@ export interface Project {
 }
 
 export type Environment = 'car' | 'lobby'
-export type ComponentKey = 'ceiling' | 'lci' | 'door' | 'cop'
+export type ComponentKey = 'ceiling' | 'kds' | 'dcs1020' | 'lci' | 'door' | 'cop'
 
 export interface ComponentItem {
   key: ComponentKey

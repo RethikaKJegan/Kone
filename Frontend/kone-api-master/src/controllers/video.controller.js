@@ -326,6 +326,45 @@ const localOutputPathFromUrl = (url) => {
   return localPath.startsWith(outputRoot) ? localPath : null;
 };
 
+const uploadSelectedImageForBrochure = async ({ offeringId, userId, imagePath, fileName = 'selected-for-video.png' }) => {
+  if (!offeringId || !imagePath) return;
+
+  const offering = await getOwnedOffering(offeringId, userId);
+  if (!offering) return;
+
+  let localImagePath = imagePath;
+  if (typeof localImagePath === 'string' && localImagePath.startsWith('/output/')) {
+    localImagePath = localOutputPathFromUrl(localImagePath);
+  }
+  if (!localImagePath) return;
+
+  if (/_web\.(jpg|jpeg)$/i.test(localImagePath)) {
+    const fullResolutionPath = localImagePath.replace(/_web\.(jpg|jpeg)$/i, '.png');
+    if (await fileExists(fullResolutionPath)) {
+      localImagePath = fullResolutionPath;
+    }
+  }
+
+  if (!(await fileExists(localImagePath))) {
+    console.warn('[Azure] Selected image upload skipped: local image missing', localImagePath);
+    return;
+  }
+
+  const selectedBlobPath = selectedImageBlobPath({
+    userId,
+    projectId: offering.projectId,
+    offeringId,
+    fileName,
+  });
+
+  uploadAzureCopy(localImagePath, selectedBlobPath, 'image/png', async (result) => {
+    await Offering.findByIdAndUpdate(offeringId, {
+      selectedImageBlobPath: result.blobPath,
+      'azureSyncStatus.selectedImage': 'success',
+    });
+  });
+};
+
 const resolveRepinParentImage = async ({ offering, imageId, requestedVersion }) => {
   const outputDir = getOutputDir(imageId);
   const versions = normalizePreviewVersions(offering, offering.previewImagePath || offering.outputImagePath || offering.outputImageUrl)
@@ -434,7 +473,7 @@ const componentPinsFromPlacement = async (storageDir) => {
   const height = Number(detections.metadata?.image_height) || 0;
   if (!width || !height) return [];
 
-  const supported = new Set(['lci', 'cop', 'door', 'ceiling']);
+  const supported = new Set(['kds', 'dcs1020', 'lci', 'cop', 'door', 'ceiling']);
   return placements
     .map((placement) => {
       const componentKey = String(placement.id || '').toLowerCase();
@@ -684,6 +723,12 @@ const startRepinRun = ({ offeringId, imageId, userId, transform, transforms = []
       });
       if (!updatedOffering) {
         console.warn('[REPIN_VERSION] stale render ignored', JSON.stringify({ visualizationId: imageId, newVersionId: Number(transform.targetVersion), previewRequestKey }));
+      } else {
+        await uploadSelectedImageForBrochure({
+          offeringId,
+          userId,
+          imagePath: placement.fullPreviewUrl || placement.currentPreviewUrl,
+        });
       }
     } catch (error) {
       await Offering.findOneAndUpdate(previewRequestKey ? { _id: offeringId, previewRequestKey } : { _id: offeringId }, {
@@ -777,6 +822,11 @@ const startComponentRun = ({ offeringId, imageId, userId, inputPath, components,
         status: 'active',
         lastError: null,
         previewRequestKey,
+      });
+      await uploadSelectedImageForBrochure({
+        offeringId,
+        userId,
+        imagePath: placement.fullPreviewUrl || placement.previewUrl,
       });
     } catch (error) {
       await Offering.findByIdAndUpdate(offeringId, {
@@ -1541,25 +1591,11 @@ const generateVideo = async (req, res) => {
       await fsPromises.copyFile(inputPath, videoInputPath);
     }
 
-    if (offeringId) {
-      const offering = await getOwnedOffering(offeringId, req.user.id);
-
-      if (offering) {
-        const selectedBlobPath = selectedImageBlobPath({
-          userId: req.user.id,
-          projectId: offering.projectId,
-          offeringId,
-          fileName: 'selected-for-video.png',
-        });
-
-        uploadAzureCopy(videoInputPath, selectedBlobPath, 'image/png', async (result) => {
-          await Offering.findByIdAndUpdate(offeringId, {
-            selectedImageBlobPath: result.blobPath,
-            'azureSyncStatus.selectedImage': 'success',
-          });
-        });
-      }
-    }
+    await uploadSelectedImageForBrochure({
+      offeringId,
+      userId: req.user.id,
+      imagePath: videoInputPath,
+    });
 
     await fsPromises.rm(outputVideoPath, { force: true }).catch(() => {});
     await fsPromises.rm(metadataPath, { force: true }).catch(() => {});

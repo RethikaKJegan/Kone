@@ -94,6 +94,8 @@ def selected_component_asset_paths(component_assets: dict[str, str] | None) -> d
     default_dir = workspace_root() / "Frontend" / "kone-ui-master" / "public" / "components"
     default_files = {
         "ceiling": default_dir / "elevator-interior" / "Art Deco.png",
+        "kds": default_dir / "lci" / "KDS90" / "Landing Call Indicator Flush - Up.png",
+        "dcs1020": default_dir / "lci" / "DCS1020" / "Pedestal Mounted DOP KSP1068.png",
         "lci": default_dir / "lci.png",
         "door": default_dir / "door" / "Plain Stainless Steel Door.png",
         "cop": default_dir / "cop" / "Flush COP.png",
@@ -163,14 +165,21 @@ def _has_manual_eraser_background(transform: dict[str, Any]) -> bool:
     return (
         (isinstance(history, list) and len(history) > 1)
         or bool(transform.get("magicEraserApplied") and transform.get("repinBackgroundPath"))
-        or bool(transform.get("repinBackgroundPath"))
+    )
+
+
+def _has_user_eraser_background(transform: dict[str, Any]) -> bool:
+    history = transform.get("eraserHistory")
+    return (
+        (isinstance(history, list) and len(history) > 1)
+        or bool(transform.get("magicEraserApplied") and transform.get("repinBackgroundPath"))
     )
 
 
 def _should_apply_repin_background(transform: dict[str, Any]) -> bool:
     component_key = str(transform.get("componentKey") or transform.get("componentType") or "").lower()
     source_component = str(transform.get("sourceVersionComponent") or "").lower()
-    return _has_manual_eraser_background(transform) or bool(component_key and source_component == component_key)
+    return _has_user_eraser_background(transform) or bool(component_key and source_component == component_key)
 
 
 def _composite_repin_background_region(base_image: Image.Image, background_path: Path, component_mask: Image.Image | None) -> Image.Image:
@@ -185,6 +194,44 @@ def _composite_repin_background_region(base_image: Image.Image, background_path:
     mask = mask.filter(ImageFilter.GaussianBlur(radius=2))
     result = base_image.convert("RGB").copy()
     result.paste(erased_image, (0, 0), mask)
+    return result
+
+
+def _original_bbox_mask_for_transform(transform: dict[str, Any], image_size: tuple[int, int]) -> Image.Image | None:
+    original_bbox = transform.get("originalBbox")
+    if not isinstance(original_bbox, list) or len(original_bbox) != 4:
+        return None
+    try:
+        bbox_values = [float(value) for value in original_bbox]
+    except (TypeError, ValueError):
+        return None
+
+    width, height = image_size
+    source_width = _clamp_float(transform.get("originalImageWidth"), width)
+    source_height = _clamp_float(transform.get("originalImageHeight"), height)
+    scale_x = width / max(1.0, source_width)
+    scale_y = height / max(1.0, source_height)
+    x1 = max(0, min(width - 1, int(np.floor(bbox_values[0] * scale_x))))
+    y1 = max(0, min(height - 1, int(np.floor(bbox_values[1] * scale_y))))
+    x2 = max(x1 + 1, min(width, int(np.ceil(bbox_values[2] * scale_x))))
+    y2 = max(y1 + 1, min(height, int(np.ceil(bbox_values[3] * scale_y))))
+    mask = Image.new("L", image_size, 0)
+    draw = ImageDraw.Draw(mask)
+    draw.rectangle((x1, y1, x2, y2), fill=255)
+    if min(x2 - x1, y2 - y1) > 8:
+        mask = mask.filter(ImageFilter.GaussianBlur(radius=max(1, min(x2 - x1, y2 - y1) // 80)))
+    return mask
+
+
+def _composite_repin_background_original_footprint(base_image: Image.Image, background_path: Path, transform: dict[str, Any]) -> Image.Image:
+    mask = _original_bbox_mask_for_transform(transform, base_image.size)
+    if mask is None or not background_path.exists():
+        return base_image
+    restored_image = Image.open(background_path).convert("RGB")
+    if restored_image.size != base_image.size:
+        restored_image = restored_image.resize(base_image.size, Image.Resampling.LANCZOS)
+    result = base_image.convert("RGB").copy()
+    result.paste(restored_image, (0, 0), mask)
     return result
 
 
@@ -290,12 +337,12 @@ def _component_key_from_transform(transform: dict[str, Any] | None) -> str:
 
 def _is_lci_or_cop_transform(transform: dict[str, Any] | None) -> bool:
     component_key = _component_key_from_transform(transform)
-    return component_key in {"lci", "cop"} or "landing call" in component_key or "control operating" in component_key
+    return component_key in {"kds", "dcs1020", "lci", "cop"} or "landing call" in component_key or "control operating" in component_key
 
 
 def _is_lci_transform(transform: dict[str, Any] | None) -> bool:
     component_key = _component_key_from_transform(transform)
-    return component_key == "lci" or "landing call" in component_key
+    return component_key in {"kds", "dcs1020", "lci"} or "landing call" in component_key
 
 
 def _wants_perspective_refine(transform: dict[str, Any] | None) -> bool:
@@ -1581,6 +1628,15 @@ def run_components(payload: ProjectPayload):
     try:
         with PIPELINE_LOCK:
             _run_pipeline_in_process(config_path)
+        requested_components = [str(component).strip().lower() for component in (payload.selected_components or []) if str(component).strip()]
+        placements_path = pipeline_dir / "component_placements.json"
+        placements = json.loads(placements_path.read_text(encoding="utf-8")) if placements_path.exists() else []
+        placed_components = {str(item.get("id") or item.get("component_type") or "").lower() for item in placements if isinstance(item, dict)}
+        missing_components = [component for component in requested_components if component not in placed_components]
+        if missing_components:
+            raise ValueError(
+                "Preview incomplete: missing selected component placement(s): " + ", ".join(missing_components)
+            )
         final_output = pipeline_dir / "final_output.png"
         shutil.copy2(final_output if final_output.exists() else input_image, preview_dir / "final_output.png")
         status = public_status("preview_ready")
@@ -1631,24 +1687,45 @@ def repin_components(payload: ProjectPayload):
         source_base_mode = str(target_transform.get("sourceBaseMode") or "version").lower()
         parent_version_id = target_transform.get("parentVersionId") or source_version
         parent_final_image_path = target_transform.get("parentFinalImagePath")
-        repin_background_path = target_transform.get("repinBackgroundPath")
         source_image_path = _source_image_for_repin(storage, preview_dir, source_version, source_base_mode)
 
-        transforms = [target_transform]
         placed_image = Image.open(source_image_path).convert("RGB")
-        full_repin_background_applied = False
-        if repin_background_path:
-            repin_background_source = Path(str(repin_background_path))
-            history = target_transform.get("eraserHistory")
-            magic_eraser_background = bool(target_transform.get("magicEraserApplied")) or (isinstance(history, list) and len(history) > 1)
-            if magic_eraser_background and repin_background_source.exists():
-                erased_image = Image.open(repin_background_source).convert("RGB")
-                if erased_image.size != placed_image.size:
-                    erased_image = erased_image.resize(placed_image.size, Image.Resampling.LANCZOS)
-                placed_image = erased_image
-                full_repin_background_applied = True
-        target_transform = _with_lci_cop_homography_points(target_transform, placed_image)
-        transforms = [target_transform]
+        transforms = [
+            _with_lci_cop_homography_points(transform, placed_image)
+            for transform in transforms
+        ]
+        target_key = str(target_transform.get("componentKey") or target_transform.get("componentType") or "").lower()
+        target_transform = next(
+            (transform for transform in transforms if str(transform.get("componentKey") or transform.get("componentType") or "").lower() == target_key),
+            transforms[0],
+        )
+        user_eraser_background_path = None
+        eraser_candidates = [target_transform, *[item for item in transforms if item is not target_transform]]
+        for eraser_transform in eraser_candidates:
+            eraser_background_path = eraser_transform.get("repinBackgroundPath")
+            if eraser_background_path and _has_user_eraser_background(eraser_transform):
+                candidate_path = Path(str(eraser_background_path))
+                if candidate_path.exists():
+                    user_eraser_background_path = candidate_path
+                    break
+        if user_eraser_background_path:
+            erased_base_image = Image.open(user_eraser_background_path).convert("RGB")
+            if erased_base_image.size != placed_image.size:
+                erased_base_image = erased_base_image.resize(placed_image.size, Image.Resampling.LANCZOS)
+            placed_image = erased_base_image
+
+        for restore_transform in transforms:
+            restore_background_path = restore_transform.get("repinBackgroundPath")
+            if restore_background_path:
+                restore_background_path = Path(str(restore_background_path))
+                if user_eraser_background_path and restore_background_path == user_eraser_background_path:
+                    continue
+                placed_image = _composite_repin_background_original_footprint(
+                    placed_image,
+                    restore_background_path,
+                    restore_transform,
+                )
+
         placements = []
         component_masks = []
         for transform in transforms:
@@ -1665,15 +1742,6 @@ def repin_components(payload: ProjectPayload):
                 placed_image.size,
             )
             component_masks.append(component_mask)
-
-            active_repin_background_path = transform.get("repinBackgroundPath")
-            magic_eraser_applied = _has_manual_eraser_background(transform)
-            if active_repin_background_path and not full_repin_background_applied and _should_apply_repin_background(transform):
-                placed_image = _composite_repin_background_region(
-                    placed_image,
-                    Path(str(active_repin_background_path)),
-                    component_mask,
-                )
 
             placed_image, bbox = _place_manual_component(
                 placed_image,
@@ -1728,7 +1796,10 @@ def repin_components(payload: ProjectPayload):
             if _save_firered_editable_layer(output_path, editable_layer_path, target_mask, target_bbox):
                 editable_layer_url = f"preview/{editable_layer_name}"
                 target_transform = {**target_transform, "editableLayerUrl": editable_layer_url}
-                transforms = [target_transform]
+                transforms = [
+                    target_transform if str(item.get("componentKey") or item.get("componentType") or "").lower() == target_key else item
+                    for item in transforms
+                ]
         shutil.copy2(output_path, preview_dir / "final_output.png")
 
         for placement in placements:

@@ -17,9 +17,9 @@ export const KONE_COMPONENTS: ComponentItem[] = [
     ],
   },
   {
-    key: 'lci',
-    label: 'LCI',
-    description: 'Landing Call Indicator',
+    key: 'kds',
+    label: 'KDS90/KDS330',
+    description: 'KDS90 and KDS330 landing call indicators',
     imageUrl: '/components/lci/KDS90/Landing Call Indicator Flush - Up.png',
     variants: [
       { id: 'kds90-lci-flush-up', group: 'KDS90', label: 'Landing Call Indicator Flush - Up', imageUrl: '/components/lci/KDS90/Landing Call Indicator Flush - Up.png' },
@@ -36,6 +36,14 @@ export const KONE_COMPONENTS: ComponentItem[] = [
       { id: 'kds330-hall-indicator-surface', group: 'KDS330', label: 'Hall Indicator Surface', imageUrl: '/components/lci/KDS330/Hall Indicator Surface.png' },
       { id: 'kds330-landing-call-station-flush', group: 'KDS330', label: 'Landing Call Station Flush', imageUrl: '/components/lci/KDS330/Landing Call Station Flush.png' },
       { id: 'kds330-landing-call-station-surface', group: 'KDS330', label: 'Landing Call Station Surface', imageUrl: '/components/lci/KDS330/Landing Call Station Surface.png' },
+    ],
+  },
+  {
+    key: 'dcs1020',
+    label: 'DCS1020',
+    description: 'DCS1020 destination guidance components',
+    imageUrl: '/components/lci/DCS1020/Pedestal Mounted DOP KSP1068.png',
+    variants: [
       { id: 'dcs1020-pedestal-mounted-dop-ksp1068', group: 'DCS1020', label: 'Pedestal Mounted DOP KSP1068', imageUrl: '/components/lci/DCS1020/Pedestal Mounted DOP KSP1068.png' },
       { id: 'dcs1020-wall-mounted-10in-dop-ksp1068', group: 'DCS1020', label: 'Wall Mounted 10" DOP KSP1068', imageUrl: '/components/lci/DCS1020/Wall Mounted 10in DOP KSP1068.png' },
       { id: 'dcs1020-destination-guidance-dual-kst1078', group: 'DCS1020', label: 'Destination Guidance Dual KST1078', imageUrl: '/components/lci/DCS1020/Destination Guidance Dual KST1078.png' },
@@ -148,6 +156,8 @@ export const GUEST_USER: User = {
 
 export const AI_PLACEMENT_DEFAULTS = {
   ceiling: { x: 50, y: 10 },
+  kds: { x: 78, y: 40 },
+  dcs1020: { x: 68, y: 46 },
   lci: { x: 78, y: 40 },
   door: { x: 20, y: 55 },
   cop: { x: 18, y: 52 },
