@@ -27,6 +27,7 @@ const previewVersionSchema = mongoose.Schema(
     parentFinalImagePath: { type: String, default: null },
     finalImagePath: { type: String, default: null },
     transform: { type: mongoose.Schema.Types.Mixed, default: null },
+    transforms: { type: [mongoose.Schema.Types.Mixed], default: [] },
     feedbackOption: { type: String, default: null },
     feedbackOptions: { type: [String], default: [] },
   },
@@ -131,6 +132,10 @@ const offeringSchema = mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: {},
     },
+    componentInstances: {
+      type: mongoose.Schema.Types.Mixed,
+      default: [],
+    },
     componentPins: {
       type: [componentPinSchema],
       default: [],
@@ -175,6 +180,10 @@ const offeringSchema = mongoose.Schema(
       default: 0,
     },
     repinTransforms: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
+    },
+    repinSharedBackgrounds: {
       type: mongoose.Schema.Types.Mixed,
       default: {},
     },

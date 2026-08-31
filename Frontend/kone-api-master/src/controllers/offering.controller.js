@@ -45,15 +45,69 @@ const readJsonIfExists = async (filePath) => {
   }
 };
 
+const validPlacementGeometry = (preprocessing) => {
+  const geometry = preprocessing?.geometry;
+  const originalWidth = Number(geometry?.original_size?.width);
+  const originalHeight = Number(geometry?.original_size?.height);
+  const matrix = geometry?.working_to_original;
+  if (
+    !Number.isFinite(originalWidth) ||
+    originalWidth <= 0 ||
+    !Number.isFinite(originalHeight) ||
+    originalHeight <= 0 ||
+    !Array.isArray(matrix) ||
+    matrix.length !== 3
+  ) {
+    return null;
+  }
+  const normalizedMatrix = matrix.map((row) => (Array.isArray(row) ? row.map(Number) : []));
+  if (normalizedMatrix.some((row) => row.length !== 3 || row.some((value) => !Number.isFinite(value)))) {
+    return null;
+  }
+  return { originalWidth, originalHeight, workingToOriginal: normalizedMatrix };
+};
+
+const transformPlacementPoint = (matrix, x, y) => {
+  const q0 = matrix[0][0] * x + matrix[0][1] * y + matrix[0][2];
+  const q1 = matrix[1][0] * x + matrix[1][1] * y + matrix[1][2];
+  const q2 = matrix[2][0] * x + matrix[2][1] * y + matrix[2][2];
+  if (!Number.isFinite(q0) || !Number.isFinite(q1) || !Number.isFinite(q2) || Math.abs(q2) < 1e-12) return null;
+  return [q0 / q2, q1 / q2];
+};
+
+const clampPlacementCoordinate = (value, min, max) => Math.max(min, Math.min(max, value));
+
+const placementBboxToOriginal = (bbox, geometry) => {
+  if (!geometry) return null;
+  const [x1, y1, x2, y2] = bbox;
+  const points = [
+    transformPlacementPoint(geometry.workingToOriginal, x1, y1),
+    transformPlacementPoint(geometry.workingToOriginal, x2, y1),
+    transformPlacementPoint(geometry.workingToOriginal, x2, y2),
+    transformPlacementPoint(geometry.workingToOriginal, x1, y2),
+  ];
+  if (points.some((point) => !point)) return null;
+  const xs = points.map((point) => point[0]);
+  const ys = points.map((point) => point[1]);
+  const ox1 = clampPlacementCoordinate(Math.min(...xs), 0, geometry.originalWidth);
+  const oy1 = clampPlacementCoordinate(Math.min(...ys), 0, geometry.originalHeight);
+  const ox2 = clampPlacementCoordinate(Math.max(...xs), 0, geometry.originalWidth);
+  const oy2 = clampPlacementCoordinate(Math.max(...ys), 0, geometry.originalHeight);
+  if (ox2 <= ox1 || oy2 <= oy1) return null;
+  return [ox1, oy1, ox2, oy2];
+};
+
 const componentPinsFromPlacement = async (storageDir) => {
   const placements = await readJsonIfExists(path.join(storageDir, 'pipeline', 'component_placements.json'));
   if (!Array.isArray(placements)) return [];
   const detections = await readJsonIfExists(path.join(storageDir, 'pipeline', 'elevator_detections.json'));
-  const width = Number(detections?.metadata?.image_width) || 0;
-  const height = Number(detections?.metadata?.image_height) || 0;
-  if (!width || !height) return [];
+  const preprocessing = await readJsonIfExists(path.join(storageDir, 'pipeline', 'preprocessing.json'));
+  const geometry = validPlacementGeometry(preprocessing);
+  const legacyWidth = Number(detections?.metadata?.image_width) || 0;
+  const legacyHeight = Number(detections?.metadata?.image_height) || 0;
+  if ((!legacyWidth || !legacyHeight) && !geometry) return [];
 
-  const supported = new Set(['kds', 'dcs1020', 'lci', 'cop', 'door', 'ceiling']);
+  const supported = new Set(['kds', 'kds_2', 'kds_3', 'dcs1020', 'lci', 'cop', 'door', 'ceiling']);
   return placements
     .map((placement) => {
       const componentKey = String(placement.id || '').toLowerCase();
@@ -62,14 +116,20 @@ const componentPinsFromPlacement = async (storageDir) => {
       if (!Array.isArray(bbox) || bbox.length !== 4) return null;
       const [x1, y1, x2, y2] = bbox.map(Number);
       if (![x1, y1, x2, y2].every(Number.isFinite)) return null;
+      const rawBbox = [x1, y1, x2, y2];
+      const transformedBbox = placementBboxToOriginal(rawBbox, geometry);
+      const pinBbox = transformedBbox || rawBbox;
+      const pinWidth = transformedBbox ? geometry.originalWidth : legacyWidth;
+      const pinHeight = transformedBbox ? geometry.originalHeight : legacyHeight;
+      if (!pinWidth || !pinHeight) return null;
       return {
         componentKey,
-        x: Math.round(((x1 + x2) / 2 / width) * 100),
-        y: Math.round(((y1 + y2) / 2 / height) * 100),
+        x: Math.round(((pinBbox[0] + pinBbox[2]) / 2 / pinWidth) * 100),
+        y: Math.round(((pinBbox[1] + pinBbox[3]) / 2 / pinHeight) * 100),
         aiPlaced: true,
-        bbox: [x1, y1, x2, y2],
-        imageWidth: width,
-        imageHeight: height,
+        bbox: pinBbox,
+        imageWidth: pinWidth,
+        imageHeight: pinHeight,
         editableLayerUrl: storagePublicUrl(placement.editable_layer_path),
         repinBackgroundUrl: storagePublicUrl(placement.repin_background_path),
         repinBackgroundDisplayUrl: storagePublicUrl(placement.repin_background_web_path || placement.repin_background_path),
@@ -77,6 +137,8 @@ const componentPinsFromPlacement = async (storageDir) => {
     })
     .filter(Boolean);
 };
+
+
 
 const hydratePlacementPins = async (offering, userId) => {
   const pins = Array.isArray(offering.componentPins) ? offering.componentPins : [];

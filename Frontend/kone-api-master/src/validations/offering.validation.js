@@ -1,4 +1,8 @@
 const Joi = require('joi');
+
+const componentKeys = ['ceiling', 'kds', 'kds_2', 'kds_3', 'dcs1020', 'lci', 'door', 'cop'];
+const semanticComponentKeys = ['ceiling', 'kds', 'dcs1020', 'lci', 'door', 'cop'];
+const kdsInstanceKeys = ['kds', 'kds_2', 'kds_3'];
 const { objectId } = require('./custom.validation');
 
 const repinPoint = Joi.object().keys({
@@ -11,9 +15,22 @@ const eraserHistoryEntry = Joi.object().keys({
   repinBackgroundDisplayUrl: Joi.string().allow(null, ''),
 });
 
+const repinSharedBackgroundState = Joi.object().keys({
+  repinBackgroundUrl: Joi.string().allow(null, ''),
+  repinBackgroundDisplayUrl: Joi.string().allow(null, ''),
+  eraserHistory: Joi.array().items(eraserHistoryEntry).default([]),
+  eraserRedoStack: Joi.array().items(eraserHistoryEntry).default([]),
+});
+
+const repinSharedBackgrounds = Joi.object().pattern(
+  Joi.string().valid('1', '2', '3', '4', '5'),
+  repinSharedBackgroundState
+);
+
 const repinTransform = Joi.object().keys({
-  componentKey: Joi.string().valid('ceiling', 'kds', 'dcs1020', 'lci', 'door', 'cop').required(),
-  componentType: Joi.string().valid('ceiling', 'kds', 'dcs1020', 'lci', 'door', 'cop').required(),
+  componentId: Joi.string().allow(null, ''),
+  componentKey: Joi.string().valid(...componentKeys).required(),
+  componentType: Joi.string().valid(...semanticComponentKeys).required(),
   sourceVersion: Joi.number().integer().min(1).max(5).required(),
   targetVersion: Joi.number().integer().min(2).max(5).required(),
   x: Joi.number().required(),
@@ -27,6 +44,7 @@ const repinTransform = Joi.object().keys({
   coordinateSpace: Joi.string().valid('pixels', 'percent').default('pixels'),
   imageWidth: Joi.number().positive(),
   imageHeight: Joi.number().positive(),
+  assetAspectRatio: Joi.number().positive().allow(null),
   originalBbox: Joi.array().ordered(Joi.number(), Joi.number(), Joi.number(), Joi.number()).allow(null),
   originalImageWidth: Joi.number().positive().allow(null),
   originalImageHeight: Joi.number().positive().allow(null),
@@ -42,7 +60,14 @@ const repinTransform = Joi.object().keys({
     .allow(null),
   feedbackOptions: Joi.array().items(Joi.string().valid('edge_alignment', 'perspective_depth', 'lighting_shadow', 'material_reflections', 'seamless_blending')).default([]),
   sourceBaseMode: Joi.string().valid('original', 'version').default('version'),
-  sourceVersionComponent: Joi.string().valid('ceiling', 'kds', 'dcs1020', 'lci', 'door', 'cop').allow(null, ''),
+  sourceVersionComponent: Joi.string().valid(...componentKeys).allow(null, ''),
+  sourceVersionComponentId: Joi.string().allow(null, ''),
+  parentVersionId: Joi.number().integer().min(1).max(5).allow(null),
+  parentFinalImagePath: Joi.string().allow(null, ''),
+  activeComponentId: Joi.string().allow(null, ''),
+  activeComponentType: Joi.string().valid(...semanticComponentKeys).allow(null, ''),
+  currentComponentMaskOrCrop: Joi.array().ordered(Joi.number(), Joi.number(), Joi.number(), Joi.number()).allow(null),
+  magicEraserApplied: Joi.boolean().default(false),
 });
 
 const previewVersion = Joi.object().keys({
@@ -51,12 +76,13 @@ const previewVersion = Joi.object().keys({
   createdAt: Joi.alternatives().try(Joi.string(), Joi.date()).allow(null),
   sourceVersion: Joi.number().integer().min(1).max(5).allow(null),
   transform: repinTransform.allow(null),
+  transforms: Joi.array().items(repinTransform).default([]),
   feedbackOption: Joi.string()
     .valid('edge_alignment', 'perspective_depth', 'lighting_shadow', 'material_reflections', 'seamless_blending')
     .allow(null),
   feedbackOptions: Joi.array().items(Joi.string().valid('edge_alignment', 'perspective_depth', 'lighting_shadow', 'material_reflections', 'seamless_blending')).default([]),
   sourceBaseMode: Joi.string().valid('original', 'version').default('version'),
-  sourceVersionComponent: Joi.string().valid('ceiling', 'kds', 'dcs1020', 'lci', 'door', 'cop').allow(null, ''),
+  sourceVersionComponent: Joi.string().valid(...componentKeys).allow(null, ''),
 });
 
 const offeringId = {
@@ -64,6 +90,23 @@ const offeringId = {
     offeringId: Joi.string().custom(objectId).required(),
   }),
 };
+
+const componentInstance = Joi.object().keys({
+  id: Joi.string()
+    .valid(...kdsInstanceKeys)
+    .required(),
+  componentType: Joi.string().valid('kds').required(),
+  variantId: Joi.string().required(),
+  assetUrl: Joi.string().required(),
+});
+
+const componentInstances = Joi.array()
+  .max(3)
+  .items(componentInstance)
+  .custom((value, helpers) => {
+    if (new Set(value.map((item) => item.variantId)).size !== value.length) return helpers.error('array.unique');
+    return value;
+  });
 
 const updateOffering = {
   params: offeringId.params,
@@ -82,11 +125,12 @@ const updateOffering = {
       outputVideoPath: Joi.string().allow(null),
       downloadZipPath: Joi.string().allow(null),
       environments: Joi.array().items(Joi.string()),
-      selectedComponents: Joi.array().items(Joi.string()),
+      selectedComponents: Joi.array().items(Joi.string().valid(...componentKeys)),
       selectedComponentAssets: Joi.object().pattern(Joi.string(), Joi.string().allow(null, '')),
+      componentInstances,
       componentPins: Joi.array().items(
         Joi.object().keys({
-          componentKey: Joi.string().required(),
+          componentKey: Joi.string().valid(...componentKeys).required(),
           x: Joi.number().required(),
           y: Joi.number().required(),
           aiPlaced: Joi.boolean(),
@@ -99,7 +143,7 @@ const updateOffering = {
         })
       ),
       annotationsEnabled: Joi.boolean(),
-      activeAnnotationFilters: Joi.array().items(Joi.string()),
+      activeAnnotationFilters: Joi.array().items(Joi.string().valid(...componentKeys)),
       videoMotionStyle: Joi.string(),
       videoSpeed: Joi.number(),
       videoQuality: Joi.string(),
@@ -115,7 +159,8 @@ const updateOffering = {
       previewRequestKey: Joi.string().allow(null, ''),
       previewVersions: Joi.array().items(previewVersion),
       repinPass: Joi.number().integer().min(0).max(5),
-      repinTransforms: Joi.object().pattern(Joi.string().valid('ceiling', 'kds', 'dcs1020', 'lci', 'door', 'cop'), repinTransform),
+      repinTransforms: Joi.object().pattern(Joi.string().valid(...componentKeys), repinTransform),
+      repinSharedBackgrounds,
       outputImageUrl: Joi.string().allow(null),
       outputVideoUrl: Joi.string().allow(null),
       downloadUrl: Joi.string().allow(null),

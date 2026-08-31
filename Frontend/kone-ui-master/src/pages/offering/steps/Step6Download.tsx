@@ -6,17 +6,17 @@ import { getGuestSessionId } from '../../../api/guestWorkflow'
 import { useOfferingStore } from '../../../store/offeringStore'
 import { useAuthStore } from '../../../store/authStore'
 import { AnnotatedPreview } from '../../../components/shared/AnnotatedPreview'
-import { KONE_COMPONENTS } from '../../../lib/constants'
+import { KONE_COMPONENTS, semanticComponentKey } from '../../../lib/constants'
 import { toast } from '../../../hooks/useToast'
 import { safeSystemErrorMessage } from '../../../lib/safeErrors'
 import { cn } from '../../../lib/utils'
-import type { ComponentKey, ComponentPin, PreviewVersion, RepinTransform } from '../../../types'
+import type { ComponentKey, ComponentPin, PreviewVersion, RepinTransform, SemanticComponentKey } from '../../../types'
 
 const COMP_LABELS = Object.fromEntries(KONE_COMPONENTS.map(c => [c.key, c.label])) as Record<ComponentKey, string>
 type DownloadType = 'image' | 'annotations' | 'video'
 type ComponentBrochureId = 'cop' | 'lci' | 'interior' | 'door'
 
-const componentKeyToBrochureId: Record<ComponentKey, ComponentBrochureId> = {
+const semanticComponentKeyToBrochureId: Record<SemanticComponentKey, ComponentBrochureId> = {
   cop: 'cop',
   kds: 'lci',
   dcs1020: 'lci',
@@ -214,11 +214,41 @@ function componentAsset(id: ComponentBrochureId) {
 
 function getSelectedBrochureIds(offering: NonNullable<ReturnType<typeof useOfferingStore.getState>['currentOffering']>) {
   const selectedComponentKeys: ComponentKey[] = offering.selectedComponents.length ? offering.selectedComponents : ['cop']
-  return [...new Set(selectedComponentKeys.map(key => componentKeyToBrochureId[key]))]
+  return [...new Set(selectedComponentKeys.map(key => semanticComponentKeyToBrochureId[semanticComponentKey(key)]))]
+}
+
+function isPublicAssetUrl(value: string | null | undefined) {
+  return Boolean(value && /^(https?:|data:|blob:|\/(?:output|storage|uploads)(?:\/|$))/i.test(value))
+}
+
+function fullResolutionUrlFromPreview(value: string | null | undefined) {
+  if (!value) return null
+  const match = value.match(/^([^?]+?)(\?.*)?$/)
+  if (!match) return value
+  const [, path, query = ""] = match
+  const lowerPath = path.toLowerCase()
+  if (!lowerPath.endsWith("_web.jpg") && !lowerPath.endsWith("_web.jpeg")) return value
+  return path.slice(0, path.lastIndexOf("_web")) + ".png" + (query ? "?" + query : "")
 }
 
 function fullResolutionOutputUrl(offering: NonNullable<ReturnType<typeof useOfferingStore.getState>['currentOffering']> | null | undefined) {
-  return offering?.previewImagePath ?? offering?.outputImageUrl ?? offering?.outputImagePath ?? null
+  const candidates = [offering?.outputImagePath, offering?.outputImageUrl, offering?.previewImagePath]
+  const direct = candidates.find(isPublicAssetUrl)
+  return fullResolutionUrlFromPreview(direct ?? null)
+}
+
+function selectedFullResolutionImageUrl(
+  version: PreviewVersion | undefined,
+  previewUrl: string | null,
+  offering: NonNullable<ReturnType<typeof useOfferingStore.getState>['currentOffering']> | null | undefined,
+) {
+  if (isPublicAssetUrl(version?.finalImagePath)) return version?.finalImagePath ?? null
+
+  const convertedPreviewUrl = fullResolutionUrlFromPreview(previewUrl)
+  if (isPublicAssetUrl(convertedPreviewUrl)) return convertedPreviewUrl
+
+  const fallback = offering?.outputImagePath ?? offering?.outputImageUrl ?? offering?.previewImagePath
+  return fullResolutionUrlFromPreview(fallback)
 }
 
 function inputImageUrl(offering: NonNullable<ReturnType<typeof useOfferingStore.getState>['currentOffering']>) {
@@ -676,7 +706,7 @@ export default function Step6Download() {
 
   const handleDownload = async (url: string | null, filename: string, type: DownloadType) => {
     if (type === 'annotations') {
-      const imageUrl = selectedOutputImageUrl ?? offering?.uploadedFileUrl ?? null
+      const imageUrl = selectedFullResolutionImageUrl(selectedPreviewVersion, selectedOutputImageUrl, offering) ?? offering?.uploadedFileUrl ?? null
       if (!imageUrl) {
         toast('Output file not available yet')
         return
@@ -771,6 +801,7 @@ export default function Step6Download() {
     ? offering?.previewVersions?.find(version => Number(version.version) === selectedOutputVersion)
     : undefined) ?? selectedPreviewVersionByImage
   const selectedOutputImageUrl = selectedPreviewVersion?.url ?? offering?.outputImageUrl ?? offering?.previewImagePath ?? null
+  const selectedFullResolutionUrl = selectedFullResolutionImageUrl(selectedPreviewVersion, selectedOutputImageUrl, offering)
   const pins = pinsForSelectedVersion(selectedPreviewVersion, basePins)
 
   // ─── Loading state ───────────────────────────────────────────────────────────
@@ -796,7 +827,7 @@ export default function Step6Download() {
       icon: ImageIcon,
       title: 'Rendered Image',
       subtitle: 'High-quality composite render',
-      url: isGuest && downloadUrl ? downloadUrl : selectedOutputImageUrl,
+      url: isGuest && downloadUrl ? downloadUrl : selectedFullResolutionUrl,
       file: 'final_output.png',
       type: 'image' as const,
       highlight: false,
@@ -805,7 +836,7 @@ export default function Step6Download() {
       icon: Layers,
       title: 'Image with Callouts',
       subtitle: 'Render with annotation overlay',
-      url: isGuest && downloadUrl ? downloadUrl : selectedOutputImageUrl,
+      url: isGuest && downloadUrl ? downloadUrl : selectedFullResolutionUrl,
       file: 'salesnxt-callouts.png',
       type: 'annotations' as const,
       highlight: true,

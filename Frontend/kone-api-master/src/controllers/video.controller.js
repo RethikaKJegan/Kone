@@ -305,14 +305,60 @@ const hasManualEraserBackground = (item = {}) => Boolean(
   (Array.isArray(item.eraserHistory) && item.eraserHistory.length > 1) ||
   (item.magicEraserApplied && item.repinBackgroundUrl)
 );
-const isSameComponentReEdit = (item = {}) => item.sourceVersionComponent && item.componentKey && String(item.sourceVersionComponent).toLowerCase() === String(item.componentKey).toLowerCase();
+const isSameComponentReEdit = (item = {}) => item.sourceVersionComponent && item.componentKey && (item.sourceVersionComponentId ? String(item.sourceVersionComponentId).toLowerCase() === String(item.componentId).toLowerCase() : String(item.sourceVersionComponent).toLowerCase() === String(item.componentKey).toLowerCase());
 
 const withLocalRepinFiles = (item = {}) => {
   const useRepinBackground = hasManualEraserBackground(item) || isSameComponentReEdit(item);
+  const currentUrlPath = localStoragePathFromUrl(item.repinBackgroundUrl);
   return {
     ...item,
     editableLayerPath: item.editableLayerPath || localStoragePathFromUrl(item.editableLayerUrl),
-    repinBackgroundPath: useRepinBackground ? (item.repinBackgroundPath || localStoragePathFromUrl(item.repinBackgroundUrl)) : null,
+    repinBackgroundPath: useRepinBackground ? currentUrlPath : null,
+  };
+};
+
+const stableRepinBackgroundPath = (storageDir, sourceVersion) => {
+  const versionKey = String(Number(sourceVersion) || 1);
+  return path.join(storageDir, 'repin', 'backgrounds', 'shared_background_v' + versionKey + '.png');
+};
+
+const stableRepinHistoryPath = (storageDir, sourceVersion) => {
+  const versionKey = String(Number(sourceVersion) || 1);
+  return path.join(storageDir, 'repin', 'backgrounds', 'history', 'repin_erased_v' + versionKey + '_' + crypto.randomUUID() + '.png');
+};
+
+const persistRepinBackgroundSnapshot = async (storageDir, sourceVersion, sourcePath) => {
+  if (!sourcePath || !(await fileExists(sourcePath))) return null;
+  const historyPath = stableRepinHistoryPath(storageDir, sourceVersion);
+  const canonicalPath = stableRepinBackgroundPath(storageDir, sourceVersion);
+  await Promise.all([
+    fsPromises.mkdir(path.dirname(historyPath), { recursive: true }),
+    fsPromises.mkdir(path.dirname(canonicalPath), { recursive: true }),
+  ]);
+  await fsPromises.copyFile(sourcePath, historyPath);
+  await fsPromises.copyFile(sourcePath, canonicalPath);
+  return { historyPath, canonicalPath };
+};
+
+const withStableRepinFiles = async (item = {}, storageDir) => {
+  const localized = withLocalRepinFiles(item);
+  if (!hasManualEraserBackground(item)) return localized;
+  const sourceVersion = item.parentVersionId || item.sourceVersion || 1;
+  const currentUrlPath = localStoragePathFromUrl(item.repinBackgroundUrl);
+  if (item.repinBackgroundUrl) {
+    if (currentUrlPath && (await fileExists(currentUrlPath))) {
+      return { ...localized, repinBackgroundPath: currentUrlPath, magicEraserApplied: true };
+    }
+    throw new Error('Current Magic Eraser background snapshot is missing');
+  }
+  const canonicalPath = stableRepinBackgroundPath(storageDir, sourceVersion);
+  if (!(await fileExists(canonicalPath))) {
+    throw new Error('Current Magic Eraser background snapshot is missing');
+  }
+  return {
+    ...localized,
+    repinBackgroundPath: canonicalPath,
+    magicEraserApplied: true,
   };
 };
 
@@ -364,19 +410,26 @@ const uploadSelectedImageForBrochure = async ({ offeringId, userId, imagePath, f
   });
 };
 
-const resolveRepinParentImage = async ({ offering, imageId, requestedVersion }) => {
+const resolveRepinParentImage = async ({ offering, imageId, requestedVersion, userId }) => {
   const outputDir = getOutputDir(imageId);
+  const logicStorageDir = userId ? getLogicStorageDir(userId, imageId) : null;
   const versions = normalizePreviewVersions(offering, offering.previewImagePath || offering.outputImagePath || offering.outputImageUrl)
     .filter((version) => Number(version.version) >= 1 && version.url);
   const latestVersion = versions.reduce((latest, version) => (Number(version.version) > Number(latest?.version || 0) ? version : latest), null);
   const requested = Number(requestedVersion) || Number(latestVersion?.version) || 1;
   const selectedVersion = versions.find((version) => Number(version.version) === requested) || latestVersion;
   const parentVersion = Number(selectedVersion?.version) || requested || 1;
+  const sharedBackgroundCandidates = logicStorageDir
+    ? [
+        path.join(logicStorageDir, 'repin', 'backgrounds', `shared_background_v${parentVersion}.png`),
+        ...(parentVersion === 1 ? [path.join(logicStorageDir, 'pipeline', 'repin', 'backgrounds', 'shared_background.png')] : []),
+      ]
+    : [];
   const urlPath = localOutputPathFromUrl(selectedVersion?.url);
   const versionFilePath = parentVersion > 1
     ? path.join(outputDir, `final_output_v${parentVersion}.png`)
     : path.join(outputDir, 'final_output.png');
-  const candidates = [urlPath, versionFilePath, path.join(outputDir, 'final_output.png')].filter(Boolean);
+  const candidates = [...sharedBackgroundCandidates, urlPath, versionFilePath, path.join(outputDir, 'final_output.png')].filter(Boolean);
   const resolvedPath = await candidates.reduce(async (foundPromise, candidate) => {
     const found = await foundPromise;
     if (found) return found;
@@ -464,15 +517,69 @@ const isValidVideoFile = async (filePath) => {
   }
 };
 
+const validPlacementGeometry = (preprocessing) => {
+  const geometry = preprocessing?.geometry;
+  const originalWidth = Number(geometry?.original_size?.width);
+  const originalHeight = Number(geometry?.original_size?.height);
+  const matrix = geometry?.working_to_original;
+  if (
+    !Number.isFinite(originalWidth) ||
+    originalWidth <= 0 ||
+    !Number.isFinite(originalHeight) ||
+    originalHeight <= 0 ||
+    !Array.isArray(matrix) ||
+    matrix.length !== 3
+  ) {
+    return null;
+  }
+  const normalizedMatrix = matrix.map((row) => (Array.isArray(row) ? row.map(Number) : []));
+  if (normalizedMatrix.some((row) => row.length !== 3 || row.some((value) => !Number.isFinite(value)))) {
+    return null;
+  }
+  return { originalWidth, originalHeight, workingToOriginal: normalizedMatrix };
+};
+
+const transformPlacementPoint = (matrix, x, y) => {
+  const q0 = matrix[0][0] * x + matrix[0][1] * y + matrix[0][2];
+  const q1 = matrix[1][0] * x + matrix[1][1] * y + matrix[1][2];
+  const q2 = matrix[2][0] * x + matrix[2][1] * y + matrix[2][2];
+  if (!Number.isFinite(q0) || !Number.isFinite(q1) || !Number.isFinite(q2) || Math.abs(q2) < 1e-12) return null;
+  return [q0 / q2, q1 / q2];
+};
+
+const clampPlacementCoordinate = (value, min, max) => Math.max(min, Math.min(max, value));
+
+const placementBboxToOriginal = (bbox, geometry) => {
+  if (!geometry) return null;
+  const [x1, y1, x2, y2] = bbox;
+  const points = [
+    transformPlacementPoint(geometry.workingToOriginal, x1, y1),
+    transformPlacementPoint(geometry.workingToOriginal, x2, y1),
+    transformPlacementPoint(geometry.workingToOriginal, x2, y2),
+    transformPlacementPoint(geometry.workingToOriginal, x1, y2),
+  ];
+  if (points.some((point) => !point)) return null;
+  const xs = points.map((point) => point[0]);
+  const ys = points.map((point) => point[1]);
+  const ox1 = clampPlacementCoordinate(Math.min(...xs), 0, geometry.originalWidth);
+  const oy1 = clampPlacementCoordinate(Math.min(...ys), 0, geometry.originalHeight);
+  const ox2 = clampPlacementCoordinate(Math.max(...xs), 0, geometry.originalWidth);
+  const oy2 = clampPlacementCoordinate(Math.max(...ys), 0, geometry.originalHeight);
+  if (ox2 <= ox1 || oy2 <= oy1) return null;
+  return [ox1, oy1, ox2, oy2];
+};
+
 const componentPinsFromPlacement = async (storageDir) => {
   const placements = await readJsonIfExists(path.join(storageDir, 'pipeline', 'component_placements.json'));
   if (!Array.isArray(placements)) return [];
   const detections = await readJsonIfExists(path.join(storageDir, 'pipeline', 'elevator_detections.json'));
-  const width = Number(detections.metadata?.image_width) || 0;
-  const height = Number(detections.metadata?.image_height) || 0;
-  if (!width || !height) return [];
+  const preprocessing = await readJsonIfExists(path.join(storageDir, 'pipeline', 'preprocessing.json'));
+  const geometry = validPlacementGeometry(preprocessing);
+  const legacyWidth = Number(detections?.metadata?.image_width) || 0;
+  const legacyHeight = Number(detections?.metadata?.image_height) || 0;
+  if ((!legacyWidth || !legacyHeight) && !geometry) return [];
 
-  const supported = new Set(['kds', 'dcs1020', 'lci', 'cop', 'door', 'ceiling']);
+  const supported = new Set(['kds', 'kds_2', 'kds_3', 'dcs1020', 'lci', 'cop', 'door', 'ceiling']);
   return placements
     .map((placement) => {
       const componentKey = String(placement.id || '').toLowerCase();
@@ -481,14 +588,20 @@ const componentPinsFromPlacement = async (storageDir) => {
       if (!Array.isArray(bbox) || bbox.length !== 4) return null;
       const [x1, y1, x2, y2] = bbox.map(Number);
       if (![x1, y1, x2, y2].every(Number.isFinite)) return null;
+      const rawBbox = [x1, y1, x2, y2];
+      const transformedBbox = placementBboxToOriginal(rawBbox, geometry);
+      const pinBbox = transformedBbox || rawBbox;
+      const pinWidth = transformedBbox ? geometry.originalWidth : legacyWidth;
+      const pinHeight = transformedBbox ? geometry.originalHeight : legacyHeight;
+      if (!pinWidth || !pinHeight) return null;
       return {
         componentKey,
-        x: Math.round(((x1 + x2) / 2 / width) * 100),
-        y: Math.round(((y1 + y2) / 2 / height) * 100),
+        x: Math.round(((pinBbox[0] + pinBbox[2]) / 2 / pinWidth) * 100),
+        y: Math.round(((pinBbox[1] + pinBbox[3]) / 2 / pinHeight) * 100),
         aiPlaced: true,
-        bbox: [x1, y1, x2, y2],
-        imageWidth: width,
-        imageHeight: height,
+        bbox: pinBbox,
+        imageWidth: pinWidth,
+        imageHeight: pinHeight,
         editableLayerUrl: storagePublicUrl(placement.editable_layer_path),
         repinBackgroundUrl: storagePublicUrl(placement.repin_background_path),
         repinBackgroundDisplayUrl: storagePublicUrl(placement.repin_background_web_path || placement.repin_background_path),
@@ -497,12 +610,15 @@ const componentPinsFromPlacement = async (storageDir) => {
     .filter(Boolean);
 };
 
+
+
 const runLogicComponents = async ({
   imageId,
   userId,
   inputPath,
   components,
   componentAssets,
+  componentInstances,
   environments,
   previewRequestKey,
 }) => {
@@ -526,6 +642,7 @@ const runLogicComponents = async ({
       session_id: `auth_${userId}`,
       project_id: imageId,
       project_name: imageId,
+      component_instances: componentInstances,
       storage_dir: storageDir,
       selected_components: components,
       component_assets: componentAssets,
@@ -571,25 +688,25 @@ const mergeComponentPins = (existingPins = [], updatedPins = []) => {
 };
 
 const runLogicRepin = async ({ imageId, userId, offering, transform, transforms = [], componentAssets, environments, previewRequestKey }) => {
-  const parent = await resolveRepinParentImage({ offering, imageId, requestedVersion: transform.parentVersionId || transform.sourceVersion });
+  const parent = await resolveRepinParentImage({ offering, imageId, requestedVersion: transform.parentVersionId || transform.sourceVersion, userId });
   const normalizedTransforms = (transforms.length ? transforms : [transform]).map((item) => ({
     ...item,
     sourceVersion: parent.parentVersion,
     parentVersionId: parent.parentVersion,
     parentFinalImagePath: parent.parentFinalImagePath,
   }));
-  const normalizedTransform = normalizedTransforms.find((item) => item.componentKey === transform.componentKey) || {
+  const normalizedTransform = normalizedTransforms.find((item) => transform.componentId ? item.componentId === transform.componentId : item.componentKey === transform.componentKey) || {
     ...transform,
     sourceVersion: parent.parentVersion,
     parentVersionId: parent.parentVersion,
     parentFinalImagePath: parent.parentFinalImagePath,
   };
-  const logicTransform = withLocalRepinFiles(normalizedTransform);
-  const logicTransforms = normalizedTransforms.map((item) => withLocalRepinFiles(item));
+  const storageDir = getLogicStorageDir(userId, imageId);
+  const logicTransform = await withStableRepinFiles(normalizedTransform, storageDir);
+  const logicTransforms = await Promise.all(normalizedTransforms.map((item) => withStableRepinFiles(item, storageDir)));
   const repinComponents = Array.from(new Set((logicTransforms.length ? logicTransforms : [logicTransform])
     .map((item) => item?.componentKey)
     .filter(Boolean)));
-  const storageDir = getLogicStorageDir(userId, imageId);
   const repinJobId = crypto.randomUUID();
   const jobStorageDir = path.join(storageDir, 'repin_jobs', repinJobId);
   const uploadsDir = path.join(jobStorageDir, 'uploads');
@@ -597,6 +714,16 @@ const runLogicRepin = async ({ imageId, userId, offering, transform, transforms 
   const pipelineDir = path.join(jobStorageDir, 'pipeline');
   const outputDir = getOutputDir(imageId);
   await Promise.all([uploadsDir, previewDir, pipelineDir, outputDir].map((dir) => fsPromises.mkdir(dir, { recursive: true })));
+
+  const canonicalOriginalInput = path.join(storageDir, 'uploads', 'input.jpg');
+  const fallbackOriginalInput = getUploadInputPath(imageId);
+  const originalInputSource = (await fileExists(canonicalOriginalInput))
+    ? canonicalOriginalInput
+    : ((await fileExists(fallbackOriginalInput)) ? fallbackOriginalInput : null);
+  if (!originalInputSource) {
+    throw new Error('Original upload was not found for Repin');
+  }
+  await fsPromises.copyFile(originalInputSource, path.join(uploadsDir, 'input.jpg'));
 
   const sourceImage = parent.parentLocalPath;
   await fsPromises.copyFile(sourceImage, path.join(uploadsDir, `repin_source_v${logicTransform.sourceVersion}.png`));
@@ -630,6 +757,14 @@ const runLogicRepin = async ({ imageId, userId, offering, transform, transforms 
 
   if (!data?.ok) throw new Error(data?.error || 'Logic repin placement failed');
 
+  const sharedBackgroundJobPath = path.join(jobStorageDir, 'pipeline', 'repin', 'backgrounds', `shared_background_v${logicTransform.targetVersion}.png`);
+  const sharedBackgroundPath = path.join(storageDir, 'repin', 'backgrounds', `shared_background_v${logicTransform.targetVersion}.png`);
+  if (!(await fileExists(sharedBackgroundJobPath))) {
+    throw new Error('Component-free Repin background was not created');
+  }
+  await fsPromises.mkdir(path.dirname(sharedBackgroundPath), { recursive: true });
+  await fsPromises.copyFile(sharedBackgroundJobPath, sharedBackgroundPath);
+
   const versionFile = `final_output_v${logicTransform.targetVersion}.png`;
   const webVersionFile = `final_output_v${logicTransform.targetVersion}_web.jpg`;
   await fsPromises.copyFile(path.join(previewDir, versionFile), path.join(outputDir, versionFile));
@@ -646,7 +781,9 @@ const runLogicRepin = async ({ imageId, userId, offering, transform, transforms 
     : null;
   const publicLogicTransform = (item) => item ? ({
     ...item,
+    editableLayerPath: null,
     editableLayerUrl: publicLogicUrl(item.editableLayerUrl),
+    repinBackgroundPath: null,
     repinBackgroundUrl: publicLogicUrl(item.repinBackgroundUrl),
     repinBackgroundDisplayUrl: publicLogicUrl(item.repinBackgroundDisplayUrl),
   }) : item;
@@ -698,6 +835,24 @@ const startRepinRun = ({ offeringId, imageId, userId, transform, transforms = []
       const withoutTarget = versions.filter((version) => Number(version.version) !== Number(transform.targetVersion));
       withoutTarget.push(nextVersion);
       withoutTarget.sort((a, b) => Number(a.version) - Number(b.version));
+      const storedSharedBackgrounds = offering.repinSharedBackgrounds && typeof offering.repinSharedBackgrounds.toObject === 'function'
+        ? offering.repinSharedBackgrounds.toObject()
+        : (offering.repinSharedBackgrounds || {});
+      const persistedSourceSharedBackground = storedSharedBackgrounds[String(placement.parentVersionId)];
+      const sourceSharedBackground = persistedSourceSharedBackground || (transform.repinBackgroundUrl
+        ? {
+            repinBackgroundUrl: transform.repinBackgroundUrl,
+            repinBackgroundDisplayUrl: transform.repinBackgroundDisplayUrl || transform.repinBackgroundUrl,
+            eraserHistory: Array.isArray(transform.eraserHistory) ? transform.eraserHistory : [],
+            eraserRedoStack: Array.isArray(transform.eraserRedoStack) ? transform.eraserRedoStack : [],
+          }
+        : null);
+      const inheritedSharedBackgrounds = sourceSharedBackground
+        ? {
+            ...storedSharedBackgrounds,
+            [String(transform.targetVersion)]: JSON.parse(JSON.stringify(sourceSharedBackground)),
+          }
+        : null;
       console.log('[REPIN_VERSION]', JSON.stringify({
         visualizationId: imageId,
         newVersionId: Number(transform.targetVersion),
@@ -723,6 +878,7 @@ const startRepinRun = ({ offeringId, imageId, userId, transform, transforms = []
         status: 'active',
         lastError: null,
         previewRequestKey,
+        ...(inheritedSharedBackgrounds ? { repinSharedBackgrounds: inheritedSharedBackgrounds } : {}),
       });
       if (!updatedOffering) {
         console.warn('[REPIN_VERSION] stale render ignored', JSON.stringify({ visualizationId: imageId, newVersionId: Number(transform.targetVersion), previewRequestKey }));
@@ -794,7 +950,7 @@ const runUploadPrecheck = async (req, res) => {
   }
 };
 
-const startComponentRun = ({ offeringId, imageId, userId, inputPath, components, componentAssets, environments, previewRequestKey }) => {
+const startComponentRun = ({ offeringId, imageId, userId, inputPath, components, componentAssets, componentInstances, environments, previewRequestKey }) => {
   const runKey = `${offeringId}:${previewRequestKey || 'default'}`;
   if (componentRuns.has(runKey)) return;
 
@@ -806,6 +962,7 @@ const startComponentRun = ({ offeringId, imageId, userId, inputPath, components,
         inputPath,
         components,
         componentAssets,
+        componentInstances,
         environments,
         previewRequestKey,
       });
@@ -1291,6 +1448,7 @@ const selectComponents = async (req, res) => {
       components,
       environments = [],
       component_assets: componentAssets = {},
+      component_instances: componentInstances = [],
       preview_request_key: previewRequestKey = null,
     } = req.body;
 
@@ -1354,6 +1512,7 @@ const selectComponents = async (req, res) => {
       environments: effectiveEnvironments,
       selectedComponents: components,
       selectedComponentAssets: componentAssets,
+      componentInstances,
       componentPins: [],
       activeAnnotationFilters: components,
       outputImageUrl: null,
@@ -1377,6 +1536,7 @@ const selectComponents = async (req, res) => {
       components,
       componentAssets,
       environments: effectiveEnvironments,
+      componentInstances,
       previewRequestKey,
     });
 
@@ -1482,7 +1642,7 @@ const repinEraser = async (req, res) => {
     await Promise.all([uploadsDir, previewDir, outputDir].map((dir) => fsPromises.mkdir(dir, { recursive: true })));
 
     const fallbackInput = getUploadInputPath(imageId);
-    const parent = await resolveRepinParentImage({ offering, imageId, requestedVersion: sourceVersion });
+    const parent = await resolveRepinParentImage({ offering, imageId, requestedVersion: sourceVersion, userId: req.user.id });
     const sourceImage = sourceBaseMode === 'original' ? fallbackInput : parent.parentLocalPath;
     await fsPromises.copyFile(sourceImage, path.join(uploadsDir, `repin_source_v${parent.parentVersion}.png`));
 
@@ -1503,10 +1663,16 @@ const repinEraser = async (req, res) => {
     }, { timeout: 0 });
 
     if (!data?.ok) throw new Error(data?.error || 'Magic Eraser failed');
+    const stableSourceVersion = Number(sourceVersion || parent.parentVersionId || parent.parentVersion || 1);
+    const erasedRelativePath = data.repin_background_url || data.preview_url;
+    const erasedPath = erasedRelativePath ? path.join(storageDir, erasedRelativePath) : null;
+    const persistedBackground = await persistRepinBackgroundSnapshot(storageDir, stableSourceVersion, erasedPath);
+    if (!persistedBackground) throw new Error('Stable Magic Eraser background was not created');
+    const historyUrl = storagePublicUrl(persistedBackground.historyPath);
     return res.status(200).json({
       success: true,
-      repinBackgroundUrl: storagePublicUrl(path.join(storageDir, data.repin_background_url || data.preview_url)),
-      repinBackgroundDisplayUrl: storagePublicUrl(path.join(storageDir, data.preview_url || data.repin_background_url)),
+      repinBackgroundUrl: historyUrl,
+      repinBackgroundDisplayUrl: historyUrl,
       maskUrl: storagePublicUrl(path.join(storageDir, data.mask_url || '')),
     });
   } catch (error) {

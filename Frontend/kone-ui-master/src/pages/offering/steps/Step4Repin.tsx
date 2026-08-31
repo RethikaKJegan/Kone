@@ -1,21 +1,18 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Eraser, Eye, Redo2, RotateCcw, Undo2, Wand2 } from 'lucide-react'
 import apiClient from '../../../api/client'
 import { getGuestSessionId, isGuestSession } from '../../../api/guestWorkflow'
 import { useOfferingStore } from '../../../store/offeringStore'
 import { RepinTransformCanvas, repinTransformFromPin } from '../../../components/shared/RepinTransformCanvas'
-import { KONE_COMPONENTS } from '../../../lib/constants'
+import { KONE_COMPONENTS, componentDefaultAsset, componentDisplayLabel, semanticComponentKey } from '../../../lib/constants'
 import { toast } from '../../../hooks/useToast'
 import { safeSystemErrorMessage } from '../../../lib/safeErrors'
 import { cn } from '../../../lib/utils'
-import type { ComponentKey, ComponentPin, PreviewVersion, RepinFeedbackOption, RepinTransform } from '../../../types'
-
-const COMP_LABELS = Object.fromEntries(KONE_COMPONENTS.map(c => [c.key, c.label])) as Record<ComponentKey, string>
-const COMP_IMAGES = Object.fromEntries(KONE_COMPONENTS.map(c => [c.key, c.imageUrl ?? null])) as Record<ComponentKey, string | null>
+import type { ComponentKey, ComponentPin, EraserHistoryEntry, PreviewVersion, RepinFeedbackOption, RepinSharedBackgroundState, RepinTransform, SemanticComponentKey } from '../../../types'
 
 function componentImageFor(offering: { selectedComponentAssets?: Partial<Record<ComponentKey, string>> } | null | undefined, component: ComponentKey) {
-  return offering?.selectedComponentAssets?.[component] ?? COMP_IMAGES[component] ?? null
+  return offering?.selectedComponentAssets?.[component] ?? componentDefaultAsset(component)
 }
 const FEEDBACK_OPTIONS: { value: RepinFeedbackOption; label: string }[] = [
   { value: 'edge_alignment', label: 'Sharper edge alignment' },
@@ -30,43 +27,67 @@ function versionUrl(version: PreviewVersion | undefined, fallback: string | null
 }
 
 
-function eraserEntryFromTransform(transform: RepinTransform) {
+function eraserEntryFromSharedBackground(sharedState: RepinSharedBackgroundState | null | undefined): EraserHistoryEntry {
   return {
-    repinBackgroundUrl: transform.repinBackgroundUrl ?? null,
-    repinBackgroundDisplayUrl: transform.repinBackgroundDisplayUrl ?? transform.repinBackgroundUrl ?? null,
+    repinBackgroundUrl: sharedState?.repinBackgroundUrl ?? null,
+    repinBackgroundDisplayUrl: sharedState?.repinBackgroundDisplayUrl ?? sharedState?.repinBackgroundUrl ?? null,
   }
 }
 
-function hasManualEraserBackground(transform: RepinTransform | null | undefined) {
+function hasManualEraserBackground(sharedState: RepinSharedBackgroundState | null | undefined) {
   return Boolean(
-    (transform?.eraserHistory && transform.eraserHistory.length > 1) ||
-    (transform?.magicEraserApplied && transform?.repinBackgroundUrl)
+    (sharedState?.eraserHistory && sharedState.eraserHistory.length > 1) ||
+    sharedState?.repinBackgroundUrl
   )
 }
 
-function repinBackgroundForEditing(transform: RepinTransform | null | undefined, allowGeneratedBackground = false) {
-  return hasManualEraserBackground(transform) || allowGeneratedBackground
-    ? transform?.repinBackgroundDisplayUrl ?? transform?.repinBackgroundUrl ?? null
-    : null
+function sharedBackgroundWithEraserEntry(
+  entry: EraserHistoryEntry,
+  eraserHistory: EraserHistoryEntry[],
+  eraserRedoStack: EraserHistoryEntry[] = []
+): RepinSharedBackgroundState {
+  return {
+    repinBackgroundUrl: entry.repinBackgroundUrl,
+    repinBackgroundDisplayUrl: entry.repinBackgroundDisplayUrl ?? entry.repinBackgroundUrl ?? null,
+    eraserHistory,
+    eraserRedoStack,
+  }
 }
 
-function transformForRepinSubmit(transform: RepinTransform, allowGeneratedBackground = false): RepinTransform {
-  if (hasManualEraserBackground(transform) || allowGeneratedBackground) return transform
+function transformForRepinSubmit(transform: RepinTransform, sharedState: RepinSharedBackgroundState | null | undefined, allowGeneratedBackground = false): RepinTransform {
+  if (hasManualEraserBackground(sharedState)) {
+    return {
+      ...transform,
+      repinBackgroundUrl: sharedState?.repinBackgroundUrl ?? null,
+      repinBackgroundDisplayUrl: sharedState?.repinBackgroundDisplayUrl ?? sharedState?.repinBackgroundUrl ?? null,
+      repinBackgroundPath: null,
+      eraserHistory: sharedState?.eraserHistory ?? [],
+      eraserRedoStack: sharedState?.eraserRedoStack ?? [],
+      magicEraserApplied: true,
+    }
+  }
+  if (allowGeneratedBackground) return transform
   return {
     ...transform,
     repinBackgroundUrl: null,
     repinBackgroundDisplayUrl: null,
     repinBackgroundPath: null,
+    eraserHistory: [],
+    eraserRedoStack: [],
+    magicEraserApplied: false,
   }
 }
 
-function transformWithEraserEntry(transform: RepinTransform, entry: ReturnType<typeof eraserEntryFromTransform>, eraserHistory: ReturnType<typeof eraserEntryFromTransform>[], eraserRedoStack: ReturnType<typeof eraserEntryFromTransform>[] = []): RepinTransform {
+function transformWithoutSharedEraserState(transform: RepinTransform, sharedState: RepinSharedBackgroundState | null | undefined): RepinTransform {
+  if (!hasManualEraserBackground(sharedState)) return transform
   return {
     ...transform,
-    repinBackgroundUrl: entry.repinBackgroundUrl,
-    repinBackgroundDisplayUrl: entry.repinBackgroundDisplayUrl,
-    eraserHistory,
-    eraserRedoStack,
+    repinBackgroundUrl: null,
+    repinBackgroundDisplayUrl: null,
+    repinBackgroundPath: null,
+    eraserHistory: [],
+    eraserRedoStack: [],
+    magicEraserApplied: false,
   }
 }
 
@@ -91,7 +112,7 @@ function transformWithNumericField(transform: RepinTransform, field: keyof Pick<
   return next
 }
 
-function transformHistoryKey(component: ComponentKey, sourceVersion: number) {
+function transformHistoryKey(component: string, sourceVersion: number) {
   return `${component}:${sourceVersion}`
 }
 
@@ -115,11 +136,26 @@ function transformSnapshot(transform: RepinTransform) {
 export default function Step4Repin() {
   const { projectId, offeringId } = useParams()
   const navigate = useNavigate()
-  const { currentOffering, setCurrentOffering, setRepinTransforms, submitRepinPreview, eraseRepinBackground, goToStep, isProcessing } = useOfferingStore()
+  const { currentOffering, setCurrentOffering, setRepinTransforms, setRepinSharedBackgrounds, submitRepinPreview, eraseRepinBackground, goToStep, isProcessing } = useOfferingStore()
   const offering = currentOffering
   const selectedComponents = offering?.selectedComponents ?? []
-  const components = selectedComponents.length ? selectedComponents : KONE_COMPONENTS.map(component => component.key)
+  const componentRefs: { id: ComponentKey; type: SemanticComponentKey }[] = selectedComponents.length
+    ? selectedComponents.map(component => ({ id: component, type: semanticComponentKey(component) }))
+    : KONE_COMPONENTS.map(component => ({ id: component.key, type: semanticComponentKey(component.key) }))
+  const components = componentRefs.map(ref => ref.id)
+  const componentTypeFor = (componentId: string): SemanticComponentKey => componentRefs.find(ref => ref.id === componentId)?.type ?? semanticComponentKey(componentId as ComponentKey)
+  const componentInstanceFor = (componentId: string) => offering?.componentInstances?.find(instance => instance.id === componentId)
+  const componentLabelFor = (componentId: string) => componentDisplayLabel(componentId as ComponentKey, componentInstanceFor(componentId)?.assetUrl ?? offering?.selectedComponentAssets?.[componentId as ComponentKey])
+  const componentImageForId = (componentId: string) => componentInstanceFor(componentId)?.assetUrl ?? componentImageFor(offering, componentId as ComponentKey)
   const pins = offering?.componentPins ?? []
+  const pinsSignature = useMemo(() => pins.map(pin => [
+    pin.componentKey,
+    pin.x,
+    pin.y,
+    pin.imageWidth ?? '',
+    pin.imageHeight ?? '',
+    (pin.bbox ?? []).join(','),
+  ].join(':')).join('|'), [pins])
   const versions = offering?.previewVersions?.length
     ? offering.previewVersions
     : offering?.outputImageUrl
@@ -135,9 +171,19 @@ export default function Step4Repin() {
   const sourceVersion = versions.some(version => version.version === selectedSourceVersion) ? selectedSourceVersion : latestVersion || 1
   const targetVersion = Math.min(latestVersion + 1, 5)
   const generationLimitReached = latestVersion >= 5
+  const selectedSourcePreview = versions.find(v => v.version === sourceVersion)
+  const repinHydrationContextKey = useMemo(() => [
+    offering?.id ?? '',
+    sourceVersion,
+    targetVersion,
+    components.join('|'),
+    pinsSignature,
+    selectedSourcePreview?.version ?? 'none',
+  ].join('::'), [offering?.id, sourceVersion, targetVersion, components.join('|'), pinsSignature, selectedSourcePreview?.version])
   const savedSelectedComp = savedRepinState?.selectedComp && components.includes(savedRepinState.selectedComp) ? savedRepinState.selectedComp : null
-  const [selectedComp, setSelectedComp] = useState<ComponentKey | null>(savedSelectedComp ?? selectedComponents[0] ?? components[0] ?? null)
-  const [repinTransforms, setLocalRepinTransforms] = useState<Partial<Record<ComponentKey, RepinTransform>>>(offering?.repinTransforms ?? {})
+  const [selectedComp, setSelectedComp] = useState<ComponentKey | null>(savedSelectedComp ?? components[0] ?? null)
+  const [repinTransforms, setLocalRepinTransforms] = useState<Partial<Record<string, RepinTransform>>>(offering?.repinTransforms ?? {})
+  const lastHydratedContextRef = useRef<string | null>(null)
   const [transformHistory, setTransformHistory] = useState<Record<string, RepinTransform[]>>({})
   const [feedbackOptions, setFeedbackOptions] = useState<RepinFeedbackOption[]>(['seamless_blending'])
   const [inspectedVersion, setInspectedVersion] = useState<PreviewVersion | null>(null)
@@ -154,6 +200,38 @@ export default function Step4Repin() {
     window.localStorage.setItem(repinStateKey, JSON.stringify({ sourceVersion, selectedComp }))
   }, [repinStateKey, sourceVersion, selectedComp])
 
+  const sourceVersionTransforms = useMemo(() => {
+    const exactKeyFor = (item: RepinTransform | null | undefined) => String(item?.componentId ?? item?.componentKey ?? '').toLowerCase()
+    const versionTransformMap = new Map<string, RepinTransform>()
+    ;(selectedSourcePreview?.transforms ?? []).forEach(item => {
+      const exactKey = exactKeyFor(item)
+      if (exactKey) versionTransformMap.set(exactKey, item)
+    })
+    const compatibilityTransform = selectedSourcePreview?.transform
+    const compatibilityKey = exactKeyFor(compatibilityTransform)
+    if (compatibilityTransform && compatibilityKey && !versionTransformMap.has(compatibilityKey)) {
+      versionTransformMap.set(compatibilityKey, compatibilityTransform)
+    }
+
+    const nextTransforms: Partial<Record<string, RepinTransform>> = {}
+    components.forEach(comp => {
+      const componentType = componentTypeFor(comp)
+      const fallbackTransform = offering?.repinTransforms?.[comp]
+      const resolved = versionTransformMap.get(String(comp).toLowerCase())
+        ?? fallbackTransform
+        ?? repinTransformFromPin(comp as ComponentKey, sourceVersion, targetVersion, pins.find((p: ComponentPin) => p.componentKey === comp))
+      nextTransforms[comp] = {
+        ...resolved,
+        componentId: comp,
+        componentKey: comp as ComponentKey,
+        componentType,
+        sourceVersion,
+        targetVersion,
+      }
+    })
+    return nextTransforms
+  }, [selectedSourcePreview, offering?.id, sourceVersion, targetVersion, components.join('|'), pinsSignature])
+
   useEffect(() => {
     if (!latestVersion) return
     setSelectedSourceVersion(current => versions.some(version => version.version === current) ? current : latestVersion)
@@ -161,34 +239,14 @@ export default function Step4Repin() {
 
   useEffect(() => {
     const component = selectedComp && components.includes(selectedComp) ? selectedComp : components[0]
-    if (!component) return
-    if (selectedComp !== component) setSelectedComp(component)
-
-    let changed = false
-    const nextTransforms: Partial<Record<ComponentKey, RepinTransform>> = { ...(offering?.repinTransforms ?? {}), ...repinTransforms }
-    components.forEach(comp => {
-      const existing = nextTransforms[comp]
-      if (existing) {
-        if (existing.sourceVersion !== sourceVersion || existing.targetVersion !== targetVersion) {
-          nextTransforms[comp] = { ...existing, sourceVersion, targetVersion }
-          changed = true
-        }
-        return
-      }
-      nextTransforms[comp] = repinTransformFromPin(comp, sourceVersion, targetVersion, pins.find((p: ComponentPin) => p.componentKey === comp))
-      changed = true
-    })
-    if (changed) {
-      setLocalRepinTransforms(nextTransforms)
-      setRepinTransforms(nextTransforms)
-    }
-  }, [selectedComp, sourceVersion, targetVersion, components.join('|'), pins.map(pin => `${pin.componentKey}:${pin.x}:${pin.y}`).join('|')])
+    if (component && selectedComp !== component) setSelectedComp(component)
+  }, [selectedComp, components.join('|')])
 
   useEffect(() => {
-    if (offering?.repinTransforms && Object.keys(offering.repinTransforms).length > 0) {
-      setLocalRepinTransforms(offering.repinTransforms)
-    }
-  }, [offering?.id])
+    if (lastHydratedContextRef.current === repinHydrationContextKey) return
+    setLocalRepinTransforms(sourceVersionTransforms)
+    lastHydratedContextRef.current = repinHydrationContextKey
+  }, [repinHydrationContextKey, sourceVersionTransforms])
 
   useEffect(() => {
     setCanvasConfirmed(false)
@@ -290,55 +348,51 @@ export default function Step4Repin() {
     }
   }, [projectId, offeringId, offering?.previewRequestKey, offering?.pipelineStatus])
 
-  const selectedSourcePreview = versions.find(v => v.version === sourceVersion)
   const previewImageUrl = useMemo(() => versionUrl(selectedSourcePreview, offering?.outputImageUrl), [selectedSourcePreview, offering?.outputImageUrl])
   const parentFinalImagePath = selectedSourcePreview?.finalImagePath ?? selectedSourcePreview?.url ?? previewImageUrl ?? null
   const originalImageUrl = offering?.uploadedFileUrl ?? offering?.inputImagePath ?? null
   const sourceVersionComponent = selectedSourcePreview?.transform?.componentKey ?? null
-  const sourceBaseMode: 'original' | 'version' = 'version'
-  const defaultTransformFor = (component: ComponentKey) => repinTransformFromPin(component, sourceVersion, targetVersion, pins.find((p: ComponentPin) => p.componentKey === component))
+  const sourceVersionComponentId = selectedSourcePreview?.transform?.componentId ?? null
+  const sourceBaseMode: 'original' | 'version' = 'original'
+  const defaultTransformFor = (componentId: string) => {
+    const componentType = componentTypeFor(componentId)
+    return { ...repinTransformFromPin(componentId as ComponentKey, sourceVersion, targetVersion, pins.find((p: ComponentPin) => p.componentKey === componentId)), componentId, componentKey: componentId as ComponentKey, componentType }
+  }
 
-  const selectedComponentImageUrl = selectedComp ? componentImageFor(offering, selectedComp) : null
+  const selectedComponentType = selectedComp ? componentTypeFor(selectedComp) : null
+  const selectedComponentImageUrl = selectedComp ? componentImageForId(selectedComp) : null
   const transform = selectedComp ? repinTransforms[selectedComp] ?? defaultTransformFor(selectedComp) : null
   const selectedHistoryKey = selectedComp ? transformHistoryKey(selectedComp, sourceVersion) : null
   const canUndoGeometry = Boolean(selectedHistoryKey && transformHistory[selectedHistoryKey]?.length)
-  const canUndoEraser = Boolean(transform?.eraserHistory && transform.eraserHistory.length > 1)
-  const canRedoEraser = Boolean(transform?.eraserRedoStack && transform.eraserRedoStack.length > 0)
-  const isSameComponentReEdit = Boolean(selectedComp && sourceVersion > 1 && sourceVersionComponent === selectedComp)
-  const transformHasCleanBackground = Boolean(sourceVersion > 1 && (transform?.repinBackgroundDisplayUrl || transform?.repinBackgroundUrl))
-  const isGeneratedComponentReEdit = isSameComponentReEdit || transformHasCleanBackground
-  const canvasBaseBackgroundUrl = sourceVersion > 1 ? (previewImageUrl ?? originalImageUrl) : (originalImageUrl ?? previewImageUrl)
-  const hasGeneratedRepinBackground = sourceVersion > 1
-  const sharedEraserTransform = components
-    .map(comp => repinTransforms[comp])
-    .find(item => item && item.sourceVersion === sourceVersion && hasManualEraserBackground(item))
-  const manualEraserBackgroundUrl = hasManualEraserBackground(transform)
-    ? transform?.repinBackgroundDisplayUrl ?? transform?.repinBackgroundUrl ?? null
+  const repinSharedBackgrounds = offering?.repinSharedBackgrounds ?? {}
+  const sharedEraserVersionKey = String(sourceVersion)
+  const sharedEraserState = repinSharedBackgrounds[sharedEraserVersionKey]
+  const sharedEraserApplied = hasManualEraserBackground(sharedEraserState)
+  const canUndoEraser = Boolean(sharedEraserState?.eraserHistory && sharedEraserState.eraserHistory.length > 1)
+  const canRedoEraser = Boolean(sharedEraserState?.eraserRedoStack && sharedEraserState.eraserRedoStack.length > 0)
+  const canvasBaseBackgroundUrl = originalImageUrl ?? previewImageUrl
+  const sharedEraserBackgroundUrl = sharedEraserApplied
+    ? sharedEraserState?.repinBackgroundDisplayUrl ?? sharedEraserState?.repinBackgroundUrl ?? null
     : null
-  const sharedEraserBackgroundUrl = sharedEraserTransform
-    ? sharedEraserTransform.repinBackgroundDisplayUrl ?? sharedEraserTransform.repinBackgroundUrl ?? null
-    : null
-  const editingBackgroundUrl = manualEraserBackgroundUrl ?? sharedEraserBackgroundUrl ?? (sourceVersion > 1
-    ? canvasBaseBackgroundUrl
-    : (repinBackgroundForEditing(transform, hasGeneratedRepinBackground) ?? canvasBaseBackgroundUrl))
+  const editingBackgroundUrl = sharedEraserBackgroundUrl ?? canvasBaseBackgroundUrl
   const eraserBackgroundRevision = [
-    transform?.eraserHistory?.length ?? sharedEraserTransform?.eraserHistory?.length ?? 0,
-    transform?.repinBackgroundDisplayUrl ?? transform?.repinBackgroundUrl ?? sharedEraserTransform?.repinBackgroundDisplayUrl ?? sharedEraserTransform?.repinBackgroundUrl ?? '',
+    sharedEraserState?.eraserHistory?.length ?? 0,
+    sharedEraserState?.repinBackgroundDisplayUrl ?? sharedEraserState?.repinBackgroundUrl ?? '',
   ].join(':')
   const editingCanvasImageUrl = useMemo(() => {
     if (!editingBackgroundUrl) return null
-    if (!hasManualEraserBackground(transform) && !sharedEraserTransform) return editingBackgroundUrl
+    if (!sharedEraserApplied) return editingBackgroundUrl
     const separator = editingBackgroundUrl.includes('?') ? '&' : '?'
     return editingBackgroundUrl + separator + 'magicEraserRevision=' + encodeURIComponent(eraserBackgroundRevision)
-  }, [editingBackgroundUrl, eraserBackgroundRevision, transform?.eraserHistory, sharedEraserTransform?.eraserHistory])
+  }, [editingBackgroundUrl, eraserBackgroundRevision, sharedEraserApplied])
   const staticComponentLayers = components
     .filter(comp => comp !== selectedComp)
     .map(comp => {
       const layerTransform = repinTransforms[comp] ?? defaultTransformFor(comp)
       return {
         transform: layerTransform,
-        label: COMP_LABELS[comp],
-        componentImageUrl: componentImageFor(offering, comp) ?? layerTransform.editableLayerUrl ?? null,
+        label: componentLabelFor(comp),
+        componentImageUrl: componentImageForId(comp) ?? layerTransform.editableLayerUrl ?? null,
         onSelect: () => {
           setSelectedComp(comp)
           setInspectedVersion(null)
@@ -349,13 +403,17 @@ export default function Step4Repin() {
     })
     .filter(layer => Boolean(layer.componentImageUrl))
 
-  const persistTransforms = (nextTransforms: Partial<Record<ComponentKey, RepinTransform>>) => {
+  const persistTransforms = (nextTransforms: Partial<Record<string, RepinTransform>>) => {
     setLocalRepinTransforms(nextTransforms)
     setRepinTransforms(nextTransforms)
   }
 
+  const persistSharedBackgrounds = (nextBackgrounds: Record<string, RepinSharedBackgroundState>) => {
+    setRepinSharedBackgrounds(nextBackgrounds)
+  }
+
   const rememberTransform = (snapshot: RepinTransform) => {
-    const key = transformHistoryKey(snapshot.componentKey, snapshot.sourceVersion)
+    const key = transformHistoryKey(snapshot.componentId ?? snapshot.componentKey, snapshot.sourceVersion)
     setTransformHistory(prev => {
       const history = prev[key] ?? []
       if (history.length && transformSnapshot(history[history.length - 1]) === transformSnapshot(snapshot)) return prev
@@ -368,8 +426,11 @@ export default function Step4Repin() {
   }
 
   const handleTransformChange = (next: RepinTransform) => {
-    const current = repinTransforms[next.componentKey]
-    if (current && transformSnapshot(current) !== transformSnapshot(next)) {
+    const componentId = next.componentId ?? selectedComp ?? next.componentKey
+    const componentType = componentTypeFor(componentId)
+    const normalizedNext = { ...next, componentId, componentKey: componentId as ComponentKey, componentType }
+    const current = repinTransforms[componentId]
+    if (current && transformSnapshot(current) !== transformSnapshot(normalizedNext)) {
       rememberTransform(current)
     }
     setPlacementPreview(false)
@@ -377,7 +438,7 @@ export default function Step4Repin() {
     // Persist canvas edits so refresh and back-forward navigation restore the same repin state.
     persistTransforms({
       ...repinTransforms,
-      [next.componentKey]: next,
+      [componentId]: normalizedNext,
     })
   }
 
@@ -385,11 +446,8 @@ export default function Step4Repin() {
   const handleEraseMask = async (maskDataUrl: string) => {
     if (!transform || !selectedComp || isProcessing) return
     try {
-      const activeTransform = { ...transform, componentKey: selectedComp, componentType: selectedComp }
-      const nextTransform = await eraseRepinBackground(activeTransform, maskDataUrl, sourceVersion, sourceBaseMode)
-      const selectedTransform = { ...nextTransform, componentKey: selectedComp, componentType: selectedComp }
-      const latestTransforms = useOfferingStore.getState().currentOffering?.repinTransforms ?? repinTransforms
-      persistTransforms({ ...latestTransforms, [selectedComp]: selectedTransform })
+      const activeTransform = { ...transform, componentId: selectedComp, componentKey: selectedComp as ComponentKey, componentType: componentTypeFor(selectedComp) }
+      await eraseRepinBackground(activeTransform, maskDataUrl, sourceVersion, sourceBaseMode)
       setCanvasConfirmed(false)
       setEraserMode(false)
       setPlacementPreview(false)
@@ -402,31 +460,31 @@ export default function Step4Repin() {
 
 
   const handleUndoEraser = () => {
-    if (!transform || !selectedComp || !canUndoEraser) return
-    const history = transform.eraserHistory ?? []
+    if (!sharedEraserState || !canUndoEraser) return
+    const history = sharedEraserState.eraserHistory ?? []
     const currentEntry = history[history.length - 1]
     const previousEntry = history[history.length - 2]
-    const nextTransform = transformWithEraserEntry(
-      transform,
+    if (!currentEntry || !previousEntry) return
+    const nextSharedState = sharedBackgroundWithEraserEntry(
       previousEntry,
       history.slice(0, -1),
-      [currentEntry, ...(transform.eraserRedoStack ?? [])]
+      [currentEntry, ...(sharedEraserState.eraserRedoStack ?? [])]
     )
-    persistTransforms({ ...repinTransforms, [selectedComp]: nextTransform })
+    persistSharedBackgrounds({ ...repinSharedBackgrounds, [sharedEraserVersionKey]: nextSharedState })
     setCanvasConfirmed(false)
   }
 
   const handleRedoEraser = () => {
-    if (!transform || !selectedComp || !canRedoEraser) return
-    const [redoEntry, ...remainingRedo] = transform.eraserRedoStack ?? []
-    const history = transform.eraserHistory?.length ? transform.eraserHistory : [eraserEntryFromTransform(transform)]
-    const nextTransform = transformWithEraserEntry(
-      transform,
+    if (!sharedEraserState || !canRedoEraser) return
+    const [redoEntry, ...remainingRedo] = sharedEraserState.eraserRedoStack ?? []
+    if (!redoEntry) return
+    const history = sharedEraserState.eraserHistory?.length ? sharedEraserState.eraserHistory : [eraserEntryFromSharedBackground(sharedEraserState)]
+    const nextSharedState = sharedBackgroundWithEraserEntry(
       redoEntry,
       [...history, redoEntry],
       remainingRedo
     )
-    persistTransforms({ ...repinTransforms, [selectedComp]: nextTransform })
+    persistSharedBackgrounds({ ...repinSharedBackgrounds, [sharedEraserVersionKey]: nextSharedState })
     setCanvasConfirmed(false)
   }
 
@@ -507,46 +565,56 @@ export default function Step4Repin() {
     const capturedTargetVersion = targetVersion
     const capturedParentFinalImagePath = parentFinalImagePath
     const capturedSourceVersionComponent = sourceVersionComponent
+    const capturedSourceVersionComponentId = sourceVersionComponentId
+    const capturedSharedEraserState = sharedEraserState
+    const capturedSharedEraserApplied = sharedEraserApplied
     const submittedTransforms = components
       .map(comp => {
         const item = repinTransforms[comp] ?? (comp === selectedComp ? transform : defaultTransformFor(comp))
         if (!item) return null
         const activeComponent = comp === selectedComp
-        const sameComponent = capturedSourceVersion > 1 && capturedSourceVersionComponent === comp
-        const magicEraserApplied = hasManualEraserBackground(item)
+        const sameComponent = capturedSourceVersion > 1 && (capturedSourceVersionComponentId ? capturedSourceVersionComponentId === comp : capturedSourceVersionComponent === comp)
+        const selectedOriginalComponentAsset = componentImageForId(comp)
+        const useEditableLayerFallback = !selectedOriginalComponentAsset
+        const baseTransform = transformForRepinSubmit(item, capturedSharedEraserState, activeComponent && sameComponent)
         return {
-          ...transformForRepinSubmit(item, magicEraserApplied || (activeComponent && sameComponent)),
-          componentKey: comp,
-          componentType: comp,
+          ...baseTransform,
+          componentId: comp,
+          componentKey: comp as ComponentKey,
+          componentType: componentTypeFor(comp),
           sourceVersion: capturedSourceVersion,
           targetVersion: capturedTargetVersion,
           rotation: item.rotation || 0,
           skewX: item.skewX || 0,
           skewY: item.skewY || 0,
-          editableLayerUrl: sameComponent ? item.editableLayerUrl ?? null : null,
-          repinBackgroundUrl: magicEraserApplied || (activeComponent && sameComponent) ? item.repinBackgroundUrl ?? null : null,
-          repinBackgroundDisplayUrl: magicEraserApplied || (activeComponent && sameComponent) ? item.repinBackgroundDisplayUrl ?? null : null,
+          editableLayerUrl: useEditableLayerFallback ? item.editableLayerUrl ?? null : null,
+          editableLayerPath: useEditableLayerFallback ? item.editableLayerPath ?? null : null,
+          repinBackgroundUrl: capturedSharedEraserApplied ? capturedSharedEraserState?.repinBackgroundUrl ?? null : (activeComponent && sameComponent ? item.repinBackgroundUrl ?? null : null),
+          repinBackgroundDisplayUrl: capturedSharedEraserApplied ? capturedSharedEraserState?.repinBackgroundDisplayUrl ?? capturedSharedEraserState?.repinBackgroundUrl ?? null : (activeComponent && sameComponent ? item.repinBackgroundDisplayUrl ?? null : null),
+          eraserHistory: capturedSharedEraserApplied ? capturedSharedEraserState?.eraserHistory ?? [] : baseTransform.eraserHistory,
+          eraserRedoStack: capturedSharedEraserApplied ? capturedSharedEraserState?.eraserRedoStack ?? [] : baseTransform.eraserRedoStack,
           feedbackOption: activeComponent ? feedbackOptions[0] ?? null : null,
           feedbackOptions: activeComponent ? feedbackOptions : [],
           sourceBaseMode,
+          sourceVersionComponentId: capturedSourceVersionComponentId,
           sourceVersionComponent: capturedSourceVersionComponent,
           parentVersionId: capturedSourceVersion,
           parentFinalImagePath: capturedParentFinalImagePath,
           activeComponentId: selectedComp,
-          activeComponentType: selectedComp,
+          activeComponentType: selectedComponentType,
           currentComponentMaskOrCrop: activeComponent ? (item.originalBbox ?? null) : null,
-          magicEraserApplied,
+          magicEraserApplied: capturedSharedEraserApplied,
         }
       })
       .filter(Boolean) as RepinTransform[]
 
-    const primaryPayload = submittedTransforms.find(item => item.componentKey === selectedComp) ?? submittedTransforms[0]
+    const primaryPayload = submittedTransforms.find(item => item.componentId === selectedComp) ?? submittedTransforms[0]
     if (!primaryPayload) return
 
     try {
       setGenerationStartedAt(Date.now())
       setGenerationElapsedSeconds(0)
-      persistTransforms(Object.fromEntries(submittedTransforms.map(item => [item.componentKey, item])) as Partial<Record<ComponentKey, RepinTransform>>)
+      persistTransforms(Object.fromEntries(submittedTransforms.map(item => [item.componentId ?? item.componentKey, transformWithoutSharedEraserState(item, capturedSharedEraserState)])) as Partial<Record<string, RepinTransform>>)
       await submitRepinPreview(primaryPayload, submittedTransforms)
       toast("Generating combined repin preview")
     } catch (error) {
@@ -660,12 +728,13 @@ export default function Step4Repin() {
                 key={String(sourceVersion) + ":" + (editingCanvasImageUrl ?? "base")}
                 imageUrl={editingCanvasImageUrl}
                 transform={transform}
-                label={COMP_LABELS[selectedComp]}
-                componentImageUrl={isGeneratedComponentReEdit ? (transform.editableLayerUrl ?? selectedComponentImageUrl ?? null) : (selectedComponentImageUrl ?? transform.editableLayerUrl ?? null)}
+                label={componentLabelFor(selectedComp)}
+                componentImageUrl={selectedComponentImageUrl ?? transform.editableLayerUrl ?? null}
                 staticLayers={staticComponentLayers}
                 eraserEnabled={eraserMode && !placementPreview}
                 eraserBrushSize={eraserBrushSize}
                 previewOnly={placementPreview}
+                showLabel={false}
                 onErase={handleEraseMask}
                 onEditStart={handleTransformEditStart}
                 onChange={handleTransformChange}
@@ -688,7 +757,7 @@ export default function Step4Repin() {
           </div>
 
           <div className="rounded-[6px] border border-[#E4E4E4] bg-[#FAFAFA] p-3">
-            <p className="text-xs font-semibold text-[#111827]">{selectedComp ? COMP_LABELS[selectedComp] : 'Component'}</p>
+            <p className="text-xs font-semibold text-[#111827]">{selectedComp ? componentLabelFor(selectedComp) : 'Component'}</p>
             <p className="mt-1 text-[11px] leading-4 text-[#6B7280]">
               Move the overlay or drag any corner independently to fit the camera perspective.
             </p>

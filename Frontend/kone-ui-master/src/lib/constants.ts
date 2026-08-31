@@ -1,4 +1,4 @@
-import type { ComponentItem, Environment, OfferingStep, BrochureSection, User } from '../types'
+import type { ComponentItem, Environment, OfferingStep, BrochureSection, User, ComponentKey, ComponentVariant, SemanticComponentKey } from '../types'
 
 export const KONE_COMPONENTS: ComponentItem[] = [
   {
@@ -7,13 +7,13 @@ export const KONE_COMPONENTS: ComponentItem[] = [
     description: 'KONE elevator interior unit',
     imageUrl: '/components/elevator-interior/A MonoSpace.png',
     variants: [
-      { id: 'a-monospace', label: 'A MonoSpace', imageUrl: '/components/elevator-interior/A MonoSpace.png' },
-      { id: 'i-monospace', label: 'I MonoSpace', imageUrl: '/components/elevator-interior/I MonoSpace.png' },
-      { id: 'ii-monospace', label: 'II MonoSpace', imageUrl: '/components/elevator-interior/II MonoSpace.png' },
-      { id: 'monospace-dx', label: 'MonoSpace DX', imageUrl: '/components/elevator-interior/MonoSpace DX.png' },
-      { id: 'monospace-dx1', label: 'MonoSpace DX1', imageUrl: '/components/elevator-interior/MonoSpace DX1.png' },
-      { id: 'monospace-dx2', label: 'MonoSpace DX2', imageUrl: '/components/elevator-interior/MonoSpace DX2.png' },
-      { id: 'art-deco', label: 'Art Deco', imageUrl: '/components/elevator-interior/Art Deco.png' },
+      { id: 'a-monospace', group: 'Elevator Interior - India', label: 'A MonoSpace', imageUrl: '/components/elevator-interior/A MonoSpace.png' },
+      { id: 'i-monospace', group: 'Elevator Interior - India', label: 'I MonoSpace', imageUrl: '/components/elevator-interior/I MonoSpace.png' },
+      { id: 'ii-monospace', group: 'Elevator Interior - India', label: 'II MonoSpace', imageUrl: '/components/elevator-interior/II MonoSpace.png' },
+      { id: 'monospace-dx', group: 'Elevator Interior - Indonesia/Singapore', label: 'MonoSpace DX', imageUrl: '/components/elevator-interior/MonoSpace DX.png' },
+      { id: 'monospace-dx1', group: 'Elevator Interior - Indonesia/Singapore', label: 'MonoSpace DX1', imageUrl: '/components/elevator-interior/MonoSpace DX1.png' },
+      { id: 'monospace-dx2', group: 'Elevator Interior - Indonesia/Singapore', label: 'MonoSpace DX2', imageUrl: '/components/elevator-interior/MonoSpace DX2.png' },
+      { id: 'art-deco', group: 'Elevator Interior - India', label: 'Art Deco', imageUrl: '/components/elevator-interior/Art Deco.png' },
     ],
   },
   {
@@ -28,14 +28,14 @@ export const KONE_COMPONENTS: ComponentItem[] = [
       { id: 'kds90-lci-flush-up-down', group: 'KDS90', label: 'Landing Call Indicator Flush - Up/Down', imageUrl: '/components/lci/KDS90/Landing Call Indicator Flush - Up Down.png' },
       { id: 'kds90-lci-surface-up-down', group: 'KDS90', label: 'Landing Call Indicator Surface - Up/Down', imageUrl: '/components/lci/KDS90/Landing Call Indicator Surface - UpDown.png' },
       { id: 'kds90-car-interface-dot-matrix', group: 'KDS90', label: 'Car Interface - Dot Matrix', imageUrl: '/components/lci/KDS90/Car Interface - Dot Matrix.png' },
-      { id: 'kds330-lci-flush', group: 'KDS330', label: 'Landing Call Indicator Flush', imageUrl: '/components/lci/KDS330/Landing Call Indicator Flush.png' },
-      { id: 'kds330-lci-surface', group: 'KDS330', label: 'Landing Call Indicator Surface', imageUrl: '/components/lci/KDS330/Landing Call Indicator Surface.png' },
-      { id: 'kds330-hall-lantern-flush-up-down', group: 'KDS330', label: 'Hall Lantern Flush - Up/Down', imageUrl: '/components/lci/KDS330/Hall Lantern Flush - Up Down.png' },
-      { id: 'kds330-hall-lantern-surface', group: 'KDS330', label: 'Hall Lantern Surface', imageUrl: '/components/lci/KDS330/Hall Lantern Surface.png' },
-      { id: 'kds330-hall-indicator-flush-7-segment', group: 'KDS330', label: 'Hall Indicator Flush - 7 Segment', imageUrl: '/components/lci/KDS330/Hall Indicator Flush - 7 Segment.png' },
-      { id: 'kds330-hall-indicator-surface', group: 'KDS330', label: 'Hall Indicator Surface', imageUrl: '/components/lci/KDS330/Hall Indicator Surface.png' },
-      { id: 'kds330-landing-call-station-flush', group: 'KDS330', label: 'Landing Call Station Flush', imageUrl: '/components/lci/KDS330/Landing Call Station Flush.png' },
-      { id: 'kds330-landing-call-station-surface', group: 'KDS330', label: 'Landing Call Station Surface', imageUrl: '/components/lci/KDS330/Landing Call Station Surface.png' },
+      { id: 'kds330-lci-flush', group: 'KDS330/93', label: 'Landing Call Indicator Flush', imageUrl: '/components/lci/KDS330/Landing Call Indicator Flush.png' },
+      { id: 'kds330-lci-surface', group: 'KDS330/93', label: 'Landing Call Indicator Surface', imageUrl: '/components/lci/KDS330/Landing Call Indicator Surface.png' },
+      { id: 'kds330-hall-lantern-flush-up-down', group: 'KDS330/93', label: 'Hall Lantern Flush - Up/Down', imageUrl: '/components/lci/KDS330/Hall Lantern Flush - Up Down.png' },
+      { id: 'kds330-hall-lantern-surface', group: 'KDS330/93', label: 'Hall Lantern Surface', imageUrl: '/components/lci/KDS330/Hall Lantern Surface.png' },
+      { id: 'kds330-hall-indicator-flush-7-segment', group: 'KDS330/93', label: 'Hall Indicator Flush - 7 Segment', imageUrl: '/components/lci/KDS330/Hall Indicator Flush - 7 Segment.png' },
+      { id: 'kds330-hall-indicator-surface', group: 'KDS330/93', label: 'Hall Indicator Surface', imageUrl: '/components/lci/KDS330/Hall Indicator Surface.png' },
+      { id: 'kds330-landing-call-station-flush', group: 'KDS330/93', label: 'Landing Call Station Flush', imageUrl: '/components/lci/KDS330/Landing Call Station Flush.png' },
+      { id: 'kds330-landing-call-station-surface', group: 'KDS330/93', label: 'Landing Call Station Surface', imageUrl: '/components/lci/KDS330/Landing Call Station Surface.png' },
     ],
   },
   {
@@ -61,12 +61,12 @@ export const KONE_COMPONENTS: ComponentItem[] = [
     description: 'KONE door system',
     imageUrl: '/components/door/Plain Stainless Steel Door.png',
     variants: [
-      { id: 'plain-stainless-steel-door', label: 'Plain Stainless Steel Door', imageUrl: '/components/door/Plain Stainless Steel Door.png' },
-      { id: 'stainless-steel-door', label: 'Stainless Steel Door', imageUrl: '/components/door/Solid Stainless Steel Door.png' },
-      { id: 'small-vision-glass-door', label: 'Small Vision Glass Door', imageUrl: '/components/door/Small vision glass door .png' },
-      { id: 'half-glass-door', label: 'Half Glass Door', imageUrl: '/components/door/Half glass door.png' },
-      { id: 'framed-full-glass-door', label: 'Framed Full Glass Door', imageUrl: '/components/door/Framed full glass door.png' },
-      { id: 'frameless-full-glass-door', label: 'Frameless Full Glass Door', imageUrl: '/components/door/Frameless full glass door.png' },
+      { id: 'plain-stainless-steel-door', group: 'Door', label: 'Plain Stainless Steel Door', imageUrl: '/components/door/Plain Stainless Steel Door.png' },
+      { id: 'stainless-steel-door', group: 'Door', label: 'Stainless Steel Door', imageUrl: '/components/door/Solid Stainless Steel Door.png' },
+      { id: 'small-vision-glass-door', group: 'Door', label: 'Small Vision Glass Door', imageUrl: '/components/door/Small vision glass door .png' },
+      { id: 'half-glass-door', group: 'Door', label: 'Half Glass Door', imageUrl: '/components/door/Half glass door.png' },
+      { id: 'framed-full-glass-door', group: 'Door', label: 'Framed Full Glass Door', imageUrl: '/components/door/Framed full glass door.png' },
+      { id: 'frameless-full-glass-door', group: 'Door', label: 'Frameless Full Glass Door', imageUrl: '/components/door/Frameless full glass door.png' },
     ],
   },
   {
@@ -82,6 +82,46 @@ export const KONE_COMPONENTS: ComponentItem[] = [
     ],
   },
 ]
+
+export const KDS_INSTANCE_KEYS = ['kds', 'kds_2', 'kds_3'] as const
+
+export function isKdsInstanceKey(key: string | null | undefined): key is typeof KDS_INSTANCE_KEYS[number] {
+  return KDS_INSTANCE_KEYS.includes(key as typeof KDS_INSTANCE_KEYS[number])
+}
+
+export function semanticComponentKey(key: ComponentKey): SemanticComponentKey {
+  return isKdsInstanceKey(key) ? 'kds' : key as SemanticComponentKey
+}
+
+export function componentByKey(key: ComponentKey) {
+  const semanticKey = semanticComponentKey(key)
+  return KONE_COMPONENTS.find(component => component.key === semanticKey)
+}
+
+export function componentVariantsFor(key: ComponentKey): ComponentVariant[] {
+  const component = componentByKey(key)
+  if (component?.variants?.length) return component.variants
+  return component?.imageUrl ? [{ id: key + '-default', label: component.label, imageUrl: component.imageUrl }] : []
+}
+
+export function componentDefaultAsset(key: ComponentKey) {
+  return componentVariantsFor(key)[0]?.imageUrl ?? componentByKey(key)?.imageUrl ?? null
+}
+
+export function variantForAsset(key: ComponentKey, assetUrl: string | null | undefined) {
+  const variants = componentVariantsFor(key)
+  return variants.find(variant => variant.imageUrl === assetUrl) ?? variants[0] ?? null
+}
+
+export function componentDisplayLabel(key: ComponentKey, assetUrl?: string | null) {
+  if (isKdsInstanceKey(key)) {
+    const instanceLabel = key === 'kds' ? 'KDS' : key === 'kds_2' ? 'KDS 2' : 'KDS 3'
+    const variant = assetUrl ? variantForAsset(key, assetUrl) : null
+    return variant ? instanceLabel + ' - ' + variant.label : instanceLabel
+  }
+  return componentByKey(key)?.label ?? key
+}
+
 
 export const ENVIRONMENTS: { key: Environment; label: string }[] = [
   { key: 'car', label: 'Car' },
@@ -157,6 +197,8 @@ export const GUEST_USER: User = {
 export const AI_PLACEMENT_DEFAULTS = {
   ceiling: { x: 50, y: 10 },
   kds: { x: 78, y: 40 },
+  kds_2: { x: 78, y: 48 },
+  kds_3: { x: 78, y: 56 },
   dcs1020: { x: 68, y: 46 },
   lci: { x: 78, y: 40 },
   door: { x: 20, y: 55 },

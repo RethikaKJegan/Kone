@@ -7,12 +7,13 @@ import { useOfferingStore } from '../../../store/offeringStore'
 import { ImageCanvas } from '../../../components/shared/ImageCanvas'
 import { AIBadge } from '../../../components/shared/AIBadge'
 import { Skeleton } from '../../../components/ui/skeleton'
-import { KONE_COMPONENTS } from '../../../lib/constants'
+import { componentDisplayLabel } from '../../../lib/constants'
 import { toast } from '../../../hooks/useToast'
 import { safeSystemErrorMessage } from '../../../lib/safeErrors'
 import type { ComponentKey, ComponentPin } from '../../../types'
 
-const COMP_LABELS = Object.fromEntries(KONE_COMPONENTS.map(c => [c.key, c.label])) as Record<ComponentKey, string>
+const COMPONENT_LABEL_KEYS: ComponentKey[] = ['ceiling', 'kds', 'kds_2', 'kds_3', 'dcs1020', 'lci', 'door', 'cop']
+const COMP_LABELS = Object.fromEntries(COMPONENT_LABEL_KEYS.map(key => [key, componentDisplayLabel(key)])) as Record<ComponentKey, string>
 function formatPreviewTime(seconds: number) {
   if (seconds <= 0) return 'less than 1 sec'
   const minutes = Math.floor(seconds / 60)

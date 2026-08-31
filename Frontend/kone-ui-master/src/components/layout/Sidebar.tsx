@@ -1,5 +1,5 @@
 import { NavLink, useNavigate, useMatch, Link } from 'react-router-dom'
-import { Layers, LogOut, ArrowLeft } from 'lucide-react'
+import { Layers, LogOut } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useOfferingStore } from '../../store/offeringStore'
 import { StepProgress } from '../shared/StepProgress'

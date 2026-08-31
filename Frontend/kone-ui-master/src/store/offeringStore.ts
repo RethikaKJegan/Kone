@@ -2,9 +2,9 @@ import { create } from 'zustand'
 import apiClient from '../api/client'
 import { getGuestSessionId, isGuestSession } from '../api/guestWorkflow'
 import { safeSystemErrorMessage } from '../lib/safeErrors'
-import { KONE_COMPONENTS } from '../lib/constants'
+import { componentDefaultAsset } from '../lib/constants'
 import { useProjectStore } from './projectStore'
-import type { Offering, OfferingStep, Environment, ComponentKey, ComponentPin, RepinTransform } from '../types'
+import type { Offering, OfferingStep, Environment, ComponentKey, ComponentPin, ComponentInstanceSelection, EraserHistoryEntry, RepinSharedBackgroundState, RepinTransform } from '../types'
 
 type ComponentAssetMap = Partial<Record<ComponentKey, string>>
 type VideoGenerationState = {
@@ -66,6 +66,7 @@ function makeGuestOffering(projectId: string): Offering {
     environments: [],
     selectedComponents: [],
     selectedComponentAssets: {},
+    componentInstances: [],
     componentPins: [],
     annotationsEnabled: true,
     activeAnnotationFilters: [],
@@ -81,6 +82,7 @@ function makeGuestOffering(projectId: string): Offering {
     repinPass: 0,
     videoGenerated: false,
     downloadUrl: null,
+    repinSharedBackgrounds: {},
   }
 }
 
@@ -95,12 +97,13 @@ interface OfferingState {
   updateOfferingName: (projectId: string, offeringId: string, name: string) => Promise<Offering>
   deleteOffering: (projectId: string, offeringId: string) => Promise<void>
   setUpload: (file: File) => Promise<void>
-  setComponents: (environments: Environment[], components: ComponentKey[], componentAssets?: ComponentAssetMap) => Promise<void>
+  setComponents: (environments: Environment[], components: ComponentKey[], componentAssets?: ComponentAssetMap, componentInstances?: ComponentInstanceSelection[]) => Promise<void>
   setPins: (pins: ComponentPin[]) => void
-  setRepinTransforms: (transforms: Partial<Record<ComponentKey, RepinTransform>>) => void
+  setRepinTransforms: (transforms: Partial<Record<string, RepinTransform>>) => void
+  setRepinSharedBackgrounds: (backgrounds: Record<string, RepinSharedBackgroundState>) => void
   runAIPlacement: () => Promise<ComponentPin[]>
   submitRepinPreview: (transform: RepinTransform, transforms?: RepinTransform[]) => Promise<void>
-  eraseRepinBackground: (transform: RepinTransform, maskDataUrl: string, sourceVersion: number, sourceBaseMode: 'original' | 'version') => Promise<RepinTransform>
+  eraseRepinBackground: (transform: RepinTransform, maskDataUrl: string, sourceVersion: number, sourceBaseMode: 'original' | 'version') => Promise<RepinSharedBackgroundState>
   setAnnotationState: (enabled: boolean, filters: ComponentKey[]) => void
   setVideoSettings: (
     settings: Partial<Pick<Offering, 'videoMotionStyle' | 'videoSpeed' | 'videoQuality'>>
@@ -118,21 +121,100 @@ function patchOffering(offering: Offering, updates: Partial<Offering>): Offering
   return { ...offering, ...updates }
 }
 
+function stripLocalRepinPath(transform: RepinTransform): RepinTransform {
+  return { ...transform, repinBackgroundPath: null }
+}
 
-function eraserEntryFromTransform(transform: RepinTransform) {
+function stripLocalRepinTransformPaths(repinTransforms: Partial<Record<string, RepinTransform>>): Partial<Record<string, RepinTransform>> {
+  return Object.fromEntries(
+    Object.entries(repinTransforms).map(([key, transform]) => [key, transform ? stripLocalRepinPath(transform) : transform])
+  ) as Partial<Record<string, RepinTransform>>
+}
+
+
+function eraserEntryFromTransform(transform: RepinTransform): EraserHistoryEntry {
   return {
     repinBackgroundUrl: transform.repinBackgroundUrl ?? null,
     repinBackgroundDisplayUrl: transform.repinBackgroundDisplayUrl ?? transform.repinBackgroundUrl ?? null,
   }
 }
 
-function transformWithEraserEntry(transform: RepinTransform, entry: ReturnType<typeof eraserEntryFromTransform>, eraserHistory: ReturnType<typeof eraserEntryFromTransform>[], eraserRedoStack: ReturnType<typeof eraserEntryFromTransform>[] = []): RepinTransform {
+function originalUploadEraserEntry(): EraserHistoryEntry {
   return {
-    ...transform,
+    repinBackgroundUrl: null,
+    repinBackgroundDisplayUrl: null,
+  }
+}
+
+function hasManualEraserTransform(transform: RepinTransform | null | undefined): transform is RepinTransform {
+  return Boolean(
+    (transform?.eraserHistory && transform.eraserHistory.length > 1) ||
+    (transform?.magicEraserApplied && transform?.repinBackgroundUrl)
+  )
+}
+
+function sharedBackgroundFromEntry(
+  entry: EraserHistoryEntry,
+  eraserHistory: EraserHistoryEntry[],
+  eraserRedoStack: EraserHistoryEntry[] = []
+): RepinSharedBackgroundState {
+  return {
     repinBackgroundUrl: entry.repinBackgroundUrl,
-    repinBackgroundDisplayUrl: entry.repinBackgroundDisplayUrl,
+    repinBackgroundDisplayUrl: entry.repinBackgroundDisplayUrl ?? entry.repinBackgroundUrl ?? null,
     eraserHistory,
     eraserRedoStack,
+  }
+}
+
+function sharedBackgroundFromTransform(transform: RepinTransform): RepinSharedBackgroundState {
+  const entry = eraserEntryFromTransform(transform)
+  return sharedBackgroundFromEntry(
+    entry,
+    transform.eraserHistory?.length ? transform.eraserHistory : [entry],
+    transform.eraserRedoStack ?? []
+  )
+}
+
+function deriveRepinSharedBackgrounds(repinTransforms: Partial<Record<string, RepinTransform>>): Record<string, RepinSharedBackgroundState> {
+  const selected: Record<string, { componentKey: string; depth: number; state: RepinSharedBackgroundState }> = {}
+  Object.entries(repinTransforms)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .forEach(([componentKey, transform]) => {
+      if (!hasManualEraserTransform(transform)) return
+      const versionKey = String(transform.sourceVersion)
+      const state = sharedBackgroundFromTransform(transform)
+      const depth = state.eraserHistory.length
+      const current = selected[versionKey]
+      if (!current || depth > current.depth || (depth === current.depth && componentKey.localeCompare(current.componentKey) < 0)) {
+        selected[versionKey] = { componentKey, depth, state }
+      }
+    })
+  return Object.fromEntries(Object.entries(selected).map(([versionKey, item]) => [versionKey, item.state]))
+}
+
+function transformWithSharedEraserState(transform: RepinTransform, sharedState: RepinSharedBackgroundState | null | undefined): RepinTransform {
+  if (!sharedState) return transform
+  return {
+    ...transform,
+    repinBackgroundUrl: sharedState.repinBackgroundUrl,
+    repinBackgroundDisplayUrl: sharedState.repinBackgroundDisplayUrl,
+    repinBackgroundPath: null,
+    eraserHistory: sharedState.eraserHistory,
+    eraserRedoStack: sharedState.eraserRedoStack,
+    magicEraserApplied: Boolean(sharedState.repinBackgroundUrl || sharedState.eraserHistory.length > 1 || transform.magicEraserApplied),
+  }
+}
+
+function transformWithoutSharedEraserState(transform: RepinTransform, sharedState: RepinSharedBackgroundState | null | undefined): RepinTransform {
+  if (!sharedState) return transform
+  return {
+    ...transform,
+    repinBackgroundUrl: null,
+    repinBackgroundDisplayUrl: null,
+    repinBackgroundPath: null,
+    eraserHistory: [],
+    eraserRedoStack: [],
+    magicEraserApplied: false,
   }
 }
 
@@ -140,6 +222,16 @@ function normalizeOffering(offering: Offering): Offering {
   const uploadedFileUrl = offering.uploadedFileUrl ?? offering.inputImagePath ?? null
   const outputImageUrl = offering.outputImageUrl ?? offering.outputImagePath ?? null
   const outputVideoUrl = offering.outputVideoUrl ?? offering.outputVideoPath ?? null
+  const repinTransforms = stripLocalRepinTransformPaths(offering.repinTransforms ?? {})
+  const storedSharedBackgrounds = offering.repinSharedBackgrounds ?? {}
+  const repinSharedBackgrounds = Object.keys(storedSharedBackgrounds).length > 0
+    ? storedSharedBackgrounds
+    : deriveRepinSharedBackgrounds(repinTransforms)
+  const previewVersions = (offering.previewVersions ?? (outputImageUrl ? [{ version: 1, url: outputImageUrl }] : [])).map(version => ({
+    ...version,
+    transform: version.transform ? stripLocalRepinPath(version.transform) : version.transform,
+    transforms: Array.isArray(version.transforms) ? version.transforms.map(stripLocalRepinPath) : version.transforms,
+  }))
   return {
     ...offering,
     uploadedFileUrl,
@@ -149,9 +241,10 @@ function normalizeOffering(offering: Offering): Offering {
     savedStep: offering.savedStep ?? 1,
     videoGenerated: Boolean(offering.videoGenerated ?? outputVideoUrl),
     downloadUrl: offering.downloadUrl ?? null,
-    previewVersions: offering.previewVersions ?? (outputImageUrl ? [{ version: 1, url: outputImageUrl }] : []),
+    previewVersions,
     repinPass: offering.repinPass ?? (offering.previewVersions?.length || (outputImageUrl ? 1 : 0)),
-    repinTransforms: offering.repinTransforms ?? {},
+    repinTransforms,
+    repinSharedBackgrounds,
     selectedComponentAssets: offering.selectedComponentAssets ?? {},
   }
 }
@@ -164,7 +257,7 @@ function saveGuestOfferings(state: { offerings: Record<string, Offering[]>; curr
   }
 }
 
-function componentSignature(environments: Environment[], components: ComponentKey[], componentAssets: ComponentAssetMap = {}) {
+function componentSignature(environments: Environment[], components: ComponentKey[], componentAssets: ComponentAssetMap = {}, componentInstances: ComponentInstanceSelection[] = []) {
   return JSON.stringify({
     environments: [...environments].sort(),
     components: [...components].sort(),
@@ -173,12 +266,17 @@ function componentSignature(environments: Environment[], components: ComponentKe
         .filter(([, value]) => Boolean(value))
         .sort(([a], [b]) => a.localeCompare(b))
     ),
+    componentInstances: componentInstances.map(instance => ({
+      id: instance.id,
+      componentType: instance.componentType,
+      variantId: instance.variantId,
+      assetUrl: instance.assetUrl,
+    })),
   })
 }
 
 function defaultComponentAsset(componentKey: ComponentKey) {
-  const component = KONE_COMPONENTS.find(item => item.key === componentKey)
-  return component?.variants?.[0]?.imageUrl ?? component?.imageUrl ?? null
+  return componentDefaultAsset(componentKey)
 }
 
 function componentAssetMap(components: ComponentKey[], selectedAssets: ComponentAssetMap = {}) {
@@ -390,6 +488,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
         previewVersions: [],
         repinPass: 0,
         repinTransforms: {},
+        repinSharedBackgrounds: {},
       })
       set(state => writeOfferingState(state, updated))
       return
@@ -415,6 +514,15 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
         previewImagePath: null,
         outputImagePath: null,
         outputVideoPath: null,
+        componentPins: [],
+        outputImageUrl: null,
+        outputVideoUrl: null,
+        downloadUrl: null,
+        previewRequestKey: null,
+        previewVersions: [],
+        repinPass: 0,
+        repinTransforms: {},
+        repinSharedBackgrounds: {},
         pipelineStatus: 'uploaded',
       })
       refreshProjects()
@@ -439,23 +547,25 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       previewVersions: [],
       repinPass: 0,
       repinTransforms: {},
+      repinSharedBackgrounds: {},
       ...(imageId ? { imageId } : {}),
     }
     const updated = patchOffering(currentOffering, updates)
     set(state => writeOfferingState(state, updated))
   },
 
-  setComponents: async (environments, components, selectedAssets = {}) => {
+  setComponents: async (environments, components, selectedAssets = {}, componentInstances = []) => {
     const { currentOffering } = get()
     if (!currentOffering) return
     const selectedComponents = components
     const selectedComponentAssets = componentAssetMap(selectedComponents, selectedAssets)
-    const previewRequestKey = componentSignature(environments, selectedComponents, selectedComponentAssets)
+    const previewRequestKey = componentSignature(environments, selectedComponents, selectedComponentAssets, componentInstances)
     const updates: Partial<Offering> = {
       status: 'active',
       environments,
       selectedComponents,
       selectedComponentAssets,
+      componentInstances,
       componentPins: [],
       activeAnnotationFilters: selectedComponents,
       renderComplete: false,
@@ -485,6 +595,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
         environments,
         selected_components: selectedComponents,
         component_assets: componentAssets,
+        component_instances: componentInstances,
         preview_request_key: previewRequestKey,
       })
     } else if (!isGuestSession()) {
@@ -492,6 +603,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
         environments,
         selectedComponents,
         selectedComponentAssets,
+        componentInstances,
         componentPins: [],
         activeAnnotationFilters: selectedComponents,
         renderComplete: false,
@@ -522,6 +634,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
           components: selectedComponents,
           environments,
           component_assets: componentAssets,
+          component_instances: componentInstances,
           preview_request_key: previewRequestKey,
         })
       }
@@ -546,6 +659,16 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       apiClient.patch(`/offerings/${currentOffering.id}`, { repinTransforms: transforms }).catch(() => {})
     }
     const updated = patchOffering(currentOffering, { repinTransforms: transforms })
+    set(state => writeOfferingState(state, updated))
+  },
+
+  setRepinSharedBackgrounds: backgrounds => {
+    const { currentOffering } = get()
+    if (!currentOffering) return
+    if (!isGuestSession()) {
+      apiClient.patch(`/offerings/${currentOffering.id}`, { repinSharedBackgrounds: backgrounds }).catch(() => {})
+    }
+    const updated = patchOffering(currentOffering, { repinSharedBackgrounds: backgrounds })
     set(state => writeOfferingState(state, updated))
   },
 
@@ -591,7 +714,8 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
     try {
       const submittedTransforms = (transforms?.length ? transforms : [transform])
       const transformComponents = submittedTransforms.map(item => item.componentKey)
-      const previewRequestKey = `repin:${currentOffering.id}:${transformComponents.join("-") || transform.componentKey}:v${transform.targetVersion}:${Date.now()}`
+      const transformIdentities = submittedTransforms.map(item => item.componentKey)
+      const previewRequestKey = `repin:${currentOffering.id}:${transformIdentities.join("-") || transform.componentKey}:v${transform.targetVersion}:${Date.now()}`
       const selectedComponents = Array.from(new Set([
         ...(currentOffering.selectedComponents.length ? currentOffering.selectedComponents : []),
         ...transformComponents,
@@ -599,7 +723,10 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       const selectedComponentAssets = componentAssetMap(selectedComponents, currentOffering.selectedComponentAssets)
       const confirmedRepinTransforms = {
         ...(currentOffering.repinTransforms ?? {}),
-        ...Object.fromEntries(submittedTransforms.map(item => [item.componentKey, item])),
+        ...Object.fromEntries(submittedTransforms.map(item => {
+          const sharedState = currentOffering.repinSharedBackgrounds?.[String(item.sourceVersion)]
+          return [item.componentId ?? item.componentKey, transformWithoutSharedEraserState(item, sharedState)]
+        })),
       }
       const updated = patchOffering(currentOffering, {
         pipelineStatus: 'processing',
@@ -613,9 +740,10 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
 
       if (isGuestSession()) {
         const sessionId = await getGuestSessionId()
-        const componentAssets = Object.fromEntries(
-          Object.entries(selectedComponentAssets)
-        )
+        const componentAssets = Object.fromEntries([
+          ...Object.entries(selectedComponentAssets),
+          ...(currentOffering.componentInstances ?? []).map(instance => [instance.id, instance.assetUrl]),
+        ])
         await apiClient.post('/guest/repin', {
           is_guest: true,
           session_id: sessionId,
@@ -631,9 +759,10 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
       } else {
         const imageId = imageIdFromOffering(currentOffering)
         if (!imageId) throw new Error('Uploaded image is not ready for repin')
-        const componentAssets = Object.fromEntries(
-          Object.entries(selectedComponentAssets)
-        )
+        const componentAssets = Object.fromEntries([
+          ...Object.entries(selectedComponentAssets),
+          ...(currentOffering.componentInstances ?? []).map(instance => [instance.id, instance.assetUrl]),
+        ])
         await apiClient.post('/video/repin', {
           imageId,
           offeringId: currentOffering.id,
@@ -658,6 +787,9 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
     if (!currentOffering) throw new Error('Offering is not ready')
     set({ isProcessing: true })
     try {
+      const versionKey = String(sourceVersion)
+      const currentSharedState = currentOffering.repinSharedBackgrounds?.[versionKey]
+      const requestTransform = transformWithSharedEraserState(transform, currentSharedState)
       let result: { repinBackgroundUrl: string; repinBackgroundDisplayUrl: string }
       if (isGuestSession()) {
         const sessionId = await getGuestSessionId()
@@ -669,7 +801,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
           source_version: sourceVersion,
           source_base_mode: sourceBaseMode,
           mask_data_url: maskDataUrl,
-          transform,
+          transform: requestTransform,
         }, { timeout: 0 })
         result = {
           repinBackgroundUrl: data.repinBackgroundUrl,
@@ -684,7 +816,7 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
           sourceVersion,
           sourceBaseMode,
           maskDataUrl,
-          transform,
+          transform: requestTransform,
         }, { timeout: 0 })
         result = {
           repinBackgroundUrl: data.repinBackgroundUrl,
@@ -695,18 +827,20 @@ export const useOfferingStore = create<OfferingState>()((set, get) => ({
         repinBackgroundUrl: result.repinBackgroundUrl,
         repinBackgroundDisplayUrl: result.repinBackgroundDisplayUrl,
       }
-      const eraserHistory = transform.eraserHistory?.length ? transform.eraserHistory : [eraserEntryFromTransform(transform)]
-      const nextTransform = transformWithEraserEntry(transform, nextEntry, [...eraserHistory, nextEntry], [])
-      const repinTransforms = {
-        ...(currentOffering.repinTransforms ?? {}),
-        [transform.componentKey]: nextTransform,
+      const eraserHistory = currentSharedState?.eraserHistory?.length
+        ? currentSharedState.eraserHistory
+        : [originalUploadEraserEntry()]
+      const nextSharedState = sharedBackgroundFromEntry(nextEntry, [...eraserHistory, nextEntry], [])
+      const repinSharedBackgrounds = {
+        ...(currentOffering.repinSharedBackgrounds ?? {}),
+        [versionKey]: nextSharedState,
       }
-      const updated = patchOffering(currentOffering, { repinTransforms })
+      const updated = patchOffering(currentOffering, { repinSharedBackgrounds })
       set(state => ({ ...writeOfferingState(state, updated), isProcessing: false }))
       if (!isGuestSession()) {
-        apiClient.patch(`/offerings/${currentOffering.id}`, { repinTransforms }).catch(() => {})
+        apiClient.patch(`/offerings/${currentOffering.id}`, { repinSharedBackgrounds }).catch(() => {})
       }
-      return nextTransform
+      return nextSharedState
     } catch (error) {
       set({ isProcessing: false })
       console.error('[offeringStore] Magic Eraser failed', error)

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { semanticComponentKey } from '../../lib/constants'
 import type { ComponentKey, ComponentPin, RepinTransform } from '../../types'
 
 interface Props {
@@ -10,6 +11,7 @@ interface Props {
   eraserEnabled?: boolean
   eraserBrushSize?: number
   previewOnly?: boolean
+  showLabel?: boolean
   onErase?: (maskDataUrl: string) => void
   onEditStart?: (transform: RepinTransform) => void
   onChange: (transform: RepinTransform) => void
@@ -160,7 +162,7 @@ export function repinTransformFromPin(
     const [x1, y1, x2, y2] = pin.bbox
     const base = {
       componentKey,
-      componentType: componentKey,
+      componentType: semanticComponentKey(componentKey),
       sourceVersion,
       targetVersion,
       x: round(clamp(x1, 0, Math.max(0, sourceWidth - MIN_SIZE))),
@@ -191,7 +193,7 @@ export function repinTransformFromPin(
   const cy = ((pin?.y ?? 50) / 100) * imageSize.height
   const base = {
     componentKey,
-    componentType: componentKey,
+    componentType: semanticComponentKey(componentKey),
     sourceVersion,
     targetVersion,
     x: round(clamp(cx - width / 2, 0, Math.max(0, imageSize.width - MIN_SIZE))),
@@ -215,6 +217,50 @@ export function repinTransformFromPin(
   return { ...base, points: pointsFromRect(base) }
 }
 
+function normalizeTransformForCanvas(transform: RepinTransform, imageSize: { width: number; height: number }): RepinTransform {
+  const transformImageSize = {
+    width: Math.max(1, finiteNumber(transform.imageWidth, imageSize.width)),
+    height: Math.max(1, finiteNumber(transform.imageHeight, imageSize.height)),
+  }
+  const fallback = repinTransformFromPin(transform.componentKey, transform.sourceVersion, transform.targetVersion, null, transformImageSize)
+  const rawX = finiteNumber(transform.x, fallback.x)
+  const rawY = finiteNumber(transform.y, fallback.y)
+  const rawWidth = finiteNumber(transform.width, fallback.width)
+  const rawHeight = finiteNumber(transform.height, fallback.height)
+  const isUsable =
+    rawWidth >= MIN_SIZE &&
+    rawHeight >= MIN_SIZE &&
+    rawX >= 0 &&
+    rawY >= 0 &&
+    rawX <= transformImageSize.width - MIN_SIZE &&
+    rawY <= transformImageSize.height - MIN_SIZE
+  const base = isUsable ? transform : fallback
+  const x = round(clamp(finiteNumber(base.x, fallback.x), 0, Math.max(0, transformImageSize.width - MIN_SIZE)))
+  const y = round(clamp(finiteNumber(base.y, fallback.y), 0, Math.max(0, transformImageSize.height - MIN_SIZE)))
+  const rectBase = {
+    x,
+    y,
+    width: round(clamp(finiteNumber(base.width, fallback.width), MIN_SIZE, transformImageSize.width - x)),
+    height: round(clamp(finiteNumber(base.height, fallback.height), MIN_SIZE, transformImageSize.height - y)),
+  }
+  const sourcePoints = clampPoints(validQuadPoints(base.points) ? base.points : pointsFromRect(rectBase), transformImageSize)
+  const scaleX = imageSize.width / transformImageSize.width
+  const scaleY = imageSize.height / transformImageSize.height
+  const points = sourcePoints.map(point => ({ x: round(point.x * scaleX), y: round(point.y * scaleY) })) as QuadPoints
+  const bbox = boundingBoxFromPoints(points, imageSize)
+  return {
+    ...base,
+    ...bbox,
+    points,
+    rotation: finiteNumber(base.rotation, 0),
+    skewX: finiteNumber(base.skewX, 0),
+    skewY: finiteNumber(base.skewY, 0),
+    coordinateSpace: 'pixels' as const,
+    imageWidth: imageSize.width,
+    imageHeight: imageSize.height,
+  }
+}
+
 function layerBox(transform: RepinTransform, imageSize: { width: number; height: number }) {
   const scaleX = imageSize.width / Math.max(1, transform.imageWidth || imageSize.width)
   const scaleY = imageSize.height / Math.max(1, transform.imageHeight || imageSize.height)
@@ -236,7 +282,7 @@ function layerBox(transform: RepinTransform, imageSize: { width: number; height:
   return { bbox, relativePolygon }
 }
 
-export function RepinTransformCanvas({ imageUrl, transform, label, componentImageUrl, staticLayers = [], eraserEnabled = false, eraserBrushSize = 32, previewOnly = false, onErase, onEditStart, onChange }: Props) {
+export function RepinTransformCanvas({ imageUrl, transform, label, componentImageUrl, staticLayers = [], eraserEnabled = false, eraserBrushSize = 32, previewOnly = false, showLabel = true, onErase, onEditStart, onChange }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const eraserCanvasRef = useRef<HTMLCanvasElement>(null)
   const eraserDrawingRef = useRef(false)
@@ -244,49 +290,7 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
   const dragRef = useRef<{ mode: DragMode; startX: number; startY: number; start: RepinTransform } | null>(null)
   const [imageSize, setImageSize] = useState({ width: transform.imageWidth || 1000, height: transform.imageHeight || 750 })
 
-  const normalized = useMemo(() => {
-    const transformImageSize = {
-      width: Math.max(1, finiteNumber(transform.imageWidth, imageSize.width)),
-      height: Math.max(1, finiteNumber(transform.imageHeight, imageSize.height)),
-    }
-    const fallback = repinTransformFromPin(transform.componentKey, transform.sourceVersion, transform.targetVersion, null, transformImageSize)
-    const rawX = finiteNumber(transform.x, fallback.x)
-    const rawY = finiteNumber(transform.y, fallback.y)
-    const rawWidth = finiteNumber(transform.width, fallback.width)
-    const rawHeight = finiteNumber(transform.height, fallback.height)
-    const isUsable =
-      rawWidth >= MIN_SIZE &&
-      rawHeight >= MIN_SIZE &&
-      rawX >= 0 &&
-      rawY >= 0 &&
-      rawX <= transformImageSize.width - MIN_SIZE &&
-      rawY <= transformImageSize.height - MIN_SIZE
-    const base = isUsable ? transform : fallback
-    const x = round(clamp(finiteNumber(base.x, fallback.x), 0, Math.max(0, transformImageSize.width - MIN_SIZE)))
-    const y = round(clamp(finiteNumber(base.y, fallback.y), 0, Math.max(0, transformImageSize.height - MIN_SIZE)))
-    const rectBase = {
-      x,
-      y,
-      width: round(clamp(finiteNumber(base.width, fallback.width), MIN_SIZE, transformImageSize.width - x)),
-      height: round(clamp(finiteNumber(base.height, fallback.height), MIN_SIZE, transformImageSize.height - y)),
-    }
-    const sourcePoints = clampPoints(validQuadPoints(base.points) ? base.points : pointsFromRect(rectBase), transformImageSize)
-    const scaleX = imageSize.width / transformImageSize.width
-    const scaleY = imageSize.height / transformImageSize.height
-    const points = sourcePoints.map(point => ({ x: round(point.x * scaleX), y: round(point.y * scaleY) })) as QuadPoints
-    const bbox = boundingBoxFromPoints(points, imageSize)
-    return {
-      ...base,
-      ...bbox,
-      points,
-      rotation: finiteNumber(base.rotation, 0),
-      skewX: finiteNumber(base.skewX, 0),
-      skewY: finiteNumber(base.skewY, 0),
-      coordinateSpace: 'pixels' as const,
-      imageWidth: imageSize.width,
-      imageHeight: imageSize.height,
-    }
-  }, [transform, imageSize])
+  const normalized = useMemo(() => normalizeTransformForCanvas(transform, imageSize), [transform, imageSize])
 
   const setTransform = (next: RepinTransform) => {
     const points = clampPoints(validQuadPoints(next.points) ? next.points : pointsFromRect(next), imageSize)
@@ -403,14 +407,14 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
     if (canvas && onErase) onErase(compactMaskDataUrl(canvas))
   }
 
-  const beginDrag = (event: React.PointerEvent, mode: DragMode) => {
+  const beginDrag = (event: React.PointerEvent, mode: DragMode, startTransform: RepinTransform = normalized) => {
     if (eraserEnabled || previewOnly) return
     const point = pointFromEvent(event)
     if (!point) return
     event.preventDefault()
     event.stopPropagation()
-    onEditStart?.(normalized)
-    dragRef.current = { mode, startX: point.x, startY: point.y, start: normalized }
+    onEditStart?.(startTransform)
+    dragRef.current = { mode, startX: point.x, startY: point.y, start: startTransform }
     ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
   }
 
@@ -531,10 +535,9 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
               key={layer.transform.componentKey + ":" + layer.label}
               className={layer.onSelect ? "absolute cursor-pointer overflow-hidden" : "pointer-events-none absolute overflow-hidden"}
               onPointerDown={event => {
-                if (!layer.onSelect) return
-                event.preventDefault()
-                event.stopPropagation()
+                if (!layer.onSelect || eraserEnabled || previewOnly) return
                 layer.onSelect()
+                beginDrag(event, 'move', normalizeTransformForCanvas(layer.transform, imageSize))
               }}
               style={{
                 left: String((box.bbox.x / imageSize.width) * 100) + "%",
@@ -605,7 +608,7 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
           />
         ) : null}
 
-        {!previewOnly && (
+        {showLabel && !previewOnly && (
         <div
           className="pointer-events-none absolute rounded-[3px] bg-[#0A0A0A]/85 px-1.5 py-0.5 text-[10px] font-medium text-white"
           style={{ left: `${(center.x / imageSize.width) * 100}%`, top: `${(center.y / imageSize.height) * 100}%`, transform: 'translate(-50%, -50%)' }}

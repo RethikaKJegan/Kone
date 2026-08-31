@@ -94,6 +94,33 @@ class PipelineValidationError(RuntimeError):
     pass
 
 
+KDS_INSTANCE_KEYS: set[str] = {"kds", "kds_2", "kds_3"}
+
+
+def semantic_component_key(component: str) -> str:
+    normalized = str(component or "").strip().lower()
+    return "kds" if normalized in KDS_INSTANCE_KEYS else normalized
+
+
+def _placement_bbox_from_debug(placement_debug: dict[str, Any], fallback_bbox: list[int] | tuple[int, int, int, int] | None = None) -> list[int] | None:
+    candidates: list[Any] = [
+        placement_debug.get("final_insertion_bbox"),
+        (placement_debug.get("final_component_placement") or {}).get("bbox") if isinstance(placement_debug.get("final_component_placement"), dict) else None,
+        placement_debug.get("insert_bbox"),
+        placement_debug.get("inpaint_bbox"),
+        placement_debug.get("selected_target_bbox"),
+        placement_debug.get("selected_replacement_target_bbox"),
+        fallback_bbox,
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, (list, tuple)) and len(candidate) == 4:
+            try:
+                return [int(round(float(value))) for value in candidate]
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
 COMPONENT_REPLACEMENT_PRESETS: dict[str, dict[str, Any]] = {
     "cop": {
         "id": "cop",
@@ -323,6 +350,9 @@ def run(config_path: str | Path) -> None:
         else:
             inpaint_background(working_image, removal_mask, cfg, cleaned_path)
         monitor.mark("inpaint_done")
+        shared_background_path = run_dir / "repin" / "backgrounds" / "shared_background.png"
+        shared_background_path.parent.mkdir(parents=True, exist_ok=True)
+        save_rgb(shared_background_path, load_image_rgb(cleaned_path))
         monitor.mark("insertion_start")
         current_background = cleaned_path
         combined_panel_mask = None
@@ -436,8 +466,27 @@ def replacement_configs(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         ]
         replacements: list[dict[str, Any]] = []
         missing_components: list[str] = []
+        component_instances = [item for item in (cfg.get("component_instances") or []) if isinstance(item, dict)]
+        if len(component_instances) > 3:
+            raise ValueError("A maximum of 3 KDS instances may be selected")
+        instance_variants = [str(item.get("variantId") or item.get("variant_id") or "").strip() for item in component_instances]
+        if len(set(instance_variants)) != len(instance_variants):
+            raise ValueError("The same KDS variant cannot be selected more than once")
+        instance_ids = {str(item.get("id") or "").strip().lower() for item in component_instances if str(item.get("id") or "").strip()}
+        for instance in component_instances:
+            instance_id = str(instance.get("id") or "").strip().lower()
+            component = semantic_component_key(str(instance.get("componentType") or instance.get("component_type") or "kds"))
+            replacement = _component_replacement(component, cfg, instance)
+            if replacement is None or not instance_id:
+                missing_components.append(instance_id or component)
+            else:
+                replacements.append(replacement)
         for component in selected:
-            replacement = _component_replacement(component, cfg)
+            if component in instance_ids:
+                continue
+            semantic_component = semantic_component_key(component)
+            instance = {"id": component, "componentType": semantic_component} if component != semantic_component else None
+            replacement = _component_replacement(semantic_component, cfg, instance)
             if replacement is None:
                 missing_components.append(component)
             else:
@@ -459,12 +508,15 @@ def replacement_configs(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     return replacements
 
 
-def _component_replacement(component: str, cfg: dict[str, Any]) -> dict[str, Any] | None:
+def _component_replacement(component: str, cfg: dict[str, Any], instance: dict[str, Any] | None = None) -> dict[str, Any] | None:
     preset = COMPONENT_REPLACEMENT_PRESETS.get(component)
     if preset is None:
         return None
     replacement = {key: value for key, value in preset.items() if key != "detection_labels"}
-    asset_override = (cfg.get("component_assets") or {}).get(component)
+    replacement["component_key"] = component
+    if instance:
+        replacement["id"] = str(instance.get("id") or replacement["id"])
+    asset_override = (cfg.get("component_assets") or {}).get(replacement["id"]) or (instance or {}).get("assetUrl") or (instance or {}).get("asset_url") or (cfg.get("component_assets") or {}).get(component)
     if asset_override:
         replacement["asset"] = str(asset_override)
     elif component == "ceiling":
@@ -493,7 +545,8 @@ def _extend_detection_labels(cfg: dict[str, Any], replacements: list[dict[str, A
     detection_cfg = cfg.setdefault("detection", {})
     labels = list(detection_cfg.get("labels") or [])
     for replacement in replacements:
-        preset = COMPONENT_REPLACEMENT_PRESETS.get(str(replacement.get("id", "")).lower())
+        component_key = str(replacement.get("component_key") or replacement.get("id", "")).lower()
+        preset = COMPONENT_REPLACEMENT_PRESETS.get(component_key)
         labels.extend(replacement.get("target_keywords", []))
         if preset:
             labels.extend(preset.get("detection_labels", []))
@@ -516,6 +569,76 @@ def component_config(cfg: dict[str, Any], replacement: dict[str, Any]) -> dict[s
         component_cfg["_requested_component_type"] = replacement["component_type"]
     component_cfg["_replacement_id"] = replacement["id"]
     return component_cfg
+
+
+def discover_placements(config_path: str | Path) -> dict[str, Any]:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    cfg = load_config(config_path)
+    run_dir = Path(cfg["run_dir"])
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    input_image = Path(cfg["input_image"])
+    replacements = replacement_configs(cfg)
+    preprocessed_path = run_dir / "preprocessed_input.png"
+    preprocessing_path = run_dir / "preprocessing.json"
+    detections_path = run_dir / "elevator_detections.json"
+    geometry_path = run_dir / "geometry.json"
+    depth_path = run_dir / "depth_map.npz"
+
+    if cfg.get("preprocessing", {}).get("enabled", True):
+        working_image = run_preprocessing(input_image, cfg, preprocessed_path, preprocessing_path)
+    else:
+        working_image = input_image
+
+    existing_detections = cfg["detection"].get("existing_json")
+    if existing_detections:
+        detections = load_json(existing_detections)
+        detections_path.write_text(Path(existing_detections).read_text(encoding="utf-8"), encoding="utf-8")
+    elif cfg["detection"].get("enabled", True):
+        from .detect import add_sam2_masks, run_detection
+
+        detections = run_detection(working_image, cfg, detections_path)
+        detections = add_sam2_masks(working_image, cfg, detections, detections_path)
+    elif detections_path.exists():
+        detections = load_json(detections_path)
+    else:
+        raise FileNotFoundError(f"Detection disabled but {detections_path} does not exist")
+
+    if cfg["geometry"].get("enabled", True):
+        from .geometry import run_geometry
+
+        geometry = run_geometry(working_image, detections, cfg, geometry_path, depth_path)
+    elif geometry_path.exists():
+        geometry = load_json(geometry_path)
+    else:
+        geometry = {"wall_plane": {"normal": [0, 0, 1]}, "homography": {"matrix_3x3": None}}
+
+    original = load_image_rgb(working_image)
+    placements: list[dict[str, Any]] = []
+    seen_semantic_components: set[str] = set()
+    for replacement in replacements:
+        semantic_key = semantic_component_key(str(replacement.get("component_key") or replacement.get("id") or ""))
+        if not semantic_key or semantic_key in seen_semantic_components:
+            continue
+        seen_semantic_components.add(semantic_key)
+        component_cfg = component_config(cfg, replacement)
+        bbox = preselect_mod_panel_placement(original, Path(replacement["asset"]), detections, component_cfg)
+        placement_debug = dict(component_cfg.get("_placement_debug") or {})
+        placements.append({
+            "id": semantic_key,
+            "component_key": semantic_key,
+            "component_type": replacement.get("component_type"),
+            "asset": replacement.get("asset"),
+            "bbox": _placement_bbox_from_debug(placement_debug, bbox),
+            "placement_debug": placement_debug,
+        })
+
+    return {
+        "placements": placements,
+        "detections": detections,
+        "geometry": geometry,
+        "working_image": str(working_image),
+    }
 
 
 def _wan22_video_config() -> dict[str, Any]:

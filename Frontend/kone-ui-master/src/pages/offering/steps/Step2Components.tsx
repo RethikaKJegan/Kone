@@ -1,151 +1,250 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Check, Eye, Search } from 'lucide-react'
+import { Check, Eye, Search, X } from 'lucide-react'
 import { useOfferingStore } from '../../../store/offeringStore'
-import { KONE_COMPONENTS } from '../../../lib/constants'
+import { KDS_INSTANCE_KEYS, componentByKey, componentDefaultAsset, componentDisplayLabel, componentVariantsFor, isKdsInstanceKey, semanticComponentKey, variantForAsset } from '../../../lib/constants'
 import { cn } from '../../../lib/utils'
 import { toast } from '../../../hooks/useToast'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../../components/ui/dialog'
-import type { Environment, ComponentKey, ComponentVariant } from '../../../types'
+import type { Environment, ComponentKey, ComponentInstanceSelection, ComponentVariant, SemanticComponentKey } from '../../../types'
 
-const ENV_COMPONENTS: Record<Environment, ComponentKey[]> = {
-  car: ['cop'],
-  lobby: ['kds', 'dcs1020', 'door', 'ceiling'],
+type CatalogGroupKind = 'structure' | 'kds' | 'single'
+type CatalogGroup = {
+  id: string
+  label: string
+  componentType: SemanticComponentKey
+  variantGroup: string
+  kind: CatalogGroupKind
 }
+
+const STEP2_GROUPS: CatalogGroup[] = [
+  { id: 'interior-india', label: 'Elevator Interior - India', componentType: 'ceiling', variantGroup: 'Elevator Interior - India', kind: 'structure' },
+  { id: 'interior-indonesia-singapore', label: 'Elevator Interior - Indonesia/Singapore', componentType: 'ceiling', variantGroup: 'Elevator Interior - Indonesia/Singapore', kind: 'structure' },
+  { id: 'kds90', label: 'KDS90', componentType: 'kds', variantGroup: 'KDS90', kind: 'kds' },
+  { id: 'kds330-93', label: 'KDS330/93', componentType: 'kds', variantGroup: 'KDS330/93', kind: 'kds' },
+  { id: 'dcs1020', label: 'DCS1020', componentType: 'dcs1020', variantGroup: 'DCS1020', kind: 'single' },
+  { id: 'door', label: 'Door', componentType: 'door', variantGroup: 'Door', kind: 'structure' },
+]
+
+const STRUCTURE_KEYS: ComponentKey[] = ['ceiling', 'door']
+const MAX_SELECTED_COMPONENTS = 5
 
 type ComponentAssetMap = Partial<Record<ComponentKey, string>>
 type PreviewImage = { title: string; subtitle: string; imageUrl: string }
 function displayImageUrl(imageUrl: string | null | undefined, version: string) {
   if (!imageUrl) return undefined
-  return imageUrl.startsWith('/components/') ? `${imageUrl}?v=${version}` : imageUrl
-}
-
-const UI_COMPONENTS = KONE_COMPONENTS.filter(component => component.key !== 'cop' && component.key !== 'lci')
-const UI_COMPONENT_KEYS = new Set<ComponentKey>(UI_COMPONENTS.map(component => component.key))
-
-function getAvailableComponents(envs: Environment[]): ComponentKey[] {
-  if (envs.length === 0) return []
-  return Array.from(new Set(envs.flatMap(e => ENV_COMPONENTS[e]))).filter(component => UI_COMPONENT_KEYS.has(component))
+  return imageUrl.startsWith('/components/') ? imageUrl + '?v=' + version : imageUrl
 }
 
 function normalizeEnvironments(): Environment[] {
   return ['lobby']
 }
 
-const COMPONENT_SLOTS: { id: string; label: string; keys: ComponentKey[] }[] = [
-  { id: 'kds', label: 'KDS90/KDS330', keys: ['kds'] },
-  { id: 'dcs1020', label: 'DCS1020', keys: ['dcs1020'] },
-  { id: 'elevator', label: 'Door or Elevator Interior', keys: ['door', 'ceiling'] },
-]
-
-function slotForComponent(component: ComponentKey) {
-  return COMPONENT_SLOTS.find(slot => slot.keys.includes(component))
+function groupVariants(group: CatalogGroup): ComponentVariant[] {
+  return componentVariantsFor(group.componentType).filter(variant => variant.group === group.variantGroup)
 }
 
-function normalizeSelectedComponents(components: ComponentKey[]): ComponentKey[] {
-  const visibleComponents = components
-    .map(component => component === 'lci' ? 'kds' : component)
-    .filter(component => UI_COMPONENT_KEYS.has(component))
-  return COMPONENT_SLOTS.flatMap(slot => visibleComponents.find(component => slot.keys.includes(component)) ?? [])
+function selectedKdsKeys(components: ComponentKey[]) {
+  return KDS_INSTANCE_KEYS.filter(key => components.includes(key)) as ComponentKey[]
 }
 
-function componentByKey(key: ComponentKey) {
-  return KONE_COMPONENTS.find(component => component.key === key)
+function selectedGroupAsset(group: CatalogGroup, components: ComponentKey[], assets: ComponentAssetMap) {
+  if (group.kind === 'kds') {
+    return selectedKdsKeys(components)
+      .map(key => assets[key])
+      .find(asset => asset && variantForAsset('kds', asset)?.group === group.variantGroup) ?? null
+  }
+  const key = group.componentType as ComponentKey
+  const asset = components.includes(key) ? assets[key] ?? null : null
+  return asset && groupVariants(group).some(variant => variant.imageUrl === asset) ? asset : null
 }
 
-function variantsFor(key: ComponentKey): ComponentVariant[] {
-  const component = componentByKey(key)
-  if (component?.variants?.length) return component.variants
-  return component?.imageUrl ? [{ id: `${key}-default`, label: component.label, imageUrl: component.imageUrl }] : []
+function groupForComponent(component: ComponentKey, assets: ComponentAssetMap) {
+  const variantGroup = variantForAsset(component, assets[component])?.group
+  return STEP2_GROUPS.find(group => group.componentType === semanticComponentKey(component) && group.variantGroup === variantGroup)
+    ?? STEP2_GROUPS.find(group => group.componentType === semanticComponentKey(component))
+    ?? STEP2_GROUPS[0]
 }
 
-function componentThumbnailFor(key: ComponentKey) {
-  if (key === 'ceiling') return '/components/ceiling.jpg'
-  if (key === 'door') return '/components/door.jpg'
-  return componentByKey(key)?.imageUrl ?? `/components/${key}.png`
+function firstFreeKdsKey(components: ComponentKey[]): ComponentKey | null {
+  return (KDS_INSTANCE_KEYS.find(key => !components.includes(key)) ?? null) as ComponentKey | null
 }
 
-function defaultAssetFor(key: ComponentKey) {
-  return variantsFor(key)[0]?.imageUrl ?? componentThumbnailFor(key)
+function normalizeSelectedComponents(components: ComponentKey[] = [], selections: ComponentInstanceSelection[] = []): ComponentKey[] {
+  const next: ComponentKey[] = []
+  const push = (key: ComponentKey) => {
+    if (!next.includes(key)) next.push(key)
+  }
+
+  const sourceComponents = components.length
+    ? components
+    : selections.map(selection => selection.id as ComponentKey)
+
+  sourceComponents.forEach(component => {
+    if (component === 'lci') push('kds')
+    else if (component === 'ceiling' || component === 'door' || component === 'dcs1020' || isKdsInstanceKey(component)) push(component)
+  })
+
+  const structures = next.filter(component => STRUCTURE_KEYS.includes(component))
+  const nonStructures = next.filter(component => !STRUCTURE_KEYS.includes(component))
+  return [...nonStructures, ...(structures.length ? [structures[structures.length - 1]] : [])].slice(0, MAX_SELECTED_COMPONENTS)
 }
 
-function selectedVariantFor(key: ComponentKey, assets: ComponentAssetMap) {
-  const variants = variantsFor(key)
-  return variants.find(variant => variant.imageUrl === assets[key]) ?? variants[0] ?? null
-}
-
-function normalizeAssetMap(components: ComponentKey[], assets: ComponentAssetMap): ComponentAssetMap {
+function normalizeAssetMap(components: ComponentKey[], assets: ComponentAssetMap = {}, selections: ComponentInstanceSelection[] = []): ComponentAssetMap {
+  const instanceAssets = Object.fromEntries(selections.map(selection => [selection.id, selection.assetUrl])) as ComponentAssetMap
   return Object.fromEntries(
     components
-      .map(key => [key, assets[key] ?? (key === 'kds' ? assets.lci : undefined) ?? defaultAssetFor(key)] as const)
+      .map(key => [key, assets[key] ?? instanceAssets[key] ?? assets[semanticComponentKey(key)] ?? componentDefaultAsset(key)] as const)
       .filter(([, value]) => Boolean(value))
   ) as ComponentAssetMap
 }
 
-function groupedVariants(variants: ComponentVariant[]) {
-  return variants.reduce<{ group: string | null; variants: ComponentVariant[] }[]>((groups, variant) => {
-    const group = variant.group ?? null
-    const existing = groups.find(item => item.group === group)
-    if (existing) {
-      existing.variants.push(variant)
-    } else {
-      groups.push({ group, variants: [variant] })
-    }
-    return groups
-  }, [])
+function normalizeKdsSelections(components: ComponentKey[], assets: ComponentAssetMap = {}, selections: ComponentInstanceSelection[] = []): ComponentInstanceSelection[] {
+  const variants = componentVariantsFor('kds')
+  const seenVariants = new Set<string>()
+  return selectedKdsKeys(components).flatMap(key => {
+    const existing = selections.find(selection => selection.id === key && selection.componentType === 'kds')
+    const variant = variants.find(item => item.imageUrl === assets[key])
+      ?? variants.find(item => item.id === existing?.variantId)
+      ?? variants.find(item => item.imageUrl === existing?.assetUrl)
+      ?? variants[0]
+    if (!variant || seenVariants.has(variant.id)) return []
+    seenVariants.add(variant.id)
+    return [{ id: key, componentType: 'kds' as const, variantId: variant.id, assetUrl: variant.imageUrl }]
+  })
 }
+
+function selectedVariantFor(key: ComponentKey, assets: ComponentAssetMap) {
+  return variantForAsset(key, assets[key])
+}
+
 
 export default function Step2Components() {
   const { projectId, offeringId } = useParams()
   const navigate = useNavigate()
   const { currentOffering, setComponents, goToStep } = useOfferingStore()
 
-  const initialComponents = normalizeSelectedComponents(currentOffering?.selectedComponents ?? [])
+  const initialComponents = normalizeSelectedComponents(currentOffering?.selectedComponents ?? [], currentOffering?.componentInstances ?? [])
+  const initialAssets = normalizeAssetMap(initialComponents, currentOffering?.selectedComponentAssets ?? {}, currentOffering?.componentInstances ?? [])
+  const initialKdsSelections = normalizeKdsSelections(initialComponents, initialAssets, currentOffering?.componentInstances ?? [])
   const [envs, setEnvs] = useState<Environment[]>(normalizeEnvironments())
   const [comps, setComps] = useState<ComponentKey[]>(initialComponents)
-  const [componentAssets, setComponentAssets] = useState<ComponentAssetMap>(
-    normalizeAssetMap(initialComponents, currentOffering?.selectedComponentAssets ?? {})
+  const [componentAssets, setComponentAssets] = useState<ComponentAssetMap>(initialAssets)
+  const [activeCatalogGroupId, setActiveCatalogGroupId] = useState<string>(
+    initialComponents[0] ? groupForComponent(initialComponents[0], initialAssets).id : STEP2_GROUPS[0].id
   )
-  const [activeComp, setActiveComp] = useState<ComponentKey | null>(initialComponents[0] ?? null)
+  const [editingInstanceKey, setEditingInstanceKey] = useState<ComponentKey | null>(null)
+  const [kdsSelections, setKdsSelections] = useState<ComponentInstanceSelection[]>(initialKdsSelections)
   const [previewImage, setPreviewImage] = useState<PreviewImage | null>(null)
   const [optionQuery, setOptionQuery] = useState('')
   const [componentImageVersion] = useState(() => String(Date.now()))
 
   useEffect(() => {
     if (currentOffering) {
-      const nextComponents = normalizeSelectedComponents(currentOffering.selectedComponents)
+      const nextComponents = normalizeSelectedComponents(currentOffering.selectedComponents, currentOffering.componentInstances ?? [])
+      const nextAssets = normalizeAssetMap(nextComponents, currentOffering.selectedComponentAssets ?? {}, currentOffering.componentInstances ?? [])
       setEnvs(normalizeEnvironments())
       setComps(nextComponents)
-      setComponentAssets(normalizeAssetMap(nextComponents, currentOffering.selectedComponentAssets ?? {}))
-      setActiveComp(current => current && nextComponents.includes(current) ? current : nextComponents[0] ?? null)
+      setComponentAssets(nextAssets)
+      setActiveCatalogGroupId(current => STEP2_GROUPS.some(group => group.id === current) ? current : (nextComponents[0] ? groupForComponent(nextComponents[0], nextAssets).id : STEP2_GROUPS[0].id))
+      setEditingInstanceKey(current => current && nextComponents.includes(current) ? current : null)
+      setKdsSelections(normalizeKdsSelections(nextComponents, nextAssets, currentOffering.componentInstances ?? []))
     }
   }, [currentOffering?.id])
 
-  const availableComponents = getAvailableComponents(envs)
-  const selectableComponents = availableComponents
+  const activeGroup = STEP2_GROUPS.find(group => group.id === activeCatalogGroupId) ?? STEP2_GROUPS[0]
+  const activeComp = activeGroup.componentType as ComponentKey
+  const activeVariants = groupVariants(activeGroup)
+  const filteredActiveVariants = activeVariants.filter(variant =>
+    variant.label.toLowerCase().includes(optionQuery.trim().toLowerCase())
+  )
+  const activeVariantGroups = [{ group: activeGroup.label, variants: filteredActiveVariants }]
+  const canContinue = envs.length > 0 && comps.length > 0
 
-  const toggleComp = (k: ComponentKey) => {
-    const slot = slotForComponent(k)
-    const nextComps = comps.includes(k)
-      ? comps.filter(c => c !== k)
-      : [...comps.filter(c => !slot?.keys.includes(c)), k]
-    setComps(nextComps)
-    setComponentAssets(prev => normalizeAssetMap(nextComps, prev))
-    setActiveComp(nextComps.includes(k) ? k : nextComps[0] ?? null)
+  const activateGroup = (group: CatalogGroup) => {
+    setActiveCatalogGroupId(group.id)
+    setEditingInstanceKey(current =>
+      group.kind === 'kds' && current && isKdsInstanceKey(current)
+        ? current
+        : null
+    )
     setOptionQuery('')
   }
 
-  const selectVariant = (componentKey: ComponentKey, variant: ComponentVariant) => {
-    const slot = slotForComponent(componentKey)
-    const nextComps = comps.includes(componentKey)
-      ? comps
-      : [...comps.filter(c => !slot?.keys.includes(c)), componentKey]
-    setComps(nextComps)
-    setComponentAssets(prev => normalizeAssetMap(nextComps, { ...prev, [componentKey]: variant.imageUrl }))
-    setActiveComp(componentKey)
+  const handleSelectedClick = (component: ComponentKey) => {
+    const group = groupForComponent(component, componentAssets)
+    setActiveCatalogGroupId(group.id)
+    setEditingInstanceKey(isKdsInstanceKey(component) ? component : null)
+    setOptionQuery('')
   }
 
-  const canContinue = envs.length > 0 && comps.length > 0
+  const handleRemoveSelected = (component: ComponentKey) => {
+    const nextComps = comps.filter(item => item !== component)
+    const nextAssets = { ...componentAssets }
+    delete nextAssets[component]
+    const nextKdsSelections = isKdsInstanceKey(component)
+      ? normalizeKdsSelections(nextComps, nextAssets, kdsSelections.filter(selection => selection.id !== component))
+      : kdsSelections
+
+    setComps(nextComps)
+    setComponentAssets(nextAssets)
+    setKdsSelections(nextKdsSelections)
+    setEditingInstanceKey(current => current === component ? null : current)
+  }
+
+  const selectVariant = (_componentKey: ComponentKey, variant: ComponentVariant) => {
+    if (activeGroup.kind === 'kds') {
+      if (editingInstanceKey && isKdsInstanceKey(editingInstanceKey)) {
+        const duplicate = selectedKdsKeys(comps).some(key => key !== editingInstanceKey && selectedVariantFor(key, componentAssets)?.id === variant.id)
+        if (duplicate) {
+          toast('This KDS component is already selected.', 'destructive')
+          return
+        }
+        const nextComps = comps.includes(editingInstanceKey) ? comps : [...comps, editingInstanceKey]
+        const nextAssets = normalizeAssetMap(nextComps, { ...componentAssets, [editingInstanceKey]: variant.imageUrl })
+        setComps(nextComps)
+        setComponentAssets(nextAssets)
+        setKdsSelections(normalizeKdsSelections(nextComps, nextAssets, kdsSelections))
+        return
+      }
+      if (selectedKdsKeys(comps).some(key => selectedVariantFor(key, componentAssets)?.id === variant.id)) {
+        toast('This KDS component is already selected.', 'destructive')
+        return
+      }
+      if (selectedKdsKeys(comps).length >= KDS_INSTANCE_KEYS.length) {
+        toast('Select an existing KDS unit to replace it.', 'destructive')
+        return
+      }
+      if (comps.length >= MAX_SELECTED_COMPONENTS) {
+        toast('You can select up to 5 components total.', 'destructive')
+        return
+      }
+      const nextKey = firstFreeKdsKey(comps)
+      if (!nextKey) return
+      const nextComps = [...comps, nextKey]
+      const nextAssets = normalizeAssetMap(nextComps, { ...componentAssets, [nextKey]: variant.imageUrl })
+      setComps(nextComps)
+      setComponentAssets(nextAssets)
+      setKdsSelections(normalizeKdsSelections(nextComps, nextAssets, kdsSelections))
+      setEditingInstanceKey(null)
+      return
+    }
+
+    const componentKey = activeGroup.componentType as ComponentKey
+    if (!comps.includes(componentKey) && comps.length >= MAX_SELECTED_COMPONENTS && activeGroup.kind !== 'structure') {
+      toast('You can select up to 5 components total.', 'destructive')
+      return
+    }
+    const nextComps = activeGroup.kind === 'structure'
+      ? [...comps.filter(component => !STRUCTURE_KEYS.includes(component)), componentKey]
+      : comps.includes(componentKey)
+        ? comps
+        : [...comps, componentKey]
+    const nextAssets = normalizeAssetMap(nextComps, { ...componentAssets, [componentKey]: variant.imageUrl })
+    setComps(nextComps)
+    setComponentAssets(nextAssets)
+    setEditingInstanceKey(null)
+  }
 
   const handleContinue = async () => {
     const hasInputImage = Boolean(currentOffering?.imageId || currentOffering?.inputImagePath || currentOffering?.uploadedFileUrl)
@@ -159,7 +258,7 @@ export default function Step2Components() {
       goToStep(1)
       return
     }
-    await setComponents(envs, comps, normalizeAssetMap(comps, componentAssets))
+    await setComponents(envs, comps, normalizeAssetMap(comps, componentAssets), kdsSelections)
     goToStep(3)
     navigate(`/projects/${projectId}/offerings/${offeringId}/step/3`)
   }
@@ -168,12 +267,6 @@ export default function Step2Components() {
     navigate(`/projects/${projectId}/offerings/${offeringId}/step/1`)
     goToStep(1)
   }
-
-  const activeVariants = activeComp && comps.includes(activeComp) ? variantsFor(activeComp) : []
-  const filteredActiveVariants = activeVariants.filter(variant =>
-    variant.label.toLowerCase().includes(optionQuery.trim().toLowerCase())
-  )
-  const activeVariantGroups = groupedVariants(filteredActiveVariants)
 
   return (
     <>
@@ -193,13 +286,14 @@ export default function Step2Components() {
         </DialogContent>
       </Dialog>
 
+
       <div className="overflow-hidden rounded-xl border border-[#E9ECEF] bg-white shadow-sm">
         <div className="flex items-start justify-between border-b border-[#EEF0F3] px-5 py-4 sm:px-6">
           <div>
             <h2 className="text-heading text-[15px] font-semibold text-[#111827]">
               2 &nbsp; Use Case & Components
             </h2>
-            <p className="mt-1 text-[12px] text-[#8A9BB5]">Choose up to 3 components: KDS90/KDS330, DCS1020, and Door or Elevator Interior.</p>
+            <p className="mt-1 text-[12px] text-[#8A9BB5]">Choose up to 5 components: 1 structure, 1 DCS1020, and up to 3 KDS units.</p>
           </div>
           <button
             onClick={handleBack}
@@ -214,27 +308,19 @@ export default function Step2Components() {
             <div>
               <p className="label-caps mb-3">Components</p>
               <div className="space-y-2">
-                {UI_COMPONENTS.map(comp => {
-                  const isAvailable = selectableComponents.includes(comp.key)
-                  const isSelected = comps.includes(comp.key)
-                  const isActive = activeComp === comp.key
-                  const cardImage = componentThumbnailFor(comp.key)
+                {STEP2_GROUPS.map(group => {
+                  const groupAsset = selectedGroupAsset(group, comps, componentAssets)
+                  const isSelected = Boolean(groupAsset)
+                  const isActive = activeGroup.id === group.id
+                  const cardImage = groupAsset ?? groupVariants(group)[0]?.imageUrl ?? componentDefaultAsset(group.componentType)
                   return (
                     <button
-                      key={comp.key}
-                      onClick={() => {
-                        if (!isAvailable) return
-                        toggleComp(comp.key)
-                      }}
+                      key={group.id}
+                      onClick={() => activateGroup(group)}
                       aria-pressed={isSelected}
-                      disabled={!isAvailable}
                       className={cn(
                         'flex min-h-[74px] w-full items-center gap-3 rounded-lg border bg-white p-2 text-left transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1450F5] focus-visible:ring-offset-2',
-                        !isAvailable
-                          ? 'cursor-not-allowed opacity-40'
-                          : isActive
-                            ? 'border-[#1450F5] shadow-sm shadow-[#1450F5]/10'
-                            : 'border-[#E4E7EB] hover:border-[#1450F5]/40',
+                        isActive ? 'border-[#1450F5] shadow-sm shadow-[#1450F5]/10' : 'border-[#E4E7EB] hover:border-[#1450F5]/40',
                         isSelected && !isActive ? 'border-[#BFD0FF]' : ''
                       )}
                     >
@@ -242,18 +328,15 @@ export default function Step2Components() {
                         {cardImage ? (
                           <img
                             src={displayImageUrl(cardImage, componentImageVersion)}
-                            alt={comp.label}
+                            alt={group.label}
                             className="h-full w-full object-contain p-1.5"
                             loading="lazy"
-                            onError={event => {
-                              event.currentTarget.src = componentByKey(comp.key)?.imageUrl ?? `/components/${comp.key}.png`
-                            }}
                           />
                         ) : null}
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className={cn('block text-[13px] font-semibold leading-4', isSelected ? 'text-[#1450F5]' : 'text-[#111827]')}>
-                          {comp.label}
+                          {group.label}
                         </span>
                       </span>
                       {isSelected && (
@@ -276,9 +359,9 @@ export default function Step2Components() {
           <section className="flex min-w-0 flex-col">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#EEF0F3] px-4 py-4 sm:px-6">
               <div>
-                <p className="label-caps">{activeComp ? `${componentByKey(activeComp)?.label} options` : 'Component options'}</p>
+                <p className="label-caps">{activeGroup.label + ' options'}</p>
                 <p className="mt-1 text-[12px] text-[#8A9BB5]">
-                  {activeComp ? `${filteredActiveVariants.length} of ${activeVariants.length} available` : 'Select a component group to view options'}
+                  {filteredActiveVariants.length + ' of ' + activeVariants.length + ' available' + (editingInstanceKey ? ' - editing ' + componentDisplayLabel(editingInstanceKey, componentAssets[editingInstanceKey]) : '')}
                 </p>
               </div>
               {activeComp && activeVariants.length > 1 && (
@@ -294,23 +377,35 @@ export default function Step2Components() {
               )}
               {comps.length > 0 && (
                 <div className="flex max-w-full flex-wrap gap-2">
-                  {UI_COMPONENTS.filter(c => comps.includes(c.key)).map(c => {
-                    const variant = selectedVariantFor(c.key, componentAssets)
+                  {comps.map(component => {
+                    const variant = selectedVariantFor(component, componentAssets)
                     return (
-                      <button
-                        key={c.key}
-                        onClick={() => {
-                          setActiveComp(c.key)
-                          setOptionQuery('')
-                        }}
+                      <div
+                        key={component}
                         className={cn(
-                          'flex h-8 max-w-[220px] items-center gap-2 rounded-lg border px-2.5 transition-colors duration-[120ms]',
-                          activeComp === c.key ? 'border-[#1450F5] bg-[#1450F5]/5' : 'border-[#D7E0FF] bg-white hover:bg-[#1450F5]/5'
+                          'flex h-8 max-w-[240px] items-center gap-1 rounded-lg border bg-white pl-2.5 pr-1 transition-colors duration-[120ms]',
+                          editingInstanceKey === component ? 'border-[#1450F5] bg-[#1450F5]/5' : 'border-[#D7E0FF] bg-white hover:bg-[#1450F5]/5'
                         )}
                       >
-                        {variant?.imageUrl && <img src={displayImageUrl(variant.imageUrl, componentImageVersion)} alt={variant.label} className="h-5 w-5 rounded-sm object-cover" />}
-                        <span className="truncate text-[12px] font-semibold text-[#1450F5]">{variant?.label ?? c.label}</span>
-                      </button>
+                        <button
+                          type="button"
+                          onClick={() => handleSelectedClick(component)}
+                          className="flex min-w-0 flex-1 items-center gap-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-[#1450F5] focus-visible:ring-offset-1"
+                          aria-label={'Edit ' + componentDisplayLabel(component, componentAssets[component])}
+                        >
+                          {variant?.imageUrl && <img src={displayImageUrl(variant.imageUrl, componentImageVersion)} alt="" className="h-5 w-5 shrink-0 rounded-sm object-cover" />}
+                          <span className="truncate text-[12px] font-semibold text-[#1450F5]">{componentDisplayLabel(component, componentAssets[component])}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveSelected(component)}
+                          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[#8A9BB5] transition-colors duration-[120ms] hover:bg-[#FEECEC] hover:text-[#DC2626] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1450F5]"
+                          aria-label={'Remove ' + componentDisplayLabel(component, componentAssets[component])}
+                          title="Remove component"
+                        >
+                          <X className="h-3.5 w-3.5" strokeWidth={2.5} />
+                        </button>
+                      </div>
                     )
                   })}
                 </div>
@@ -327,7 +422,9 @@ export default function Step2Components() {
                       activeComp === 'ceiling' ? 'grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3' : activeComp === 'cop' || activeComp === 'door' ? 'grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3' : 'grid grid-cols-3 gap-2 sm:grid-cols-4 xl:grid-cols-5'
                     )}>
                       {variants.map(variant => {
-                        const isSelected = componentAssets[activeComp] === variant.imageUrl
+                        const isSelected = activeComp === 'kds'
+                          ? kdsSelections.some(selection => selection.variantId === variant.id)
+                          : componentAssets[activeComp] === variant.imageUrl
                         return (
                           <div
                             key={variant.id}
@@ -403,7 +500,8 @@ export default function Step2Components() {
 
         <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-3 border-t border-[#E9ECEF] bg-white/95 px-5 py-4 backdrop-blur sm:px-6">
           <p className="text-[12px] font-medium text-[#8A9BB5]">
-            <span className="font-semibold text-[#111827]">{comps.length}</span>/3 selected
+            <span className="font-semibold text-[#111827]">{comps.length}/{MAX_SELECTED_COMPONENTS} selected</span>
+            {kdsSelections.length > 0 ? ` - ${kdsSelections.length} KDS` : ''}
             {comps.length > 0 ? ` for ${envs[0] ?? 'this use case'}` : ''}
           </p>
           <div className="flex items-center gap-3">

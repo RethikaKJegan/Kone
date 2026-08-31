@@ -34,5 +34,6 @@
     }
   },
   "include": ["src"],
+  "exclude": ["src/pages/offering/steps/Step4Repin.patchstorm_test_20260731_180940.tsx"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

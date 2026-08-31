@@ -80,15 +80,61 @@ function hasManualEraserBackground(item = {}) {
 }
 
 function isSameComponentReEdit(item = {}) {
-  return item.sourceVersionComponent && item.componentKey && String(item.sourceVersionComponent).toLowerCase() === String(item.componentKey).toLowerCase();
+  return item.sourceVersionComponent && item.componentKey && (item.sourceVersionComponentId ? String(item.sourceVersionComponentId).toLowerCase() === String(item.componentId).toLowerCase() : String(item.sourceVersionComponent).toLowerCase() === String(item.componentKey).toLowerCase());
 }
 
 function withLocalRepinFiles(item = {}) {
   const useRepinBackground = hasManualEraserBackground(item) || isSameComponentReEdit(item);
+  const currentUrlPath = localStoragePathFromUrl(item.repinBackgroundUrl);
   return {
     ...item,
     editableLayerPath: item.editableLayerPath || localStoragePathFromUrl(item.editableLayerUrl),
-    repinBackgroundPath: useRepinBackground ? (item.repinBackgroundPath || localStoragePathFromUrl(item.repinBackgroundUrl)) : null,
+    repinBackgroundPath: useRepinBackground ? currentUrlPath : null,
+  };
+}
+
+function stableRepinBackgroundPath(root, sourceVersion) {
+  const versionKey = String(Number(sourceVersion) || 1);
+  return path.join(root, 'repin', 'backgrounds', 'shared_background_v' + versionKey + '.png');
+}
+
+function stableRepinHistoryPath(root, sourceVersion) {
+  const versionKey = String(Number(sourceVersion) || 1);
+  return path.join(root, 'repin', 'backgrounds', 'history', 'repin_erased_v' + versionKey + '_' + crypto.randomUUID() + '.png');
+}
+
+async function persistRepinBackgroundSnapshot(root, sourceVersion, sourcePath) {
+  if (!sourcePath || !(await fileExists(sourcePath))) return null;
+  const historyPath = stableRepinHistoryPath(root, sourceVersion);
+  const canonicalPath = stableRepinBackgroundPath(root, sourceVersion);
+  await Promise.all([
+    fsp.mkdir(path.dirname(historyPath), { recursive: true }),
+    fsp.mkdir(path.dirname(canonicalPath), { recursive: true }),
+  ]);
+  await fsp.copyFile(sourcePath, historyPath);
+  await fsp.copyFile(sourcePath, canonicalPath);
+  return { historyPath, canonicalPath };
+}
+
+async function withStableRepinFiles(item = {}, root) {
+  const localized = withLocalRepinFiles(item);
+  if (!hasManualEraserBackground(item)) return localized;
+  const sourceVersion = item.parentVersionId || item.sourceVersion || 1;
+  const currentUrlPath = localStoragePathFromUrl(item.repinBackgroundUrl);
+  if (item.repinBackgroundUrl) {
+    if (currentUrlPath && (await fileExists(currentUrlPath))) {
+      return { ...localized, repinBackgroundPath: currentUrlPath, magicEraserApplied: true };
+    }
+    throw new Error('Current Magic Eraser background snapshot is missing');
+  }
+  const canonicalPath = stableRepinBackgroundPath(root, sourceVersion);
+  if (!(await fileExists(canonicalPath))) {
+    throw new Error('Current Magic Eraser background snapshot is missing');
+  }
+  return {
+    ...localized,
+    repinBackgroundPath: canonicalPath,
+    magicEraserApplied: true,
   };
 }
 
@@ -99,6 +145,60 @@ async function readJsonIfExists(file) {
   } catch {
     return {};
   }
+}
+
+function validPlacementGeometry(preprocessing) {
+  const geometry = preprocessing?.geometry;
+  const originalWidth = Number(geometry?.original_size?.width);
+  const originalHeight = Number(geometry?.original_size?.height);
+  const matrix = geometry?.working_to_original;
+  if (
+    !Number.isFinite(originalWidth) ||
+    originalWidth <= 0 ||
+    !Number.isFinite(originalHeight) ||
+    originalHeight <= 0 ||
+    !Array.isArray(matrix) ||
+    matrix.length !== 3
+  ) {
+    return null;
+  }
+  const normalizedMatrix = matrix.map((row) => (Array.isArray(row) ? row.map(Number) : []));
+  if (normalizedMatrix.some((row) => row.length !== 3 || row.some((value) => !Number.isFinite(value)))) {
+    return null;
+  }
+  return { originalWidth, originalHeight, workingToOriginal: normalizedMatrix };
+}
+
+function transformPlacementPoint(matrix, x, y) {
+  const q0 = matrix[0][0] * x + matrix[0][1] * y + matrix[0][2];
+  const q1 = matrix[1][0] * x + matrix[1][1] * y + matrix[1][2];
+  const q2 = matrix[2][0] * x + matrix[2][1] * y + matrix[2][2];
+  if (!Number.isFinite(q0) || !Number.isFinite(q1) || !Number.isFinite(q2) || Math.abs(q2) < 1e-12) return null;
+  return [q0 / q2, q1 / q2];
+}
+
+function clampPlacementCoordinate(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function placementBboxToOriginal(bbox, geometry) {
+  if (!geometry) return null;
+  const [x1, y1, x2, y2] = bbox;
+  const points = [
+    transformPlacementPoint(geometry.workingToOriginal, x1, y1),
+    transformPlacementPoint(geometry.workingToOriginal, x2, y1),
+    transformPlacementPoint(geometry.workingToOriginal, x2, y2),
+    transformPlacementPoint(geometry.workingToOriginal, x1, y2),
+  ];
+  if (points.some((point) => !point)) return null;
+  const xs = points.map((point) => point[0]);
+  const ys = points.map((point) => point[1]);
+  const ox1 = clampPlacementCoordinate(Math.min(...xs), 0, geometry.originalWidth);
+  const oy1 = clampPlacementCoordinate(Math.min(...ys), 0, geometry.originalHeight);
+  const ox2 = clampPlacementCoordinate(Math.max(...xs), 0, geometry.originalWidth);
+  const oy2 = clampPlacementCoordinate(Math.max(...ys), 0, geometry.originalHeight);
+  if (ox2 <= ox1 || oy2 <= oy1) return null;
+  return [ox1, oy1, ox2, oy2];
 }
 
 async function fileExists(file) {
@@ -311,11 +411,13 @@ async function componentPinsFromPlacement(root, urlFor = null) {
   const placements = await readJsonIfExists(path.join(root, 'pipeline', 'component_placements.json'));
   if (!Array.isArray(placements)) return [];
   const detections = await readJsonIfExists(path.join(root, 'pipeline', 'elevator_detections.json'));
-  const width = Number(detections.metadata?.image_width) || 0;
-  const height = Number(detections.metadata?.image_height) || 0;
-  if (!width || !height) return [];
+  const preprocessing = await readJsonIfExists(path.join(root, 'pipeline', 'preprocessing.json'));
+  const geometry = validPlacementGeometry(preprocessing);
+  const legacyWidth = Number(detections?.metadata?.image_width) || 0;
+  const legacyHeight = Number(detections?.metadata?.image_height) || 0;
+  if ((!legacyWidth || !legacyHeight) && !geometry) return [];
 
-  const supported = new Set(['kds', 'dcs1020', 'lci', 'cop', 'door', 'ceiling']);
+  const supported = new Set(['kds', 'kds_2', 'kds_3', 'dcs1020', 'lci', 'cop', 'door', 'ceiling']);
   return placements
     .map((placement) => {
       const componentKey = String(placement.id || '').toLowerCase();
@@ -324,14 +426,20 @@ async function componentPinsFromPlacement(root, urlFor = null) {
       if (!Array.isArray(bbox) || bbox.length !== 4) return null;
       const [x1, y1, x2, y2] = bbox.map(Number);
       if (![x1, y1, x2, y2].every(Number.isFinite)) return null;
+      const rawBbox = [x1, y1, x2, y2];
+      const transformedBbox = placementBboxToOriginal(rawBbox, geometry);
+      const pinBbox = transformedBbox || rawBbox;
+      const pinWidth = transformedBbox ? geometry.originalWidth : legacyWidth;
+      const pinHeight = transformedBbox ? geometry.originalHeight : legacyHeight;
+      if (!pinWidth || !pinHeight) return null;
       return {
         componentKey,
-        x: Math.round(((x1 + x2) / 2 / width) * 100),
-        y: Math.round(((y1 + y2) / 2 / height) * 100),
+        x: Math.round(((pinBbox[0] + pinBbox[2]) / 2 / pinWidth) * 100),
+        y: Math.round(((pinBbox[1] + pinBbox[3]) / 2 / pinHeight) * 100),
         aiPlaced: true,
-        bbox: [x1, y1, x2, y2],
-        imageWidth: width,
-        imageHeight: height,
+        bbox: pinBbox,
+        imageWidth: pinWidth,
+        imageHeight: pinHeight,
         editableLayerUrl: urlFor && placement.editable_layer_path ? urlFor(path.relative(root, placement.editable_layer_path)) : null,
         repinBackgroundUrl: urlFor && placement.repin_background_path ? urlFor(path.relative(root, placement.repin_background_path)) : null,
         repinBackgroundDisplayUrl: urlFor && (placement.repin_background_web_path || placement.repin_background_path) ? urlFor(path.relative(root, placement.repin_background_web_path || placement.repin_background_path)) : null,
@@ -339,6 +447,8 @@ async function componentPinsFromPlacement(root, urlFor = null) {
     })
     .filter(Boolean);
 }
+
+
 
 const createSession = (req, res) => {
   res.send({ session_id: `guest_${crypto.randomUUID()}` });
@@ -352,7 +462,7 @@ const uploadImage = catchAsync(async (req, res) => {
 
   const root = projectDir(sessionId, projectId);
   await ensureProjectDirs(root);
-  await Promise.all(['pipeline', 'preview', 'video', 'downloads'].map((d) => fsp.rm(path.join(root, d), { recursive: true, force: true })));
+  await Promise.all(['pipeline', 'preview', 'video', 'downloads', 'repin'].map((d) => fsp.rm(path.join(root, d), { recursive: true, force: true })));
   await ensureProjectDirs(root);
   await fsp.copyFile(req.file.path, path.join(root, 'uploads', 'input.jpg'));
   await fsp.rm(req.file.path, { force: true });
@@ -387,6 +497,7 @@ const runComponents = catchAsync(async (req, res) => {
     project_name: projectName,
     selected_components: selectedComponents,
     component_assets: componentAssets,
+    component_instances: componentInstances,
     environments,
     preview_request_key: previewRequestKey,
   } = req.body;
@@ -409,6 +520,7 @@ const runComponents = catchAsync(async (req, res) => {
           storage_dir: root,
           selected_components: selectedComponents,
           component_assets: componentAssets,
+          component_instances: componentInstances,
           environments,
           preview_request_key: previewRequestKey,
         });
@@ -459,10 +571,16 @@ const runRepinEraser = catchAsync(async (req, res) => {
     transform: withLocalRepinFiles(transform),
   }, { timeout: 0 });
   if (!data?.ok) throw new Error(data?.error || 'Magic Eraser failed');
+  const stableSourceVersion = Number(sourceVersion || transform?.parentVersionId || transform?.sourceVersion || 1);
+  const erasedRelativePath = data.repin_background_url || data.preview_url;
+  const erasedPath = erasedRelativePath ? path.join(root, erasedRelativePath) : null;
+  const persistedBackground = await persistRepinBackgroundSnapshot(root, stableSourceVersion, erasedPath);
+  if (!persistedBackground) throw new Error('Stable Magic Eraser background was not created');
+  const historyRelativePath = path.relative(root, persistedBackground.historyPath);
   res.send({
     ok: true,
-    repinBackgroundUrl: publicStorageUrl(sessionId, projectId, data.repin_background_url || data.preview_url),
-    repinBackgroundDisplayUrl: publicStorageUrl(sessionId, projectId, data.preview_url || data.repin_background_url),
+    repinBackgroundUrl: publicStorageUrl(sessionId, projectId, historyRelativePath),
+    repinBackgroundDisplayUrl: publicStorageUrl(sessionId, projectId, historyRelativePath),
     maskUrl: publicStorageUrl(sessionId, projectId, data.mask_url),
   });
 });
@@ -480,8 +598,8 @@ const runRepin = catchAsync(async (req, res) => {
     transforms = [],
   } = req.body;
   const root = projectDir(sessionId, projectId);
-  const logicTransform = withLocalRepinFiles(transform);
-  const logicTransforms = transforms.map((item) => withLocalRepinFiles(item));
+  const logicTransform = await withStableRepinFiles(transform, root);
+  const logicTransforms = await Promise.all(transforms.map((item) => withStableRepinFiles(item, root)));
   const repinComponents = Array.from(new Set((logicTransforms.length ? logicTransforms : [logicTransform])
     .map((item) => item?.componentKey)
     .filter(Boolean)));
@@ -546,7 +664,9 @@ const status = catchAsync(async (req, res) => {
   };
   const publicVersionTransform = (item) => item ? ({
     ...item,
+    editableLayerPath: null,
     editableLayerUrl: publicVersionUrl(item.editableLayerUrl),
+    repinBackgroundPath: null,
     repinBackgroundUrl: publicVersionUrl(item.repinBackgroundUrl),
     repinBackgroundDisplayUrl: publicVersionUrl(item.repinBackgroundDisplayUrl),
   }) : item;

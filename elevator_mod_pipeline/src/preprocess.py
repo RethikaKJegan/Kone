@@ -17,14 +17,49 @@ CONFIG = {
 }
 
 
+def identity_matrix():
+    return np.eye(3, dtype=np.float64)
+
+
+def affine_to_homogeneous(matrix):
+    homogeneous = identity_matrix()
+    homogeneous[:2, :] = np.asarray(matrix, dtype=np.float64)
+    return homogeneous
+
+
+def json_matrix(matrix):
+    return [[float(value) for value in row] for row in np.asarray(matrix, dtype=np.float64).tolist()]
+
+
+def compose_transform(existing, operation):
+    return np.asarray(operation, dtype=np.float64) @ np.asarray(existing, dtype=np.float64)
+
+
+def preprocessing_geometry_metadata(original_shape, working_shape, operations, original_to_working):
+    original_h, original_w = original_shape[:2]
+    working_h, working_w = working_shape[:2]
+    original_to_working = np.asarray(original_to_working, dtype=np.float64)
+    working_to_original = np.linalg.inv(original_to_working)
+
+    return {
+        "original_size": {"width": int(original_w), "height": int(original_h)},
+        "working_size": {"width": int(working_w), "height": int(working_h)},
+        "original_to_working": json_matrix(original_to_working),
+        "working_to_original": json_matrix(working_to_original),
+        "operations": operations,
+    }
+
+
 def run_preprocessing(image_path: str | Path, cfg: dict[str, Any], out_image: str | Path, out_json: str | Path) -> Path:
     image = load_image_rgb(image_path)
     before = validate_image(image)
     corrected = image.copy()
     corrections: list[dict[str, Any]] = []
+    operations: list[dict[str, Any]] = []
+    original_to_working = identity_matrix()
 
     if cfg.get("preprocessing", {}).get("auto_correct", True) and before["result"] != "PASS":
-        corrected, correction = straighten_image(corrected, cfg)
+        corrected, correction, operations, original_to_working = straighten_image_with_geometry(corrected, cfg)
         corrections.append(correction)
 
     after = validate_image(corrected)
@@ -32,6 +67,8 @@ def run_preprocessing(image_path: str | Path, cfg: dict[str, Any], out_image: st
     if chosen is image:
         corrections.append({"type": "revert", "reason": "correction_did_not_improve_score"})
         after = before
+        operations = []
+        original_to_working = identity_matrix()
 
     save_rgb(out_image, chosen)
     save_json(
@@ -41,6 +78,7 @@ def run_preprocessing(image_path: str | Path, cfg: dict[str, Any], out_image: st
             "before": before,
             "after": after,
             "corrections": corrections,
+            "geometry": preprocessing_geometry_metadata(image.shape, chosen.shape, operations, original_to_working),
             "passed": after["result"] in {"PASS", "REVIEW"},
         },
     )
@@ -96,15 +134,51 @@ def validate_image(rgb: np.ndarray) -> dict[str, Any]:
 
 
 def straighten_image(rgb: np.ndarray, cfg: dict[str, Any]) -> tuple[np.ndarray, dict[str, Any]]:
+    corrected, correction, _operations, _original_to_working = straighten_image_with_geometry(rgb, cfg)
+    return corrected, correction
+
+
+def straighten_image_with_geometry(rgb: np.ndarray, cfg: dict[str, Any]) -> tuple[np.ndarray, dict[str, Any], list[dict[str, Any]], np.ndarray]:
     angle, confidence = dominant_roll_angle(rgb)
     max_roll = float(cfg.get("preprocessing", {}).get("max_roll_degrees", 12.0))
     applied = float(np.clip(angle, -max_roll, max_roll)) if confidence >= 0.35 else 0.0
-    corrected = rotate_bound(rgb, -applied) if abs(applied) >= 0.35 else rgb.copy()
+
+    corrected = rgb.copy()
+    operations: list[dict[str, Any]] = []
+    original_to_working = identity_matrix()
+
+    if abs(applied) >= 0.35:
+        before_shape = corrected.shape
+        corrected, matrix = rotate_bound_with_matrix(corrected, -applied)
+        original_to_working = compose_transform(original_to_working, matrix)
+        operations.append(
+            {
+                "type": "rotate_bound",
+                "angle_degrees": float(-applied),
+                "input_size": {"width": int(before_shape[1]), "height": int(before_shape[0])},
+                "output_size": {"width": int(corrected.shape[1]), "height": int(corrected.shape[0])},
+                "matrix": json_matrix(matrix),
+            }
+        )
+
     side_offset = vertical_balance_offset(corrected)
     max_shift = float(cfg.get("preprocessing", {}).get("max_horizontal_shift_ratio", 0.035))
     if abs(side_offset) > 0.18:
-        corrected = gentle_horizontal_rectify(corrected, float(np.clip(side_offset * max_shift, -max_shift, max_shift)))
-    return corrected, {"type": "straighten", "roll_degrees": round(applied, 3), "line_confidence": round(confidence, 3), "side_offset": round(side_offset, 3)}
+        shift_ratio = float(np.clip(side_offset * max_shift, -max_shift, max_shift))
+        before_shape = corrected.shape
+        corrected, matrix = gentle_horizontal_rectify_with_matrix(corrected, shift_ratio)
+        original_to_working = compose_transform(original_to_working, matrix)
+        operations.append(
+            {
+                "type": "horizontal_rectify",
+                "shift_ratio": float(shift_ratio),
+                "input_size": {"width": int(before_shape[1]), "height": int(before_shape[0])},
+                "output_size": {"width": int(corrected.shape[1]), "height": int(corrected.shape[0])},
+                "matrix": json_matrix(matrix),
+            }
+        )
+
+    return corrected, {"type": "straighten", "roll_degrees": round(applied, 3), "line_confidence": round(confidence, 3), "side_offset": round(side_offset, 3)}, operations, original_to_working
 
 
 def perspective_score(rgb: np.ndarray) -> tuple[float, list[str]]:
@@ -239,22 +313,34 @@ def vertical_balance_offset(rgb: np.ndarray) -> float:
 
 
 def rotate_bound(rgb: np.ndarray, angle: float) -> np.ndarray:
+    rotated, _matrix = rotate_bound_with_matrix(rgb, angle)
+    return rotated
+
+
+def rotate_bound_with_matrix(rgb: np.ndarray, angle: float) -> tuple[np.ndarray, np.ndarray]:
     h, w = rgb.shape[:2]
     matrix = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
     cos, sin = abs(matrix[0, 0]), abs(matrix[0, 1])
     nw, nh = int((h * sin) + (w * cos)), int((h * cos) + (w * sin))
     matrix[0, 2] += (nw / 2) - w / 2
     matrix[1, 2] += (nh / 2) - h / 2
-    return cv2.warpAffine(rgb, matrix, (nw, nh), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+    rotated = cv2.warpAffine(rgb, matrix, (nw, nh), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+    return rotated, affine_to_homogeneous(matrix)
 
 
 def gentle_horizontal_rectify(rgb: np.ndarray, shift_ratio: float) -> np.ndarray:
+    rectified, _matrix = gentle_horizontal_rectify_with_matrix(rgb, shift_ratio)
+    return rectified
+
+
+def gentle_horizontal_rectify_with_matrix(rgb: np.ndarray, shift_ratio: float) -> tuple[np.ndarray, np.ndarray]:
     h, w = rgb.shape[:2]
     shift = float(w * shift_ratio)
     src = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype=np.float32)
     dst = np.array([[max(0, shift), 0], [w - 1 + min(0, shift), 0], [w - 1 - max(0, shift), h - 1], [-min(0, shift), h - 1]], dtype=np.float32)
     matrix = cv2.getPerspectiveTransform(src, dst)
-    return cv2.warpPerspective(rgb, matrix, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+    rectified = cv2.warpPerspective(rgb, matrix, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+    return rectified, np.asarray(matrix, dtype=np.float64)
 
 
 def generate_suggestions(metrics: dict[str, float], result: str) -> list[str]:

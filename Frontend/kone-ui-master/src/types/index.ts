@@ -22,7 +22,8 @@ export interface Project {
 }
 
 export type Environment = 'car' | 'lobby'
-export type ComponentKey = 'ceiling' | 'kds' | 'dcs1020' | 'lci' | 'door' | 'cop'
+export type SemanticComponentKey = 'ceiling' | 'kds' | 'dcs1020' | 'lci' | 'door' | 'cop'
+export type ComponentKey = SemanticComponentKey | 'kds_2' | 'kds_3'
 
 export interface ComponentItem {
   key: ComponentKey
@@ -37,6 +38,13 @@ export interface ComponentVariant {
   label: string
   imageUrl: string
   group?: string
+}
+
+export interface ComponentInstanceSelection {
+  id: string
+  componentType: SemanticComponentKey
+  variantId: string
+  assetUrl: string
 }
 
 export interface ComponentPin {
@@ -59,9 +67,22 @@ export type RepinFeedbackOption =
   | 'material_reflections'
   | 'seamless_blending'
 
+export interface EraserHistoryEntry {
+  repinBackgroundUrl: string | null
+  repinBackgroundDisplayUrl: string | null
+}
+
+export interface RepinSharedBackgroundState {
+  repinBackgroundUrl: string | null
+  repinBackgroundDisplayUrl: string | null
+  eraserHistory: EraserHistoryEntry[]
+  eraserRedoStack: EraserHistoryEntry[]
+}
+
 export interface RepinTransform {
+  componentId?: string | null
   componentKey: ComponentKey
-  componentType: ComponentKey
+  componentType: SemanticComponentKey
   sourceVersion: number
   targetVersion: number
   x: number
@@ -87,18 +108,19 @@ export interface RepinTransform {
   editableLayerUrl?: string | null
   repinBackgroundUrl?: string | null
   repinBackgroundDisplayUrl?: string | null
-  eraserHistory?: { repinBackgroundUrl: string | null; repinBackgroundDisplayUrl: string | null }[]
-  eraserRedoStack?: { repinBackgroundUrl: string | null; repinBackgroundDisplayUrl: string | null }[]
+  eraserHistory?: EraserHistoryEntry[]
+  eraserRedoStack?: EraserHistoryEntry[]
   editableLayerPath?: string | null
   repinBackgroundPath?: string | null
   feedbackOption?: RepinFeedbackOption | null
   feedbackOptions?: RepinFeedbackOption[]
   sourceBaseMode?: 'original' | 'version'
   sourceVersionComponent?: ComponentKey | null
+  sourceVersionComponentId?: string | null
   parentVersionId?: number | null
   parentFinalImagePath?: string | null
-  activeComponentId?: ComponentKey | null
-  activeComponentType?: ComponentKey | null
+  activeComponentId?: string | null
+  activeComponentType?: SemanticComponentKey | null
   currentComponentMaskOrCrop?: [number, number, number, number] | null
   magicEraserApplied?: boolean
 }
@@ -138,6 +160,7 @@ export interface Offering {
   environments: Environment[]
   selectedComponents: ComponentKey[]
   selectedComponentAssets?: Partial<Record<ComponentKey, string>>
+  componentInstances?: ComponentInstanceSelection[]
   componentPins: ComponentPin[]
   annotationsEnabled: boolean
   activeAnnotationFilters: ComponentKey[]
@@ -154,7 +177,8 @@ export interface Offering {
   previewVersions?: PreviewVersion[]
   repinPass?: number
   selectedOutputVersion?: number
-  repinTransforms?: Partial<Record<ComponentKey, RepinTransform>>
+  repinTransforms?: Partial<Record<string, RepinTransform>>
+  repinSharedBackgrounds?: Record<string, RepinSharedBackgroundState>
   videoGenerated?: boolean
   downloadUrl?: string | null
 }

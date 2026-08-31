@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 from contextlib import contextmanager
 import fcntl
 import io
@@ -19,7 +20,7 @@ import cv2
 import numpy as np
 import yaml
 from fastapi import FastAPI
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageEnhance
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageEnhance, ImageOps
 from pydantic import BaseModel
 
 from input_validation import validate_elevator_or_cop_upload, validate_input_image
@@ -57,6 +58,7 @@ class ProjectPayload(BaseModel):
     project_name: str | None = None
     storage_dir: str
     selected_components: list[str] | None = None
+    component_instances: list[dict[str, Any]] | None = None
     component_assets: dict[str, str] | None = None
     environments: list[str] | None = None
     video_options: dict[str, Any] | None = None
@@ -111,7 +113,330 @@ def selected_component_asset_paths(component_assets: dict[str, str] | None) -> d
             if candidate.exists():
                 resolved[component] = str(candidate)
                 break
+    kds_default = default_files["kds"]
+    for key, raw in (component_assets or {}).items():
+        instance_key = str(key).strip().lower()
+        if not instance_key.startswith("kds_"):
+            continue
+        candidates = [Path(str(raw))] if raw else []
+        if raw and str(raw).startswith("/components/"):
+            candidates.insert(0, workspace_root() / "Frontend" / "kone-ui-master" / "public" / str(raw).lstrip("/"))
+        candidates.append(kds_default)
+        for candidate in candidates:
+            if candidate.exists():
+                resolved[instance_key] = str(candidate)
+                break
+
     return resolved
+
+
+KDS_INSTANCE_KEYS = {"kds", "kds_2", "kds_3"}
+KDS_INSTANCE_ORDER = ["kds", "kds_2", "kds_3"]
+
+COMPONENT_TYPE_BY_KEY = {
+    "cop": "elevator_mod_panel",
+    "lci": "landing_call_indicator",
+    "kds": "landing_call_indicator",
+    "dcs1020": "destination_guidance_indicator",
+    "door": "elevator_door",
+    "ceiling": "elevator_cabin",
+}
+
+TARGET_KEYWORDS_BY_KEY = {
+    "cop": [
+        "car operating panel",
+        "tall stainless steel elevator operating panel with round buttons",
+    ],
+    "lci": [
+        "elevator button panel",
+        "elevator call button panel",
+        "elevator call button",
+        "call button",
+    ],
+    "kds": [
+        "elevator button panel",
+        "elevator call button panel",
+        "elevator call button",
+        "call button",
+    ],
+    "dcs1020": [
+        "floor indicator display",
+        "destination operating panel",
+        "destination guidance panel",
+        "elevator header sign",
+        "above elevator door",
+    ],
+    "door": [
+        "elevator door",
+        "elevator doors",
+        "elevator_door",
+    ],
+    "ceiling": [
+        "elevator interior",
+        "elevator cabin",
+        "inside elevator",
+        "elevator_cabin",
+    ],
+}
+
+
+def semantic_component_key(component: str) -> str:
+    normalized = str(component or "").strip().lower()
+    return "kds" if normalized in KDS_INSTANCE_KEYS else normalized
+
+
+def _normalize_component_keys(values: list[str] | None) -> list[str]:
+    selected: list[str] = []
+    for value in values or []:
+        key = str(value or "").strip().lower()
+        if key and key not in selected:
+            selected.append(key)
+    return selected
+
+
+def _selected_exact_components(
+    selected_components: list[str] | None,
+    component_instances: list[dict[str, Any]] | None,
+) -> list[str]:
+    selected = _normalize_component_keys(selected_components)
+    if selected:
+        return selected
+
+    fallback: list[str] = []
+    for instance in component_instances or []:
+        if not isinstance(instance, dict):
+            continue
+        key = str(instance.get("id") or "").strip().lower()
+        if key and key not in fallback:
+            fallback.append(key)
+    return fallback
+
+
+def _selected_kds_keys(
+    selected_components: list[str] | None,
+    component_instances: list[dict[str, Any]] | None,
+) -> list[str]:
+    selected = set(_selected_exact_components(selected_components, component_instances))
+    return [key for key in KDS_INSTANCE_ORDER if key in selected]
+
+
+def _is_multi_kds_request(
+    selected_components: list[str] | None,
+    component_instances: list[dict[str, Any]] | None,
+) -> bool:
+    kds_keys = _selected_kds_keys(selected_components, component_instances)
+    return len(kds_keys) > 1 or "kds_2" in kds_keys or "kds_3" in kds_keys
+
+def _resolve_component_asset(raw: str | None) -> Path | None:
+    if not raw:
+        return None
+    value = str(raw)
+    candidates: list[Path] = []
+    if value.startswith("/components/"):
+        candidates.append(workspace_root() / "Frontend" / "kone-ui-master" / "public" / value.lstrip("/"))
+    candidates.append(Path(value))
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _require_exact_secondary_kds_assets(
+    kds_keys: list[str],
+    raw_component_assets: dict[str, str],
+) -> dict[str, str]:
+    resolved: dict[str, str] = {}
+    for key in kds_keys:
+        if key not in {"kds_2", "kds_3"}:
+            continue
+        asset_path = _resolve_component_asset(raw_component_assets.get(key))
+        if asset_path is None:
+            raise ValueError(f"Missing exact component asset for {key}")
+        resolved[key] = str(asset_path)
+    return resolved
+
+
+def _source_image_size(path: Path) -> tuple[int, int]:
+    with Image.open(path) as image:
+        oriented = ImageOps.exif_transpose(image)
+        return oriented.size
+
+
+def _normalize_bbox(bbox: Any, image_size: tuple[int, int]) -> list[int] | None:
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return None
+    width, height = image_size
+    if width <= 0 or height <= 0:
+        return None
+    try:
+        values = [float(value) for value in bbox]
+    except (TypeError, ValueError):
+        return None
+    if not all(np.isfinite(value) for value in values):
+        return None
+
+    x1, x2 = sorted((values[0], values[2]))
+    y1, y2 = sorted((values[1], values[3]))
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    x1 = max(0, min(width - 1, int(round(x1))))
+    y1 = max(0, min(height - 1, int(round(y1))))
+    x2 = max(x1 + 1, min(width, int(round(x2))))
+    y2 = max(y1 + 1, min(height, int(round(y2))))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def _bbox_iou(a: list[int], b: list[int]) -> float:
+    ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
+    ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    area_a = max(1, a[2] - a[0]) * max(1, a[3] - a[1])
+    area_b = max(1, b[2] - b[0]) * max(1, b[3] - b[1])
+    return inter / max(1, area_a + area_b - inter)
+
+
+def _offset_bbox(seed: list[int], offset_x: int, offset_y: int, image_size: tuple[int, int]) -> list[int]:
+    width, height = image_size
+    box_w = max(1, seed[2] - seed[0])
+    box_h = max(1, seed[3] - seed[1])
+    x1 = max(0, min(width - box_w, seed[0] + offset_x))
+    y1 = max(0, min(height - box_h, seed[1] + offset_y))
+    return [x1, y1, x1 + box_w, y1 + box_h]
+
+
+def _derive_kds_boxes(
+    kds_keys: list[str],
+    seed_bbox: list[int],
+    image_size: tuple[int, int],
+) -> dict[str, list[int]]:
+    seed = _normalize_bbox(seed_bbox, image_size)
+    if seed is None:
+        raise ValueError("Multi-KDS placement requires a detected KDS placement seed")
+
+    box_w = max(1, seed[2] - seed[0])
+    box_h = max(1, seed[3] - seed[1])
+    step_x = max(12, int(round(box_w * 0.9)))
+    step_y = max(12, int(round(box_h * 1.15)))
+
+    offsets = [
+        (0, 0),
+        (0, -step_y),
+        (0, step_y),
+        (-step_x, 0),
+        (step_x, 0),
+        (-step_x, -step_y),
+        (step_x, -step_y),
+        (-step_x, step_y),
+        (step_x, step_y),
+        (0, -2 * step_y),
+        (0, 2 * step_y),
+        (-2 * step_x, 0),
+        (2 * step_x, 0),
+    ]
+
+    candidates: list[list[int]] = []
+    for offset_x, offset_y in offsets:
+        candidate = _offset_bbox(seed, offset_x, offset_y, image_size)
+        if candidate not in candidates:
+            candidates.append(candidate)
+
+    chosen: dict[str, list[int]] = {}
+    used: list[list[int]] = []
+    for key in kds_keys:
+        if not used:
+            box = seed
+        else:
+            available = [candidate for candidate in candidates if candidate not in used]
+            if not available:
+                raise ValueError("Multi-KDS placement could not derive distinct KDS boxes")
+            box = min(
+                available,
+                key=lambda candidate: (
+                    max(_bbox_iou(candidate, previous) for previous in used),
+                    sum(_bbox_iou(candidate, previous) for previous in used),
+                    abs(candidate[0] - seed[0]) + abs(candidate[1] - seed[1]),
+                ),
+            )
+        chosen[key] = box
+        used.append(box)
+
+    if len({tuple(box) for box in chosen.values()}) != len(chosen):
+        raise ValueError("Multi-KDS placement could not derive distinct KDS boxes")
+    return chosen
+
+
+def _discovered_bbox(
+    discovery: dict[str, Any],
+    semantic_key: str,
+    image_size: tuple[int, int],
+) -> list[int] | None:
+    for placement in discovery.get("placements", []):
+        if not isinstance(placement, dict):
+            continue
+        placement_key = str(placement.get("id") or placement.get("component_key") or "").strip().lower()
+        if placement_key != semantic_key:
+            continue
+        return _normalize_bbox(placement.get("bbox"), image_size)
+    return None
+
+
+def _build_multi_kds_replacements(
+    selected_components: list[str],
+    component_assets: dict[str, str],
+    discovery: dict[str, Any],
+    kds_boxes: dict[str, list[int]],
+    image_size: tuple[int, int],
+) -> list[dict[str, Any]]:
+    replacements: list[dict[str, Any]] = []
+
+    for component in selected_components:
+        semantic_key = semantic_component_key(component)
+
+        component_type = COMPONENT_TYPE_BY_KEY.get(semantic_key)
+        if not component_type:
+            raise ValueError(f"Unsupported selected component: {component}")
+
+        if component in {"kds_2", "kds_3"}:
+            asset = component_assets.get(component)
+        else:
+            asset = component_assets.get(component) or component_assets.get(semantic_key)
+
+        if not asset:
+            raise ValueError(f"Missing component asset for {component}")
+
+        if component in KDS_INSTANCE_KEYS:
+            bbox = kds_boxes.get(component)
+        else:
+            bbox = _discovered_bbox(
+                discovery,
+                semantic_key,
+                image_size,
+            )
+
+        if bbox is None:
+            raise ValueError(
+                f"Multi-KDS placement requires a detected "
+                f"{semantic_key} placement seed"
+            )
+
+        replacement = {
+            "id": component,
+            "component_key": semantic_key,
+            "component_type": component_type,
+            "asset": asset,
+            "manual_box_xyxy": bbox,
+        }
+
+        keywords = TARGET_KEYWORDS_BY_KEY.get(semantic_key)
+        if keywords:
+            replacement["target_keywords"] = keywords
+
+        replacements.append(replacement)
+
+    return replacements
 
 
 def _load_pipeline_config(pipeline_dir: Path | None = None) -> dict[str, Any]:
@@ -129,26 +454,52 @@ def _decode_mask_data_url(mask_data_url: str, image_size: tuple[int, int]) -> np
         raw = base64.b64decode(payload)
     except Exception as exc:
         raise ValueError("Magic eraser mask is not valid base64") from exc
-    mask_image = Image.open(io.BytesIO(raw)).convert("L")
+    decoded_image = Image.open(io.BytesIO(raw))
+    if decoded_image.mode in {"RGBA", "LA"}:
+        mask_image = decoded_image.getchannel("A")
+    else:
+        mask_image = decoded_image.convert("L")
     if mask_image.size != image_size:
         mask_image = mask_image.resize(image_size, Image.Resampling.NEAREST)
     mask = np.asarray(mask_image, dtype=np.uint8)
+
     mask = np.where(mask > 12, 255, 0).astype(np.uint8)
     if int(np.count_nonzero(mask)) < 8:
         raise ValueError("Paint over the object before running Magic Eraser")
     return mask
 
+def _transform_footprint_mask(transform: dict[str, Any], image_size: tuple[int, int]) -> np.ndarray:
+    height, width = image_size[1], image_size[0]
+    footprint = np.zeros((height, width), dtype=np.uint8)
+    points = _transform_points_px(transform, image_size)
+    if points:
+        polygon = np.round(np.asarray(points, dtype=np.float32)).astype(np.int32)
+        cv2.fillPoly(footprint, [polygon], 255)
+    else:
+        x1, y1, x2, y2 = _transform_box_px(transform, image_size)
+        cv2.rectangle(footprint, (x1, y1), (max(x1, x2 - 1), max(y1, y2 - 1)), 255, thickness=-1)
+    return footprint
+
 
 def _source_image_for_repin(storage: Path, preview_dir: Path, source_version: int, source_base_mode: str) -> Path:
+    shared_background_dir = storage / "pipeline" / "repin" / "backgrounds"
+    shared_background_candidates = [
+        shared_background_dir / f"shared_background_v{source_version}.png",
+    ]
+    if source_version == 1:
+        shared_background_candidates.append(shared_background_dir / "shared_background.png")
+
     if source_base_mode == "original":
         source_candidates = [
             storage / "uploads" / "input.jpg",
+            *shared_background_candidates,
             storage / "uploads" / f"repin_source_v{source_version}.png",
             preview_dir / f"final_output_v{source_version}.png",
             preview_dir / "final_output.png",
         ]
     else:
         source_candidates = [
+            *shared_background_candidates,
             storage / "uploads" / f"repin_source_v{source_version}.png",
             preview_dir / f"final_output_v{source_version}.png",
             preview_dir / "final_output.png",
@@ -593,7 +944,7 @@ def _with_lci_cop_homography_points(transform: dict[str, Any], source_image: Ima
 
     image_size = source_image.size
     existing_points = _transform_points_px(transform, image_size)
-    if existing_points is not None and not _quad_matches_rect(existing_points, image_size):
+    if existing_points is not None:
         return transform
 
     bbox = _points_bbox_px(existing_points, image_size) if existing_points is not None else _transform_box_px(transform, image_size)
@@ -691,16 +1042,20 @@ def _transform_box_px(transform: dict[str, Any], image_size: tuple[int, int]) ->
     return x1, y1, x2, y2
 
 
-def _component_image_for_transform(transform: dict[str, Any], component_assets: dict[str, str] | None) -> Path:
-    component_key = str(transform.get("componentKey") or transform.get("componentType") or "component").lower()
+def _component_image_for_transform(transform: dict[str, Any], component_assets: dict[str, str] | None, prefer_component_asset: bool = False) -> Path:
+    component_type = str(transform.get("componentType") or transform.get("componentKey") or "component").lower()
+    component_id = str(transform.get("componentId") or transform.get("componentKey") or component_type).lower()
     editable_layer = transform.get("editableLayerPath")
+    asset_paths = selected_component_asset_paths(component_assets)
+    asset_path = asset_paths.get(component_id) or asset_paths.get(component_type)
+    if prefer_component_asset and asset_path and Path(asset_path).exists():
+        return Path(asset_path)
     if editable_layer and Path(str(editable_layer)).exists():
         return Path(str(editable_layer))
-    asset_path = selected_component_asset_paths(component_assets).get(component_key)
     if asset_path and Path(asset_path).exists():
         return Path(asset_path)
     raise ValueError(
-        f"Repin requires an editable layer or component asset for {component_key}. "
+        f"Repin requires an editable layer or component asset for {component_id}. "
         "Regenerate the automatic preview once so the selected component can be repinned directly."
     )
 
@@ -713,29 +1068,20 @@ def _warp_component(component: Image.Image, transform: dict[str, Any], image_siz
         if target_w <= 1 or target_h <= 1:
             raise ValueError("Repin transform points are too small")
         component_rgba = _lci_internal_perspective_component(component, transform)
-        src_points = np.array(
-            [
-                [0, 0],
-                [component_rgba.width, 0],
-                [component_rgba.width, component_rgba.height],
-                [0, component_rgba.height],
-            ],
-            dtype=np.float32,
+        slot = component_rgba.resize((target_w, target_h), Image.Resampling.LANCZOS)
+        rotation = _clamp_float(transform.get("rotation"))
+        if abs(rotation) > 0.01:
+            rotated = slot.rotate(-rotation, expand=True, resample=Image.Resampling.BICUBIC)
+            clipped_slot = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
+            clipped_slot.paste(rotated, ((target_w - rotated.width) // 2, (target_h - rotated.height) // 2), rotated)
+            slot = clipped_slot
+        polygon_mask = Image.new("L", (target_w, target_h), 0)
+        ImageDraw.Draw(polygon_mask).polygon(
+            [(int(round(point[0] - x1)), int(round(point[1] - y1))) for point in quad_points],
+            fill=255,
         )
-        dst_points = np.array(
-            [[point[0] - x1, point[1] - y1] for point in quad_points],
-            dtype=np.float32,
-        )
-        matrix = cv2.getPerspectiveTransform(src_points, dst_points)
-        warped_array = cv2.warpPerspective(
-            np.asarray(component_rgba),
-            matrix,
-            (target_w, target_h),
-            flags=cv2.INTER_CUBIC,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=(0, 0, 0, 0),
-        )
-        return Image.fromarray(warped_array, "RGBA"), (x1, y1, x2, y2)
+        slot.putalpha(ImageChops.multiply(slot.getchannel("A"), polygon_mask))
+        return slot, (x1, y1, x2, y2)
 
     x1, y1, x2, y2 = _transform_box_px(transform, image_size)
     target_w, target_h = x2 - x1, y2 - y1
@@ -762,7 +1108,7 @@ def _warp_component(component: Image.Image, transform: dict[str, Any], image_siz
 
     rotation = _clamp_float(transform.get("rotation"))
     if abs(rotation) > 0.01:
-        slot = slot.rotate(rotation, expand=True, resample=Image.Resampling.BICUBIC)
+        slot = slot.rotate(-rotation, expand=True, resample=Image.Resampling.BICUBIC)
         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
         x1 = round(cx - slot.width / 2)
         y1 = round(cy - slot.height / 2)
@@ -1609,7 +1955,25 @@ def run_components(payload: ProjectPayload):
     cfg_path = repo_root() / "config.yaml"
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     panel_path = repo_root() / "tests" / "panels" / "mod_panel.png"
-    component_assets = selected_component_asset_paths(payload.component_assets)
+    raw_component_assets = dict(payload.component_assets or {})
+    for instance in payload.component_instances or []:
+        if isinstance(instance, dict) and instance.get("id") and (instance.get("assetUrl") or instance.get("asset_url")):
+            raw_component_assets[str(instance["id"])] = str(instance.get("assetUrl") or instance.get("asset_url"))
+    component_assets = selected_component_asset_paths(raw_component_assets)
+
+    selected_exact_components = _selected_exact_components(
+        payload.selected_components,
+        payload.component_instances,
+    )
+    selected_kds_keys = _selected_kds_keys(
+        payload.selected_components,
+        payload.component_instances,
+    )
+    multi_kds_request = _is_multi_kds_request(
+        payload.selected_components,
+        payload.component_instances,
+    )
+
     cfg.update(
         {
             "run_dir": str(pipeline_dir),
@@ -1618,17 +1982,141 @@ def run_components(payload: ProjectPayload):
             "input_validation": {"enabled": False},
             "video": {**cfg.get("video", {}), "enabled": False},
             "selected_components": payload.selected_components or [],
+            "component_instances": payload.component_instances or [],
             "component_assets": component_assets,
             "environment": payload.environments or [],
         }
     )
     config_path = pipeline_dir / "config.yaml"
-    config_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
 
     try:
-        with PIPELINE_LOCK:
-            _run_pipeline_in_process(config_path)
-        requested_components = [str(component).strip().lower() for component in (payload.selected_components or []) if str(component).strip()]
+        if multi_kds_request:
+            strict_secondary_assets = _require_exact_secondary_kds_assets(
+                selected_kds_keys,
+                raw_component_assets,
+            )
+
+            multi_component_assets = dict(component_assets)
+            multi_component_assets.update(strict_secondary_assets)
+
+            selected_id_set = set(selected_exact_components)
+            selected_instances: list[dict[str, Any]] = []
+
+            for instance in payload.component_instances or []:
+                if not isinstance(instance, dict):
+                    continue
+
+                instance_id = str(instance.get("id") or "").strip().lower()
+                if not instance_id or instance_id not in selected_id_set:
+                    continue
+
+                normalized_instance = copy.deepcopy(instance)
+                normalized_instance["id"] = instance_id
+                selected_instances.append(normalized_instance)
+
+            discovery_dir = pipeline_dir / "placement_discovery"
+            discovery_dir.mkdir(parents=True, exist_ok=True)
+
+            discovery_cfg = copy.deepcopy(cfg)
+            discovery_cfg.update(
+                {
+                    "run_dir": str(discovery_dir),
+                    "input_image": str(input_image),
+                    "selected_components": selected_exact_components,
+                    "component_instances": selected_instances,
+                    "component_assets": multi_component_assets,
+                }
+            )
+            discovery_cfg["preprocessing"] = {
+                **discovery_cfg.get("preprocessing", {}),
+                "enabled": False,
+            }
+            discovery_cfg["detection"] = {
+                **discovery_cfg.get("detection", {}),
+                "existing_json": None,
+            }
+            discovery_cfg.pop("replacements", None)
+
+            discovery_config_path = discovery_dir / "config.yaml"
+            discovery_config_path.write_text(
+                yaml.safe_dump(discovery_cfg),
+                encoding="utf-8",
+            )
+
+            root = repo_root()
+            if str(root) not in sys.path:
+                sys.path.insert(0, str(root))
+
+            from src.pipeline import discover_placements
+
+            with PIPELINE_LOCK:
+                discovery = discover_placements(discovery_config_path)
+
+                image_size = _source_image_size(input_image)
+
+                kds_seed_bbox = _discovered_bbox(
+                    discovery,
+                    "kds",
+                    image_size,
+                )
+                if kds_seed_bbox is None:
+                    raise ValueError(
+                        "Multi-KDS placement requires a detected KDS placement seed"
+                    )
+
+                kds_boxes = _derive_kds_boxes(
+                    selected_kds_keys,
+                    kds_seed_bbox,
+                    image_size,
+                )
+
+                replacements = _build_multi_kds_replacements(
+                    selected_exact_components,
+                    multi_component_assets,
+                    discovery,
+                    kds_boxes,
+                    image_size,
+                )
+
+                render_cfg = copy.deepcopy(cfg)
+                render_cfg.update(
+                    {
+                        "run_dir": str(pipeline_dir),
+                        "input_image": str(input_image),
+                        "selected_components": selected_exact_components,
+                        "component_instances": selected_instances,
+                        "component_assets": multi_component_assets,
+                        "replacements": replacements,
+                    }
+                )
+                render_cfg["preprocessing"] = {
+                    **render_cfg.get("preprocessing", {}),
+                    "enabled": False,
+                }
+                render_cfg["detection"] = {
+                    **render_cfg.get("detection", {}),
+                    "existing_json": None,
+                }
+
+                config_path.write_text(
+                    yaml.safe_dump(render_cfg),
+                    encoding="utf-8",
+                )
+
+                _run_pipeline_in_process(config_path)
+
+        else:
+            config_path.write_text(
+                yaml.safe_dump(cfg),
+                encoding="utf-8",
+            )
+
+            with PIPELINE_LOCK:
+                _run_pipeline_in_process(config_path)
+        requested_components = _selected_exact_components(
+            payload.selected_components,
+            payload.component_instances,
+        )
         placements_path = pipeline_dir / "component_placements.json"
         placements = json.loads(placements_path.read_text(encoding="utf-8")) if placements_path.exists() else []
         placed_components = {str(item.get("id") or item.get("component_type") or "").lower() for item in placements if isinstance(item, dict)}
@@ -1637,6 +2125,10 @@ def run_components(payload: ProjectPayload):
             raise ValueError(
                 "Preview incomplete: missing selected component placement(s): " + ", ".join(missing_components)
             )
+        shared_background = pipeline_dir / "repin" / "backgrounds" / "shared_background.png"
+        if not shared_background.exists():
+            raise FileNotFoundError("Component-free Repin background was not created")
+        shutil.copy2(shared_background, pipeline_dir / "repin" / "backgrounds" / "shared_background_v1.png")
         final_output = pipeline_dir / "final_output.png"
         source_preview = final_output if final_output.exists() else input_image
         shutil.copy2(source_preview, preview_dir / "final_output.png")
@@ -1673,7 +2165,7 @@ def repin_components(payload: ProjectPayload):
         for item in incoming_transforms:
             if not isinstance(item, dict):
                 continue
-            key = str(item.get("componentKey") or item.get("componentType") or "").lower()
+            key = str(item.get("componentId") or item.get("componentKey") or item.get("componentType") or "").lower()
             if key:
                 transforms_by_component[key] = item
         transforms = list(transforms_by_component.values())
@@ -1696,9 +2188,9 @@ def repin_components(payload: ProjectPayload):
             _with_lci_cop_homography_points(transform, placed_image)
             for transform in transforms
         ]
-        target_key = str(target_transform.get("componentKey") or target_transform.get("componentType") or "").lower()
+        target_key = str(target_transform.get("componentId") or target_transform.get("componentKey") or target_transform.get("componentType") or "").lower()
         target_transform = next(
-            (transform for transform in transforms if str(transform.get("componentKey") or transform.get("componentType") or "").lower() == target_key),
+            (transform for transform in transforms if str(transform.get("componentId") or transform.get("componentKey") or transform.get("componentType") or "").lower() == target_key),
             transforms[0],
         )
         user_eraser_background_path = None
@@ -1728,6 +2220,10 @@ def repin_components(payload: ProjectPayload):
                     restore_transform,
                 )
 
+        shared_background_path = pipeline_dir / "repin" / "backgrounds" / f"shared_background_v{target_version}.png"
+        shared_background_path.parent.mkdir(parents=True, exist_ok=True)
+        placed_image.save(shared_background_path)
+
         placements = []
         component_masks = []
         for transform in transforms:
@@ -1735,6 +2231,7 @@ def repin_components(payload: ProjectPayload):
                 _component_image_for_transform(
                     transform,
                     payload.component_assets,
+                    prefer_component_asset=True,
                 )
             ).convert("RGBA")
 
@@ -1753,7 +2250,8 @@ def repin_components(payload: ProjectPayload):
 
             placed_image = placed_image
             placements.append({
-                "id": transform.get("componentKey"),
+                "id": transform.get("componentId") or transform.get("componentKey"),
+                "component_key": transform.get("componentKey"),
                 "component_type": transform.get("componentType"),
                 "manual_repin": True,
                 "source_version": source_version,
@@ -1780,7 +2278,7 @@ def repin_components(payload: ProjectPayload):
             "activeComponentType": target_transform.get("componentType") or target_transform.get("componentKey"),
             "magicEraserApplied": _has_manual_eraser_background(target_transform),
         }), flush=True)
-        target_key = str(target_transform.get("componentKey") or target_transform.get("componentType") or "").lower()
+        target_key = str(target_transform.get("componentId") or target_transform.get("componentKey") or target_transform.get("componentType") or "").lower()
         target_index = next(
             (index for index, placement in enumerate(placements) if str(placement.get("id") or placement.get("component_type") or "").lower() == target_key),
             len(placements) - 1 if placements else -1,
@@ -1799,7 +2297,7 @@ def repin_components(payload: ProjectPayload):
                 editable_layer_url = f"preview/{editable_layer_name}"
                 target_transform = {**target_transform, "editableLayerUrl": editable_layer_url}
                 transforms = [
-                    target_transform if str(item.get("componentKey") or item.get("componentType") or "").lower() == target_key else item
+                    target_transform if str(item.get("componentId") or item.get("componentKey") or item.get("componentType") or "").lower() == target_key else item
                     for item in transforms
                 ]
         shutil.copy2(output_path, preview_dir / "final_output.png")
@@ -1893,6 +2391,10 @@ def repin_erase(payload: ProjectPayload):
         source_image = Image.open(source_image_path).convert("RGB")
         print(f"[REPIN_ERASE] source run_id={run_id} path={source_image_path}", flush=True)
         mask = _decode_mask_data_url(payload.mask_data_url or "", source_image.size)
+        footprint_mask = _transform_footprint_mask(transform, source_image.size)
+        if footprint_mask.max() > 0:
+            mask = cv2.bitwise_or(mask, footprint_mask)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=1)
         mask = cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=1)
         print(f"[REPIN_ERASE] mask run_id={run_id} pixels={int(np.count_nonzero(mask))} size={source_image.size}", flush=True)
 

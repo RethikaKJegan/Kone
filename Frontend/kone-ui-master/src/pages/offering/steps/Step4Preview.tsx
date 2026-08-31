@@ -3,11 +3,12 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { Eye, EyeOff } from 'lucide-react'
 import { useOfferingStore } from '../../../store/offeringStore'
 import { AnnotatedPreview } from '../../../components/shared/AnnotatedPreview'
-import { KONE_COMPONENTS } from '../../../lib/constants'
+import { componentDisplayLabel } from '../../../lib/constants'
 import { cn } from '../../../lib/utils'
 import type { ComponentKey } from '../../../types'
 
-const COMP_LABELS = Object.fromEntries(KONE_COMPONENTS.map(c => [c.key, c.label])) as Record<ComponentKey, string>
+const COMPONENT_LABEL_KEYS: ComponentKey[] = ['ceiling', 'kds', 'kds_2', 'kds_3', 'dcs1020', 'lci', 'door', 'cop']
+const COMP_LABELS = Object.fromEntries(COMPONENT_LABEL_KEYS.map(key => [key, componentDisplayLabel(key)])) as Record<ComponentKey, string>
 
 export default function Step4Preview() {
   const { projectId, offeringId } = useParams()
