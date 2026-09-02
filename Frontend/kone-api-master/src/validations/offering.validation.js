@@ -1,8 +1,16 @@
 const Joi = require('joi');
 
-const componentKeys = ['ceiling', 'kds', 'kds_2', 'kds_3', 'dcs1020', 'lci', 'door', 'cop'];
+const componentKeys = ['ceiling', 'kds', 'kds_2', 'kds_3', 'dcs1020', 'dcs1020_2', 'dcs1020_3', 'lci', 'door', 'cop'];
 const semanticComponentKeys = ['ceiling', 'kds', 'dcs1020', 'lci', 'door', 'cop'];
 const kdsInstanceKeys = ['kds', 'kds_2', 'kds_3'];
+const dcsInstanceKeys = ['dcs1020', 'dcs1020_2', 'dcs1020_3'];
+const equipmentInstanceKeys = [...kdsInstanceKeys, ...dcsInstanceKeys];
+
+const componentTypeForInstanceId = (id) => {
+  if (kdsInstanceKeys.includes(id)) return 'kds';
+  if (dcsInstanceKeys.includes(id)) return 'dcs1020';
+  return null;
+};
 const { objectId } = require('./custom.validation');
 
 const repinPoint = Joi.object().keys({
@@ -93,18 +101,24 @@ const offeringId = {
 
 const componentInstance = Joi.object().keys({
   id: Joi.string()
-    .valid(...kdsInstanceKeys)
+    .valid(...equipmentInstanceKeys)
     .required(),
-  componentType: Joi.string().valid('kds').required(),
+  componentType: Joi.string().valid('kds', 'dcs1020').required(),
   variantId: Joi.string().required(),
   assetUrl: Joi.string().required(),
+}).custom((value, helpers) => {
+  if (componentTypeForInstanceId(value.id) !== value.componentType) return helpers.error('any.invalid');
+  return value;
 });
 
 const componentInstances = Joi.array()
-  .max(3)
   .items(componentInstance)
   .custom((value, helpers) => {
-    if (new Set(value.map((item) => item.variantId)).size !== value.length) return helpers.error('array.unique');
+    const kdsItems = value.filter((item) => item.componentType === 'kds');
+    const dcsItems = value.filter((item) => item.componentType === 'dcs1020');
+    const hasDuplicateVariant = (items) => new Set(items.map((item) => item.variantId)).size !== items.length;
+    if (kdsItems.length > 3 || dcsItems.length > 3 || kdsItems.length + dcsItems.length > 4) return helpers.error('array.max');
+    if (hasDuplicateVariant(kdsItems) || hasDuplicateVariant(dcsItems)) return helpers.error('array.unique');
     return value;
   });
 

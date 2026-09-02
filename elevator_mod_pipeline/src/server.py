@@ -127,11 +127,25 @@ def selected_component_asset_paths(component_assets: dict[str, str] | None) -> d
                 resolved[instance_key] = str(candidate)
                 break
 
+    for key, raw in (component_assets or {}).items():
+        instance_key = str(key).strip().lower()
+        if instance_key not in {"dcs1020_2", "dcs1020_3"}:
+            continue
+        candidates = [Path(str(raw))] if raw else []
+        if raw and str(raw).startswith("/components/"):
+            candidates.insert(0, workspace_root() / "Frontend" / "kone-ui-master" / "public" / str(raw).lstrip("/"))
+        for candidate in candidates:
+            if candidate.exists():
+                resolved[instance_key] = str(candidate)
+                break
+
     return resolved
 
 
 KDS_INSTANCE_KEYS = {"kds", "kds_2", "kds_3"}
 KDS_INSTANCE_ORDER = ["kds", "kds_2", "kds_3"]
+DCS_INSTANCE_KEYS = {"dcs1020", "dcs1020_2", "dcs1020_3"}
+DCS_INSTANCE_ORDER = ["dcs1020", "dcs1020_2", "dcs1020_3"]
 
 COMPONENT_TYPE_BY_KEY = {
     "cop": "elevator_mod_panel",
@@ -182,7 +196,11 @@ TARGET_KEYWORDS_BY_KEY = {
 
 def semantic_component_key(component: str) -> str:
     normalized = str(component or "").strip().lower()
-    return "kds" if normalized in KDS_INSTANCE_KEYS else normalized
+    if normalized in KDS_INSTANCE_KEYS:
+        return "kds"
+    if normalized in DCS_INSTANCE_KEYS:
+        return "dcs1020"
+    return normalized
 
 
 def _normalize_component_keys(values: list[str] | None) -> list[str]:
@@ -227,6 +245,22 @@ def _is_multi_kds_request(
     kds_keys = _selected_kds_keys(selected_components, component_instances)
     return len(kds_keys) > 1 or "kds_2" in kds_keys or "kds_3" in kds_keys
 
+
+def _selected_dcs_keys(
+    selected_components: list[str] | None,
+    component_instances: list[dict[str, Any]] | None,
+) -> list[str]:
+    selected = set(_selected_exact_components(selected_components, component_instances))
+    return [key for key in DCS_INSTANCE_ORDER if key in selected]
+
+
+def _is_multi_dcs_request(
+    selected_components: list[str] | None,
+    component_instances: list[dict[str, Any]] | None,
+) -> bool:
+    dcs_keys = _selected_dcs_keys(selected_components, component_instances)
+    return len(dcs_keys) > 1 or "dcs1020_2" in dcs_keys or "dcs1020_3" in dcs_keys
+
 def _resolve_component_asset(raw: str | None) -> Path | None:
     if not raw:
         return None
@@ -248,6 +282,21 @@ def _require_exact_secondary_kds_assets(
     resolved: dict[str, str] = {}
     for key in kds_keys:
         if key not in {"kds_2", "kds_3"}:
+            continue
+        asset_path = _resolve_component_asset(raw_component_assets.get(key))
+        if asset_path is None:
+            raise ValueError(f"Missing exact component asset for {key}")
+        resolved[key] = str(asset_path)
+    return resolved
+
+
+def _require_exact_secondary_dcs_assets(
+    dcs_keys: list[str],
+    raw_component_assets: dict[str, str],
+) -> dict[str, str]:
+    resolved: dict[str, str] = {}
+    for key in dcs_keys:
+        if key not in {"dcs1020_2", "dcs1020_3"}:
             continue
         asset_path = _resolve_component_asset(raw_component_assets.get(key))
         if asset_path is None:
@@ -368,6 +417,14 @@ def _derive_kds_boxes(
     return chosen
 
 
+def _derive_dcs_boxes(
+    dcs_keys: list[str],
+    seed_bbox: list[int],
+    image_size: tuple[int, int],
+) -> dict[str, list[int]]:
+    return _derive_kds_boxes(dcs_keys, seed_bbox, image_size)
+
+
 def _discovered_bbox(
     discovery: dict[str, Any],
     semantic_key: str,
@@ -383,11 +440,12 @@ def _discovered_bbox(
     return None
 
 
-def _build_multi_kds_replacements(
+def _build_multi_equipment_replacements(
     selected_components: list[str],
     component_assets: dict[str, str],
     discovery: dict[str, Any],
     kds_boxes: dict[str, list[int]],
+    dcs_boxes: dict[str, list[int]],
     image_size: tuple[int, int],
 ) -> list[dict[str, Any]]:
     replacements: list[dict[str, Any]] = []
@@ -399,7 +457,7 @@ def _build_multi_kds_replacements(
         if not component_type:
             raise ValueError(f"Unsupported selected component: {component}")
 
-        if component in {"kds_2", "kds_3"}:
+        if component in {"kds_2", "kds_3", "dcs1020_2", "dcs1020_3"}:
             asset = component_assets.get(component)
         else:
             asset = component_assets.get(component) or component_assets.get(semantic_key)
@@ -409,6 +467,20 @@ def _build_multi_kds_replacements(
 
         if component in KDS_INSTANCE_KEYS:
             bbox = kds_boxes.get(component)
+            if bbox is None and component == "kds":
+                bbox = _discovered_bbox(
+                    discovery,
+                    "kds",
+                    image_size,
+                )
+        elif component in DCS_INSTANCE_KEYS:
+            bbox = dcs_boxes.get(component)
+            if bbox is None and component == "dcs1020":
+                bbox = _discovered_bbox(
+                    discovery,
+                    "dcs1020",
+                    image_size,
+                )
         else:
             bbox = _discovered_bbox(
                 discovery,
@@ -418,7 +490,7 @@ def _build_multi_kds_replacements(
 
         if bbox is None:
             raise ValueError(
-                f"Multi-KDS placement requires a detected "
+                f"Multi-equipment placement requires a detected "
                 f"{semantic_key} placement seed"
             )
 
@@ -1047,9 +1119,17 @@ def _component_image_for_transform(transform: dict[str, Any], component_assets: 
     component_id = str(transform.get("componentId") or transform.get("componentKey") or component_type).lower()
     editable_layer = transform.get("editableLayerPath")
     asset_paths = selected_component_asset_paths(component_assets)
-    asset_path = asset_paths.get(component_id) or asset_paths.get(component_type)
-    if prefer_component_asset and asset_path and Path(asset_path).exists():
-        return Path(asset_path)
+    if prefer_component_asset:
+        if component_id in {"dcs1020_2", "dcs1020_3"}:
+            asset_path = asset_paths.get(component_id)
+            if not asset_path or not Path(asset_path).exists():
+                raise ValueError(f"Repin requires an exact component asset for {component_id}")
+            return Path(asset_path)
+        asset_path = asset_paths.get(component_id) or asset_paths.get(component_type)
+        if asset_path and Path(asset_path).exists():
+            return Path(asset_path)
+    else:
+        asset_path = asset_paths.get(component_id) or asset_paths.get(component_type)
     if editable_layer and Path(str(editable_layer)).exists():
         return Path(str(editable_layer))
     if asset_path and Path(asset_path).exists():
@@ -1969,10 +2049,19 @@ def run_components(payload: ProjectPayload):
         payload.selected_components,
         payload.component_instances,
     )
+    selected_dcs_keys = _selected_dcs_keys(
+        payload.selected_components,
+        payload.component_instances,
+    )
     multi_kds_request = _is_multi_kds_request(
         payload.selected_components,
         payload.component_instances,
     )
+    multi_dcs_request = _is_multi_dcs_request(
+        payload.selected_components,
+        payload.component_instances,
+    )
+    multi_equipment_request = multi_kds_request or multi_dcs_request
 
     cfg.update(
         {
@@ -1990,10 +2079,17 @@ def run_components(payload: ProjectPayload):
     config_path = pipeline_dir / "config.yaml"
 
     try:
-        if multi_kds_request:
+        total_start = time.perf_counter()
+        if multi_equipment_request:
             strict_secondary_assets = _require_exact_secondary_kds_assets(
                 selected_kds_keys,
                 raw_component_assets,
+            )
+            strict_secondary_assets.update(
+                _require_exact_secondary_dcs_assets(
+                    selected_dcs_keys,
+                    raw_component_assets,
+                )
             )
 
             multi_component_assets = dict(component_assets)
@@ -2050,31 +2146,56 @@ def run_components(payload: ProjectPayload):
             from src.pipeline import discover_placements
 
             with PIPELINE_LOCK:
+                discovery_start = time.perf_counter()
+                print(f"[PERF][RUN_COMPONENTS] discovery_start selected={selected_exact_components}", flush=True)
                 discovery = discover_placements(discovery_config_path)
+                print(
+                    f"[PERF][RUN_COMPONENTS] discovery_done duration_s={time.perf_counter() - discovery_start:.3f}",
+                    flush=True,
+                )
 
                 image_size = _source_image_size(input_image)
 
-                kds_seed_bbox = _discovered_bbox(
-                    discovery,
-                    "kds",
-                    image_size,
-                )
-                if kds_seed_bbox is None:
-                    raise ValueError(
-                        "Multi-KDS placement requires a detected KDS placement seed"
+                kds_boxes: dict[str, list[int]] = {}
+                if multi_kds_request:
+                    kds_seed_bbox = _discovered_bbox(
+                        discovery,
+                        "kds",
+                        image_size,
+                    )
+                    if kds_seed_bbox is None:
+                        raise ValueError(
+                            "Multi-KDS placement requires a detected KDS placement seed"
+                        )
+                    kds_boxes = _derive_kds_boxes(
+                        selected_kds_keys,
+                        kds_seed_bbox,
+                        image_size,
                     )
 
-                kds_boxes = _derive_kds_boxes(
-                    selected_kds_keys,
-                    kds_seed_bbox,
-                    image_size,
-                )
+                dcs_boxes: dict[str, list[int]] = {}
+                if multi_dcs_request:
+                    dcs_seed_bbox = _discovered_bbox(
+                        discovery,
+                        "dcs1020",
+                        image_size,
+                    )
+                    if dcs_seed_bbox is None:
+                        raise ValueError(
+                            "Multi-DCS placement requires a detected DCS1020 placement seed"
+                        )
+                    dcs_boxes = _derive_dcs_boxes(
+                        selected_dcs_keys,
+                        dcs_seed_bbox,
+                        image_size,
+                    )
 
-                replacements = _build_multi_kds_replacements(
+                replacements = _build_multi_equipment_replacements(
                     selected_exact_components,
                     multi_component_assets,
                     discovery,
                     kds_boxes,
+                    dcs_boxes,
                     image_size,
                 )
 
@@ -2103,7 +2224,13 @@ def run_components(payload: ProjectPayload):
                     encoding="utf-8",
                 )
 
+                render_start = time.perf_counter()
+                print(f"[PERF][RUN_COMPONENTS] render_start selected={selected_exact_components}", flush=True)
                 _run_pipeline_in_process(config_path)
+                print(
+                    f"[PERF][RUN_COMPONENTS] render_done duration_s={time.perf_counter() - render_start:.3f}",
+                    flush=True,
+                )
 
         else:
             config_path.write_text(
@@ -2112,7 +2239,13 @@ def run_components(payload: ProjectPayload):
             )
 
             with PIPELINE_LOCK:
+                render_start = time.perf_counter()
+                print(f"[PERF][RUN_COMPONENTS] render_start selected={selected_exact_components}", flush=True)
                 _run_pipeline_in_process(config_path)
+                print(
+                    f"[PERF][RUN_COMPONENTS] render_done duration_s={time.perf_counter() - render_start:.3f}",
+                    flush=True,
+                )
         requested_components = _selected_exact_components(
             payload.selected_components,
             payload.component_instances,
@@ -2140,6 +2273,10 @@ def run_components(payload: ProjectPayload):
             "repin_pass": 1,
         })
         write_status(payload.storage_dir, status)
+        print(
+            f"[PERF][RUN_COMPONENTS] total_done duration_s={time.perf_counter() - total_start:.3f}",
+            flush=True,
+        )
         return {"ok": True, "status": "preview_ready"}
     except Exception as exc:
         write_status(payload.storage_dir, public_status("failed", str(exc)))

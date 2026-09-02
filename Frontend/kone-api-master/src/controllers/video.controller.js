@@ -579,7 +579,7 @@ const componentPinsFromPlacement = async (storageDir) => {
   const legacyHeight = Number(detections?.metadata?.image_height) || 0;
   if ((!legacyWidth || !legacyHeight) && !geometry) return [];
 
-  const supported = new Set(['kds', 'kds_2', 'kds_3', 'dcs1020', 'lci', 'cop', 'door', 'ceiling']);
+  const supported = new Set(['kds', 'kds_2', 'kds_3', 'dcs1020', 'dcs1020_2', 'dcs1020_3', 'lci', 'cop', 'door', 'ceiling']);
   return placements
     .map((placement) => {
       const componentKey = String(placement.id || '').toLowerCase();

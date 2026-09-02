@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import copy
 import logging
+import time
 import warnings
 from pathlib import Path
 from typing import Any
@@ -95,11 +96,25 @@ class PipelineValidationError(RuntimeError):
 
 
 KDS_INSTANCE_KEYS: set[str] = {"kds", "kds_2", "kds_3"}
+DCS_INSTANCE_KEYS: set[str] = {"dcs1020", "dcs1020_2", "dcs1020_3"}
 
 
 def semantic_component_key(component: str) -> str:
     normalized = str(component or "").strip().lower()
-    return "kds" if normalized in KDS_INSTANCE_KEYS else normalized
+    if normalized in KDS_INSTANCE_KEYS:
+        return "kds"
+    if normalized in DCS_INSTANCE_KEYS:
+        return "dcs1020"
+    return normalized
+
+
+def _instance_family(instance_id: str) -> str | None:
+    normalized = str(instance_id or "").strip().lower()
+    if normalized in KDS_INSTANCE_KEYS:
+        return "kds"
+    if normalized in DCS_INSTANCE_KEYS:
+        return "dcs1020"
+    return None
 
 
 def _placement_bbox_from_debug(placement_debug: dict[str, Any], fallback_bbox: list[int] | tuple[int, int, int, int] | None = None) -> list[int] | None:
@@ -317,7 +332,13 @@ def run(config_path: str | Path) -> None:
             from .geometry import run_geometry
 
             monitor.mark("geometry_start")
+            geometry_start = time.perf_counter()
+            print("[PERF][GEOMETRY] start pass=render", flush=True)
             geometry = run_geometry(working_image, detections, cfg, geometry_path, depth_path)
+            print(
+                f"[PERF][GEOMETRY] done pass=render duration_s={time.perf_counter() - geometry_start:.3f}",
+                flush=True,
+            )
             monitor.mark("geometry_done")
         elif geometry_path.exists():
             geometry = load_json(geometry_path)
@@ -358,12 +379,16 @@ def run(config_path: str | Path) -> None:
         combined_panel_mask = None
         component_placements: list[dict[str, Any]] = []
         repin_layer_records: list[dict[str, Any]] = []
+        insertion_all_start = time.perf_counter()
         for index, (replacement, component_cfg) in enumerate(zip(replacements, component_cfgs), start=1):
             replacement_id = replacement["id"]
+            semantic_key = str(replacement.get("component_key") or replacement_id)
             component_out = composite_path if index == len(replacements) else run_dir / f"composite_{replacement_id}.png"
             component_mask_path = run_dir / f"harmonization_mask_{replacement_id}.png"
             before_component_path = Path(current_background)
             status("place", f"[PLACE] Placing component: {replacement_id}")
+            insert_start = time.perf_counter()
+            print(f"[PERF][INSERT] start id={replacement_id} semantic={semantic_key}", flush=True)
             insert_mod_panel(
                 current_background,
                 Path(replacement["asset"]),
@@ -373,6 +398,10 @@ def run(config_path: str | Path) -> None:
                 component_out,
                 component_mask_path,
                 removal_mask,
+            )
+            print(
+                f"[PERF][INSERT] done id={replacement_id} duration_s={time.perf_counter() - insert_start:.3f}",
+                flush=True,
             )
             mask = cv2.imread(str(component_mask_path), cv2.IMREAD_GRAYSCALE)
             if mask is not None:
@@ -397,6 +426,10 @@ def run(config_path: str | Path) -> None:
                 "placement_debug": placement_debug,
             })
             current_background = component_out
+        print(
+            f"[PERF][INSERT] all_done count={len(replacements)} duration_s={time.perf_counter() - insertion_all_start:.3f}",
+            flush=True,
+        )
         _save_repin_background_outputs(run_dir, repin_layer_records, composite_path)
         if combined_panel_mask is not None:
             cv2.imwrite(str(panel_mask_path), combined_panel_mask)
@@ -466,26 +499,70 @@ def replacement_configs(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         ]
         replacements: list[dict[str, Any]] = []
         missing_components: list[str] = []
-        component_instances = [item for item in (cfg.get("component_instances") or []) if isinstance(item, dict)]
-        if len(component_instances) > 3:
-            raise ValueError("A maximum of 3 KDS instances may be selected")
-        instance_variants = [str(item.get("variantId") or item.get("variant_id") or "").strip() for item in component_instances]
-        if len(set(instance_variants)) != len(instance_variants):
-            raise ValueError("The same KDS variant cannot be selected more than once")
-        instance_ids = {str(item.get("id") or "").strip().lower() for item in component_instances if str(item.get("id") or "").strip()}
-        for instance in component_instances:
-            instance_id = str(instance.get("id") or "").strip().lower()
-            component = semantic_component_key(str(instance.get("componentType") or instance.get("component_type") or "kds"))
-            replacement = _component_replacement(component, cfg, instance)
-            if replacement is None or not instance_id:
-                missing_components.append(instance_id or component)
-            else:
-                replacements.append(replacement)
-        for component in selected:
-            if component in instance_ids:
+        selected_ids = set(selected)
+        component_instances = []
+        instance_by_id: dict[str, dict[str, Any]] = {}
+        kds_instances: list[dict[str, Any]] = []
+        dcs_instances: list[dict[str, Any]] = []
+
+        for item in cfg.get("component_instances") or []:
+            if not isinstance(item, dict):
                 continue
-            semantic_component = semantic_component_key(component)
-            instance = {"id": component, "componentType": semantic_component} if component != semantic_component else None
+            instance_id = str(item.get("id") or "").strip().lower()
+            if selected_ids and instance_id not in selected_ids:
+                continue
+            component = semantic_component_key(str(item.get("componentType") or item.get("component_type") or "kds"))
+            expected_component = _instance_family(instance_id)
+            if expected_component is None and instance_id:
+                raise ValueError(f"Unsupported component instance: {instance_id}")
+            if expected_component and expected_component != component:
+                raise ValueError(f"Component instance {instance_id} must use componentType {expected_component}")
+            component_instances.append(item)
+            if instance_id:
+                instance_by_id[instance_id] = item
+            if expected_component == "kds":
+                kds_instances.append(item)
+            elif expected_component == "dcs1020":
+                dcs_instances.append(item)
+
+        if selected:
+            kds_keys = [component for component in selected if component in KDS_INSTANCE_KEYS]
+            dcs_keys = [component for component in selected if component in DCS_INSTANCE_KEYS]
+            unsupported_equipment = [
+                component for component in selected
+                if component.startswith("kds_") or component.startswith("dcs1020_")
+                if component not in KDS_INSTANCE_KEYS and component not in DCS_INSTANCE_KEYS
+            ]
+            if unsupported_equipment:
+                raise ValueError(f"Unsupported selected component(s): {', '.join(unsupported_equipment)}")
+        else:
+            kds_keys = [str(item.get("id") or "").strip().lower() for item in kds_instances]
+            dcs_keys = [str(item.get("id") or "").strip().lower() for item in dcs_instances]
+
+        if len(kds_keys) > 3 or len(dcs_keys) > 3 or len(kds_keys) + len(dcs_keys) > 4:
+            raise ValueError("A maximum of 3 KDS, 3 DCS, and 4 total KDS/DCS instances may be selected")
+
+        for family_name, family_instances in (("KDS", kds_instances), ("DCS", dcs_instances)):
+            family_variants = [str(item.get("variantId") or item.get("variant_id") or "").strip() for item in family_instances]
+            if len(set(family_variants)) != len(family_variants):
+                raise ValueError(f"The same {family_name} variant cannot be selected more than once")
+
+        if selected:
+            replacement_sources = []
+            for component in selected:
+                semantic_component = semantic_component_key(component)
+                instance = instance_by_id.get(component)
+                if instance is None and component != semantic_component:
+                    instance = {"id": component, "componentType": semantic_component}
+                replacement_sources.append((component, semantic_component, instance))
+        else:
+            replacement_sources = []
+            for instance in component_instances:
+                instance_id = str(instance.get("id") or "").strip().lower()
+                semantic_component = semantic_component_key(str(instance.get("componentType") or instance.get("component_type") or "kds"))
+                replacement_sources.append((instance_id or semantic_component, semantic_component, instance))
+
+        for component, semantic_component, instance in replacement_sources:
             replacement = _component_replacement(semantic_component, cfg, instance)
             if replacement is None:
                 missing_components.append(component)
@@ -516,7 +593,11 @@ def _component_replacement(component: str, cfg: dict[str, Any], instance: dict[s
     replacement["component_key"] = component
     if instance:
         replacement["id"] = str(instance.get("id") or replacement["id"])
-    asset_override = (cfg.get("component_assets") or {}).get(replacement["id"]) or (instance or {}).get("assetUrl") or (instance or {}).get("asset_url") or (cfg.get("component_assets") or {}).get(component)
+    instance_id = str((instance or {}).get("id") or "").strip().lower()
+    exact_asset = (cfg.get("component_assets") or {}).get(replacement["id"]) or (instance or {}).get("assetUrl") or (instance or {}).get("asset_url")
+    if instance_id in {"dcs1020_2", "dcs1020_3"} and not exact_asset:
+        return None
+    asset_override = exact_asset or (cfg.get("component_assets") or {}).get(component)
     if asset_override:
         replacement["asset"] = str(asset_override)
     elif component == "ceiling":
@@ -607,7 +688,13 @@ def discover_placements(config_path: str | Path) -> dict[str, Any]:
     if cfg["geometry"].get("enabled", True):
         from .geometry import run_geometry
 
+        geometry_start = time.perf_counter()
+        print("[PERF][GEOMETRY] start pass=discovery", flush=True)
         geometry = run_geometry(working_image, detections, cfg, geometry_path, depth_path)
+        print(
+            f"[PERF][GEOMETRY] done pass=discovery duration_s={time.perf_counter() - geometry_start:.3f}",
+            flush=True,
+        )
     elif geometry_path.exists():
         geometry = load_json(geometry_path)
     else:

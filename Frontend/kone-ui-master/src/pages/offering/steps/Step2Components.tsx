@@ -2,13 +2,13 @@ import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { Check, Eye, Search, X } from 'lucide-react'
 import { useOfferingStore } from '../../../store/offeringStore'
-import { KDS_INSTANCE_KEYS, componentByKey, componentDefaultAsset, componentDisplayLabel, componentVariantsFor, isKdsInstanceKey, semanticComponentKey, variantForAsset } from '../../../lib/constants'
+import { DCS_INSTANCE_KEYS, KDS_INSTANCE_KEYS, componentByKey, componentDefaultAsset, componentDisplayLabel, componentVariantsFor, isDcsInstanceKey, isKdsInstanceKey, semanticComponentKey, variantForAsset } from '../../../lib/constants'
 import { cn } from '../../../lib/utils'
 import { toast } from '../../../hooks/useToast'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../../components/ui/dialog'
 import type { Environment, ComponentKey, ComponentInstanceSelection, ComponentVariant, SemanticComponentKey } from '../../../types'
 
-type CatalogGroupKind = 'structure' | 'kds' | 'single'
+type CatalogGroupKind = 'structure' | 'kds' | 'dcs' | 'single'
 type CatalogGroup = {
   id: string
   label: string
@@ -22,12 +22,13 @@ const STEP2_GROUPS: CatalogGroup[] = [
   { id: 'interior-indonesia-singapore', label: 'Elevator Interior - Indonesia/Singapore', componentType: 'ceiling', variantGroup: 'Elevator Interior - Indonesia/Singapore', kind: 'structure' },
   { id: 'kds90', label: 'KDS90', componentType: 'kds', variantGroup: 'KDS90', kind: 'kds' },
   { id: 'kds330-93', label: 'KDS330/93', componentType: 'kds', variantGroup: 'KDS330/93', kind: 'kds' },
-  { id: 'dcs1020', label: 'DCS1020', componentType: 'dcs1020', variantGroup: 'DCS1020', kind: 'single' },
+  { id: 'dcs1020', label: 'DCS1020', componentType: 'dcs1020', variantGroup: 'DCS1020', kind: 'dcs' },
   { id: 'door', label: 'Door', componentType: 'door', variantGroup: 'Door', kind: 'structure' },
 ]
 
 const STRUCTURE_KEYS: ComponentKey[] = ['ceiling', 'door']
 const MAX_SELECTED_COMPONENTS = 5
+const MAX_EQUIPMENT_COMPONENTS = 4
 
 type ComponentAssetMap = Partial<Record<ComponentKey, string>>
 type PreviewImage = { title: string; subtitle: string; imageUrl: string }
@@ -48,11 +49,24 @@ function selectedKdsKeys(components: ComponentKey[]) {
   return KDS_INSTANCE_KEYS.filter(key => components.includes(key)) as ComponentKey[]
 }
 
+function selectedDcsKeys(components: ComponentKey[]) {
+  return DCS_INSTANCE_KEYS.filter(key => components.includes(key)) as ComponentKey[]
+}
+
+function selectedEquipmentCount(components: ComponentKey[]) {
+  return selectedKdsKeys(components).length + selectedDcsKeys(components).length
+}
+
 function selectedGroupAsset(group: CatalogGroup, components: ComponentKey[], assets: ComponentAssetMap) {
   if (group.kind === 'kds') {
     return selectedKdsKeys(components)
       .map(key => assets[key])
       .find(asset => asset && variantForAsset('kds', asset)?.group === group.variantGroup) ?? null
+  }
+  if (group.kind === 'dcs') {
+    return selectedDcsKeys(components)
+      .map(key => assets[key])
+      .find(asset => asset && variantForAsset('dcs1020', asset)?.group === group.variantGroup) ?? null
   }
   const key = group.componentType as ComponentKey
   const asset = components.includes(key) ? assets[key] ?? null : null
@@ -70,6 +84,10 @@ function firstFreeKdsKey(components: ComponentKey[]): ComponentKey | null {
   return (KDS_INSTANCE_KEYS.find(key => !components.includes(key)) ?? null) as ComponentKey | null
 }
 
+function firstFreeDcsKey(components: ComponentKey[]): ComponentKey | null {
+  return (DCS_INSTANCE_KEYS.find(key => !components.includes(key)) ?? null) as ComponentKey | null
+}
+
 function normalizeSelectedComponents(components: ComponentKey[] = [], selections: ComponentInstanceSelection[] = []): ComponentKey[] {
   const next: ComponentKey[] = []
   const push = (key: ComponentKey) => {
@@ -82,7 +100,7 @@ function normalizeSelectedComponents(components: ComponentKey[] = [], selections
 
   sourceComponents.forEach(component => {
     if (component === 'lci') push('kds')
-    else if (component === 'ceiling' || component === 'door' || component === 'dcs1020' || isKdsInstanceKey(component)) push(component)
+    else if (component === 'ceiling' || component === 'door' || isKdsInstanceKey(component) || isDcsInstanceKey(component)) push(component)
   })
 
   const structures = next.filter(component => STRUCTURE_KEYS.includes(component))
@@ -114,6 +132,21 @@ function normalizeKdsSelections(components: ComponentKey[], assets: ComponentAss
   })
 }
 
+function normalizeDcsSelections(components: ComponentKey[], assets: ComponentAssetMap = {}, selections: ComponentInstanceSelection[] = []): ComponentInstanceSelection[] {
+  const variants = componentVariantsFor('dcs1020')
+  const seenVariants = new Set<string>()
+  return selectedDcsKeys(components).flatMap(key => {
+    const existing = selections.find(selection => selection.id === key && selection.componentType === 'dcs1020')
+    const variant = variants.find(item => item.imageUrl === assets[key])
+      ?? variants.find(item => item.id === existing?.variantId)
+      ?? variants.find(item => item.imageUrl === existing?.assetUrl)
+      ?? variants[0]
+    if (!variant || seenVariants.has(variant.id)) return []
+    seenVariants.add(variant.id)
+    return [{ id: key, componentType: 'dcs1020' as const, variantId: variant.id, assetUrl: variant.imageUrl }]
+  })
+}
+
 function selectedVariantFor(key: ComponentKey, assets: ComponentAssetMap) {
   return variantForAsset(key, assets[key])
 }
@@ -127,6 +160,7 @@ export default function Step2Components() {
   const initialComponents = normalizeSelectedComponents(currentOffering?.selectedComponents ?? [], currentOffering?.componentInstances ?? [])
   const initialAssets = normalizeAssetMap(initialComponents, currentOffering?.selectedComponentAssets ?? {}, currentOffering?.componentInstances ?? [])
   const initialKdsSelections = normalizeKdsSelections(initialComponents, initialAssets, currentOffering?.componentInstances ?? [])
+  const initialDcsSelections = normalizeDcsSelections(initialComponents, initialAssets, currentOffering?.componentInstances ?? [])
   const [envs, setEnvs] = useState<Environment[]>(normalizeEnvironments())
   const [comps, setComps] = useState<ComponentKey[]>(initialComponents)
   const [componentAssets, setComponentAssets] = useState<ComponentAssetMap>(initialAssets)
@@ -135,6 +169,7 @@ export default function Step2Components() {
   )
   const [editingInstanceKey, setEditingInstanceKey] = useState<ComponentKey | null>(null)
   const [kdsSelections, setKdsSelections] = useState<ComponentInstanceSelection[]>(initialKdsSelections)
+  const [dcsSelections, setDcsSelections] = useState<ComponentInstanceSelection[]>(initialDcsSelections)
   const [previewImage, setPreviewImage] = useState<PreviewImage | null>(null)
   const [optionQuery, setOptionQuery] = useState('')
   const [componentImageVersion] = useState(() => String(Date.now()))
@@ -149,6 +184,7 @@ export default function Step2Components() {
       setActiveCatalogGroupId(current => STEP2_GROUPS.some(group => group.id === current) ? current : (nextComponents[0] ? groupForComponent(nextComponents[0], nextAssets).id : STEP2_GROUPS[0].id))
       setEditingInstanceKey(current => current && nextComponents.includes(current) ? current : null)
       setKdsSelections(normalizeKdsSelections(nextComponents, nextAssets, currentOffering.componentInstances ?? []))
+      setDcsSelections(normalizeDcsSelections(nextComponents, nextAssets, currentOffering.componentInstances ?? []))
     }
   }, [currentOffering?.id])
 
@@ -163,18 +199,18 @@ export default function Step2Components() {
 
   const activateGroup = (group: CatalogGroup) => {
     setActiveCatalogGroupId(group.id)
-    setEditingInstanceKey(current =>
-      group.kind === 'kds' && current && isKdsInstanceKey(current)
-        ? current
-        : null
-    )
+    setEditingInstanceKey(current => {
+      if (group.kind === 'kds' && current && isKdsInstanceKey(current)) return current
+      if (group.kind === 'dcs' && current && isDcsInstanceKey(current)) return current
+      return null
+    })
     setOptionQuery('')
   }
 
   const handleSelectedClick = (component: ComponentKey) => {
     const group = groupForComponent(component, componentAssets)
     setActiveCatalogGroupId(group.id)
-    setEditingInstanceKey(isKdsInstanceKey(component) ? component : null)
+    setEditingInstanceKey(isKdsInstanceKey(component) || isDcsInstanceKey(component) ? component : null)
     setOptionQuery('')
   }
 
@@ -185,10 +221,14 @@ export default function Step2Components() {
     const nextKdsSelections = isKdsInstanceKey(component)
       ? normalizeKdsSelections(nextComps, nextAssets, kdsSelections.filter(selection => selection.id !== component))
       : kdsSelections
+    const nextDcsSelections = isDcsInstanceKey(component)
+      ? normalizeDcsSelections(nextComps, nextAssets, dcsSelections.filter(selection => selection.id !== component))
+      : dcsSelections
 
     setComps(nextComps)
     setComponentAssets(nextAssets)
     setKdsSelections(nextKdsSelections)
+    setDcsSelections(nextDcsSelections)
     setEditingInstanceKey(current => current === component ? null : current)
   }
 
@@ -215,6 +255,10 @@ export default function Step2Components() {
         toast('Select an existing KDS unit to replace it.', 'destructive')
         return
       }
+      if (selectedEquipmentCount(comps) >= MAX_EQUIPMENT_COMPONENTS) {
+        toast('You can select up to 4 KDS/DCS components total.', 'destructive')
+        return
+      }
       if (comps.length >= MAX_SELECTED_COMPONENTS) {
         toast('You can select up to 5 components total.', 'destructive')
         return
@@ -226,6 +270,47 @@ export default function Step2Components() {
       setComps(nextComps)
       setComponentAssets(nextAssets)
       setKdsSelections(normalizeKdsSelections(nextComps, nextAssets, kdsSelections))
+      setEditingInstanceKey(null)
+      return
+    }
+
+    if (activeGroup.kind === 'dcs') {
+      if (editingInstanceKey && isDcsInstanceKey(editingInstanceKey)) {
+        const duplicate = selectedDcsKeys(comps).some(key => key !== editingInstanceKey && selectedVariantFor(key, componentAssets)?.id === variant.id)
+        if (duplicate) {
+          toast('This DCS component is already selected.', 'destructive')
+          return
+        }
+        const nextComps = comps.includes(editingInstanceKey) ? comps : [...comps, editingInstanceKey]
+        const nextAssets = normalizeAssetMap(nextComps, { ...componentAssets, [editingInstanceKey]: variant.imageUrl })
+        setComps(nextComps)
+        setComponentAssets(nextAssets)
+        setDcsSelections(normalizeDcsSelections(nextComps, nextAssets, dcsSelections))
+        return
+      }
+      if (selectedDcsKeys(comps).some(key => selectedVariantFor(key, componentAssets)?.id === variant.id)) {
+        toast('This DCS component is already selected.', 'destructive')
+        return
+      }
+      if (selectedDcsKeys(comps).length >= DCS_INSTANCE_KEYS.length) {
+        toast('Select an existing DCS unit to replace it.', 'destructive')
+        return
+      }
+      if (selectedEquipmentCount(comps) >= MAX_EQUIPMENT_COMPONENTS) {
+        toast('You can select up to 4 KDS/DCS components total.', 'destructive')
+        return
+      }
+      if (comps.length >= MAX_SELECTED_COMPONENTS) {
+        toast('You can select up to 5 components total.', 'destructive')
+        return
+      }
+      const nextKey = firstFreeDcsKey(comps)
+      if (!nextKey) return
+      const nextComps = [...comps, nextKey]
+      const nextAssets = normalizeAssetMap(nextComps, { ...componentAssets, [nextKey]: variant.imageUrl })
+      setComps(nextComps)
+      setComponentAssets(nextAssets)
+      setDcsSelections(normalizeDcsSelections(nextComps, nextAssets, dcsSelections))
       setEditingInstanceKey(null)
       return
     }
@@ -258,7 +343,7 @@ export default function Step2Components() {
       goToStep(1)
       return
     }
-    await setComponents(envs, comps, normalizeAssetMap(comps, componentAssets), kdsSelections)
+    await setComponents(envs, comps, normalizeAssetMap(comps, componentAssets), [...kdsSelections, ...dcsSelections])
     goToStep(3)
     navigate(`/projects/${projectId}/offerings/${offeringId}/step/3`)
   }
@@ -293,7 +378,7 @@ export default function Step2Components() {
             <h2 className="text-heading text-[15px] font-semibold text-[#111827]">
               2 &nbsp; Use Case & Components
             </h2>
-            <p className="mt-1 text-[12px] text-[#8A9BB5]">Choose up to 5 components: 1 structure, 1 DCS1020, and up to 3 KDS units.</p>
+            <p className="mt-1 text-[12px] text-[#8A9BB5]">Choose up to 5 components: 1 structure, up to 3 DCS1020 units, and up to 3 KDS units. KDS/DCS combined max is 4.</p>
           </div>
           <button
             onClick={handleBack}
@@ -422,9 +507,11 @@ export default function Step2Components() {
                       activeComp === 'ceiling' ? 'grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3' : activeComp === 'cop' || activeComp === 'door' ? 'grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3' : 'grid grid-cols-3 gap-2 sm:grid-cols-4 xl:grid-cols-5'
                     )}>
                       {variants.map(variant => {
-                        const isSelected = activeComp === 'kds'
+                        const isSelected = activeGroup.kind === 'kds'
                           ? kdsSelections.some(selection => selection.variantId === variant.id)
-                          : componentAssets[activeComp] === variant.imageUrl
+                          : activeGroup.kind === 'dcs'
+                            ? dcsSelections.some(selection => selection.variantId === variant.id)
+                            : componentAssets[activeComp] === variant.imageUrl
                         return (
                           <div
                             key={variant.id}

@@ -23,7 +23,7 @@ export interface Project {
 
 export type Environment = 'car' | 'lobby'
 export type SemanticComponentKey = 'ceiling' | 'kds' | 'dcs1020' | 'lci' | 'door' | 'cop'
-export type ComponentKey = SemanticComponentKey | 'kds_2' | 'kds_3'
+export type ComponentKey = SemanticComponentKey | 'kds_2' | 'kds_3' | 'dcs1020_2' | 'dcs1020_3'
 
 export interface ComponentItem {
   key: ComponentKey

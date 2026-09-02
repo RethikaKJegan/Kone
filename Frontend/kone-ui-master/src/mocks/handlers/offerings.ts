@@ -4,6 +4,12 @@ import { generateId } from '../../lib/utils'
 import { AI_PLACEMENT_DEFAULTS } from '../../lib/constants'
 import type { ComponentKey, ComponentPin } from '../../types'
 
+const MOCK_AI_PLACEMENT_DEFAULTS = {
+  ...AI_PLACEMENT_DEFAULTS,
+  dcs1020_2: { x: 68, y: 54 },
+  dcs1020_3: { x: 68, y: 62 },
+} satisfies Record<ComponentKey, { x: number; y: number }>
+
 export const offeringHandlers = [
   http.get('/api/v1/projects/:projectId/offerings', async ({ params }) => {
     await delay(350)
@@ -36,8 +42,8 @@ export const offeringHandlers = [
 
     const pins: ComponentPin[] = offering.selectedComponents.map((key: ComponentKey) => ({
       componentKey: key,
-      x: AI_PLACEMENT_DEFAULTS[key].x,
-      y: AI_PLACEMENT_DEFAULTS[key].y,
+      x: MOCK_AI_PLACEMENT_DEFAULTS[key].x,
+      y: MOCK_AI_PLACEMENT_DEFAULTS[key].y,
       aiPlaced: true,
     }))
 

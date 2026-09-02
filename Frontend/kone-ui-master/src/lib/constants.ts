@@ -45,10 +45,12 @@ export const KONE_COMPONENTS: ComponentItem[] = [
     imageUrl: '/components/lci/DCS1020/Pedestal Mounted DOP KSP1068.png',
     variants: [
       { id: 'dcs1020-pedestal-mounted-dop-ksp1068', group: 'DCS1020', label: 'Pedestal Mounted DOP KSP1068', imageUrl: '/components/lci/DCS1020/Pedestal Mounted DOP KSP1068.png' },
-      { id: 'dcs1020-wall-mounted-10in-dop-ksp1068', group: 'DCS1020', label: 'Wall Mounted 10" DOP KSP1068', imageUrl: '/components/lci/DCS1020/Wall Mounted 10in DOP KSP1068.png' },
-      { id: 'dcs1020-destination-guidance-dual-kst1078', group: 'DCS1020', label: 'Destination Guidance Dual KST1078', imageUrl: '/components/lci/DCS1020/Destination Guidance Dual KST1078.png' },
-      { id: 'dcs1020-elevator-guide', group: 'DCS1020', label: 'Elevator Guide', imageUrl: '/components/lci/DCS1020/Elevator Guide.png' },
-      { id: 'dcs1020-destination-guidance-single-kst1068', group: 'DCS1020', label: 'Destination Guidance Single KST1068', imageUrl: '/components/lci/DCS1020/Destination Guidance Dual KST1068.png' },
+      { id: 'dcs1020-wall-mounted-10in-dop-ksp1068', group: 'DCS1020', label: 'Wall Mounted 10" DOP KSP1068', imageUrl: "/components/lci/DCS1020/Wall Mounted 10'' DOP KSP1068.png" },
+      { id: 'dcs1020-destination-guidance-dual-i-kst1078', group: 'DCS1020', label: 'Destination Guidance Dual I KST1078', imageUrl: '/components/lci/DCS1020/Destination Guidiance Dual I KST1078.png' },
+      { id: 'dcs1020-destination-guidance-dual-ii-kst1078', group: 'DCS1020', label: 'Destination Guidance Dual II KST1078', imageUrl: '/components/lci/DCS1020/Destination Guidance Dual II KST1078.png' },
+      { id: 'dcs1020-elevator-guide-i', group: 'DCS1020', label: 'Elevator Guide I', imageUrl: '/components/lci/DCS1020/Elevator Guide I.png' },
+      { id: 'dcs1020-elevator-guide-ii', group: 'DCS1020', label: 'Elevator Guide II', imageUrl: '/components/lci/DCS1020/Elevator Guide II.png' },
+      { id: 'dcs1020-destination-guidance-single-kst1068', group: 'DCS1020', label: 'Destination Guidance Single KST1068', imageUrl: '/components/lci/DCS1020/Destination Guidance Single KST1068.png' },
       { id: 'dcs1020-kst-850-860', group: 'DCS1020', label: 'KST 850/860', imageUrl: '/components/lci/DCS1020/KST 850-860.png' },
       { id: 'dcs1020-kso-857', group: 'DCS1020', label: 'KSO 857', imageUrl: '/components/lci/DCS1020/KSO 857.png' },
       { id: 'dcs1020-eid-kst-880-890', group: 'DCS1020', label: 'EID KST 880-890', imageUrl: '/components/lci/DCS1020/EID KST 880-890.png' },
@@ -63,7 +65,7 @@ export const KONE_COMPONENTS: ComponentItem[] = [
     variants: [
       { id: 'plain-stainless-steel-door', group: 'Door', label: 'Plain Stainless Steel Door', imageUrl: '/components/door/Plain Stainless Steel Door.png' },
       { id: 'stainless-steel-door', group: 'Door', label: 'Stainless Steel Door', imageUrl: '/components/door/Solid Stainless Steel Door.png' },
-      { id: 'small-vision-glass-door', group: 'Door', label: 'Small Vision Glass Door', imageUrl: '/components/door/Small vision glass door .png' },
+      { id: 'small-vision-glass-door', group: 'Door', label: 'Small Vision Glass Door', imageUrl: '/components/door/Small vision glass door.png' },
       { id: 'half-glass-door', group: 'Door', label: 'Half Glass Door', imageUrl: '/components/door/Half glass door.png' },
       { id: 'framed-full-glass-door', group: 'Door', label: 'Framed Full Glass Door', imageUrl: '/components/door/Framed full glass door.png' },
       { id: 'frameless-full-glass-door', group: 'Door', label: 'Frameless Full Glass Door', imageUrl: '/components/door/Frameless full glass door.png' },
@@ -84,13 +86,20 @@ export const KONE_COMPONENTS: ComponentItem[] = [
 ]
 
 export const KDS_INSTANCE_KEYS = ['kds', 'kds_2', 'kds_3'] as const
+export const DCS_INSTANCE_KEYS = ['dcs1020', 'dcs1020_2', 'dcs1020_3'] as const
 
 export function isKdsInstanceKey(key: string | null | undefined): key is typeof KDS_INSTANCE_KEYS[number] {
   return KDS_INSTANCE_KEYS.includes(key as typeof KDS_INSTANCE_KEYS[number])
 }
 
+export function isDcsInstanceKey(key: string | null | undefined): key is typeof DCS_INSTANCE_KEYS[number] {
+  return DCS_INSTANCE_KEYS.includes(key as typeof DCS_INSTANCE_KEYS[number])
+}
+
 export function semanticComponentKey(key: ComponentKey): SemanticComponentKey {
-  return isKdsInstanceKey(key) ? 'kds' : key as SemanticComponentKey
+  if (isKdsInstanceKey(key)) return 'kds'
+  if (isDcsInstanceKey(key)) return 'dcs1020'
+  return key as SemanticComponentKey
 }
 
 export function componentByKey(key: ComponentKey) {
@@ -116,6 +125,11 @@ export function variantForAsset(key: ComponentKey, assetUrl: string | null | und
 export function componentDisplayLabel(key: ComponentKey, assetUrl?: string | null) {
   if (isKdsInstanceKey(key)) {
     const instanceLabel = key === 'kds' ? 'KDS' : key === 'kds_2' ? 'KDS 2' : 'KDS 3'
+    const variant = assetUrl ? variantForAsset(key, assetUrl) : null
+    return variant ? instanceLabel + ' - ' + variant.label : instanceLabel
+  }
+  if (isDcsInstanceKey(key)) {
+    const instanceLabel = key === 'dcs1020' ? 'DCS1020' : key === 'dcs1020_2' ? 'DCS1020 2' : 'DCS1020 3'
     const variant = assetUrl ? variantForAsset(key, assetUrl) : null
     return variant ? instanceLabel + ' - ' + variant.label : instanceLabel
   }
