@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="${ROOT_DIR:-/root/Kone}"
-HF_TOKEN="${HF_TOKEN:-PUT_YOUR_HF_TOKEN_HERE}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="${ROOT_DIR:-$SCRIPT_DIR}"
+HF_TOKEN="${HF_TOKEN:-}"
+INSTALL_SYSTEM_PACKAGES="${INSTALL_SYSTEM_PACKAGES:-1}"
+MONGODB_DB_DIR="${MONGODB_DB_DIR:-$ROOT_DIR/.mongo/db}"
+MONGODB_PORT="${MONGODB_PORT:-27017}"
 
 BACKEND_PORT="${BACKEND_PORT:-8001}"
 API_PORT="${API_PORT:-4000}"
@@ -16,6 +20,8 @@ CPU_TORCH_INDEX_URL="${CPU_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu
 
 LOG_DIR="$ROOT_DIR/setup_logs"
 LOG_FILE="$LOG_DIR/setup_kone_all.log"
+
+APT_NONINTERACTIVE="${APT_NONINTERACTIVE:-1}"
 
 CACHE_DIR="$ROOT_DIR/.cache"
 HF_HOME="$ROOT_DIR/.hf_home"
@@ -41,6 +47,7 @@ COMFY_PIP="$COMFY_VENV_DIR/bin/pip"
 COMFY_WORKFLOW_DIR="$VDOTEST_DIR/workflows"
 COMFY_INPUT_DIR="$COMFY_DIR/input"
 COMFY_OUTPUT_DIR="$COMFY_DIR/output"
+COMFY_CHECKPOINT_DIR="$COMFY_DIR/models/checkpoints"
 COMFY_MODEL_PRECISION="${COMFY_MODEL_PRECISION:-fp8}"
 
 GDINO_DIR="$ROOT_DIR/GroundingDINO"
@@ -64,12 +71,12 @@ DINO_WEIGHT="$WEIGHTS_DIR/groundingdino_swint_ogc.pth"
 SAM2_WEIGHT="$WEIGHTS_DIR/sam2.1_hiera_large.pt"
 BIG_LAMA_CKPT="$BIG_LAMA_DIR/models/best.ckpt"
 
-export ROOT_DIR HF_TOKEN BACKEND_PORT API_PORT UI_PORT VENV_DIR PY PIP TORCH_INDEX_URL CPU_TORCH_INDEX_URL
+export ROOT_DIR HF_TOKEN INSTALL_SYSTEM_PACKAGES MONGODB_DB_DIR MONGODB_PORT BACKEND_PORT API_PORT UI_PORT VENV_DIR PY PIP TORCH_INDEX_URL CPU_TORCH_INDEX_URL
 export LOG_DIR LOG_FILE CACHE_DIR HF_HOME HUGGINGFACE_HUB_CACHE TRANSFORMERS_CACHE HF_HUB_CACHE
 export TORCH_HOME XDG_CACHE_HOME PIP_CACHE_DIR NPM_CONFIG_CACHE MPLCONFIGDIR
 export HF_HUB_DISABLE_SYMLINKS_WARNING HF_HUB_ENABLE_HF_TRANSFER
 export PIPELINE_DIR API_DIR UI_DIR VDOTEST_DIR COMFY_DIR COMFY_VENV_DIR COMFY_PY COMFY_PIP
-export COMFY_WORKFLOW_DIR COMFY_INPUT_DIR COMFY_OUTPUT_DIR COMFY_MODEL_PRECISION
+export COMFY_WORKFLOW_DIR COMFY_INPUT_DIR COMFY_OUTPUT_DIR COMFY_CHECKPOINT_DIR COMFY_MODEL_PRECISION
 export GDINO_DIR SAM2_DIR LAMA_DIR BERT_DIR DEPTH_MODEL_DIR REFINEMENT_MODEL_DIR
 export FIRERED_VENV_DIR FIRERED_PY FIRERED_PIP FIRERED_MODEL_REPO FIRERED_MODEL_DIR
 export FIRERED_HF_HOME FIRERED_HF_HUB_CACHE WEIGHTS_DIR
@@ -116,15 +123,75 @@ check_dir() {
     [[ -d "$path" ]] && log "OK dir: $path" || fail "Missing dir: $path"
 }
 
+run_as_root() {
+    if [[ "$(id -u)" -eq 0 ]]; then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    else
+        fail "Root privileges or sudo are required for: $*"
+    fi
+}
+
+install_system_dependencies() {
+    [[ "$INSTALL_SYSTEM_PACKAGES" == "0" ]] && {
+        log "Skipping system package installation because INSTALL_SYSTEM_PACKAGES=0"
+        return 0
+    }
+
+    command -v apt-get >/dev/null 2>&1 || {
+        log "apt-get is unavailable; checking existing system prerequisites"
+        return 0
+    }
+
+    local python_base
+    python_base="$(find_python)"
+    local -a packages=(ca-certificates git curl ffmpeg build-essential pkg-config unzip python3-dev libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1)
+
+    if ! "$python_base" -m venv --help >/dev/null 2>&1; then
+        packages+=(python3-venv python3-dev)
+    fi
+    if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+        packages+=(nodejs npm)
+    fi
+
+    local mongodb_package=""
+    if ! command -v mongod >/dev/null 2>&1; then
+        local candidate
+        for candidate in mongodb-org mongodb mongodb-server; do
+            if apt-cache show "$candidate" >/dev/null 2>&1; then
+                mongodb_package="$candidate"
+                break
+            fi
+        done
+        [[ -n "$mongodb_package" ]] || fail "mongod is missing and no MongoDB package is available from the configured apt repositories"
+        packages+=("$mongodb_package")
+    fi
+
+    log "Installing system packages: ${packages[*]}"
+    if [[ "$APT_NONINTERACTIVE" == "1" ]]; then
+        export DEBIAN_FRONTEND=noninteractive
+    fi
+    run_as_root apt-get update >>"$LOG_FILE" 2>&1 || fail "apt-get update failed"
+    run_as_root apt-get install -y --no-install-recommends "${packages[@]}" >>"$LOG_FILE" 2>&1 || fail "apt-get install failed"
+
+    log "System prerequisites are installed"
+}
+
+python_supported() {
+    "$1" -c 'import sys; raise SystemExit(0 if (3, 11) <= sys.version_info[:2] < (3, 14) else 1)' >/dev/null 2>&1
+}
+
 find_python() {
     if [[ -n "${PY_BASE:-}" ]]; then
         command -v "$PY_BASE" >/dev/null 2>&1 || fail "PY_BASE command not found: $PY_BASE"
+        python_supported "$PY_BASE" || fail "PY_BASE must be Python 3.11, 3.12, or 3.13: $PY_BASE"
         printf '%s\n' "$PY_BASE"
         return 0
     fi
 
     for candidate in python3.13 python3 python; do
-        if command -v "$candidate" >/dev/null 2>&1; then
+        if command -v "$candidate" >/dev/null 2>&1 && python_supported "$candidate"; then
             printf '%s\n' "$candidate"
             return 0
         fi
@@ -145,13 +212,14 @@ find_preferred_python() {
 
     if [[ -n "$override" ]]; then
         command -v "$override" >/dev/null 2>&1 || fail "$env_name Python command not found: $override"
+        python_supported "$override" || fail "$env_name Python must be 3.11, 3.12, or 3.13: $override"
         printf "%s\n" "$override"
         return 0
     fi
 
     local candidate
     for candidate in "$@"; do
-        if command -v "$candidate" >/dev/null 2>&1; then
+        if command -v "$candidate" >/dev/null 2>&1 && python_supported "$candidate"; then
             printf "%s\n" "$candidate"
             return 0
         fi
@@ -180,8 +248,8 @@ create_dirs() {
 
     mkdir -p "$LOG_DIR" "$CACHE_DIR" "$HF_HOME" "$HUGGINGFACE_HUB_CACHE"
     mkdir -p "$TORCH_HOME" "$PIP_CACHE_DIR" "$NPM_CONFIG_CACHE" "$MPLCONFIGDIR" "$WEIGHTS_DIR"
-    mkdir -p "$ROOT_DIR/models" "$FIRERED_HF_HOME" "$FIRERED_HF_HUB_CACHE"
-    mkdir -p "$VDOTEST_DIR" "$COMFY_WORKFLOW_DIR"
+    mkdir -p "$ROOT_DIR/models" "$MONGODB_DB_DIR" "$FIRERED_HF_HOME" "$FIRERED_HF_HUB_CACHE"
+    mkdir -p "$VDOTEST_DIR" "$COMFY_WORKFLOW_DIR" "$COMFY_CHECKPOINT_DIR"
 }
 
 create_venv() {
@@ -209,14 +277,14 @@ clone_or_pull() {
     local url="$2"
     local dir="$3"
 
-    if [[ ! -d "$dir/.git" ]]; then
-        if [[ -d "$dir" ]]; then
-            log "$name dir exists without .git; keeping existing dir"
+    if [[ ! -d "$dir/.git" && ! -f "$dir/.git" ]]; then
+        if [[ -d "$dir" && -n "$(find "$dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+            log "$name dir exists without git metadata; keeping existing contents: $dir"
         else
             git clone "$url" "$dir" >>"$LOG_FILE" 2>&1 || fail "$name clone failed"
         fi
     else
-        (cd "$dir" && git pull >>"$LOG_FILE" 2>&1) || fail "$name git pull failed"
+        (cd "$dir" && git pull --ff-only >>"$LOG_FILE" 2>&1) || fail "$name git pull failed"
     fi
 }
 
@@ -227,6 +295,19 @@ clone_repos() {
     clone_or_pull "LaMa" "https://github.com/advimman/lama.git" "$LAMA_DIR"
     clone_or_pull "ComfyUI" "https://github.com/comfyanonymous/ComfyUI.git" "$COMFY_DIR"
     cd "$ROOT_DIR" || fail "Cannot return to ROOT_DIR"
+}
+
+install_node_project() {
+    local project_dir="$1"
+    local project_name="$2"
+
+    if [[ -f "$project_dir/package-lock.json" ]]; then
+        log "Installing $project_name npm lockfile"
+        (cd "$project_dir" && npm ci --ignore-scripts --no-audit --no-fund --cache "$NPM_CONFIG_CACHE" >>"$LOG_FILE" 2>&1) || fail "$project_name npm ci failed"
+    else
+        log "Installing $project_name npm packages"
+        (cd "$project_dir" && npm install --ignore-scripts --no-audit --no-fund --cache "$NPM_CONFIG_CACHE" >>"$LOG_FILE" 2>&1) || fail "$project_name npm install failed"
+    fi
 }
 
 install_python_requirements() {
@@ -246,19 +327,10 @@ install_python_requirements() {
     log "Ensuring Python 3.13-compatible Hugging Face stack"
     "$PIP" install --cache-dir "$PIP_CACHE_DIR" --upgrade "transformers>=4.45,<5" "tokenizers>=0.20" "huggingface_hub[cli]>=0.25" >>"$LOG_FILE" 2>&1 || fail "Failed installing transformers/tokenizers/huggingface_hub"
 
-    log "Installing API npm packages"
-    if [[ -f "$API_DIR/package.json" ]]; then
-        (cd "$API_DIR" && npm install --ignore-scripts --cache "$NPM_CONFIG_CACHE" >>"$LOG_FILE" 2>&1) || fail "API npm install failed"
-    else
-        fail "Missing API package.json"
-    fi
-
-    log "Installing UI npm packages"
-    if [[ -f "$UI_DIR/package.json" ]]; then
-        (cd "$UI_DIR" && npm install --ignore-scripts --cache "$NPM_CONFIG_CACHE" >>"$LOG_FILE" 2>&1) || fail "UI npm install failed"
-    else
-        fail "Missing UI package.json"
-    fi
+    check_file "$API_DIR/package.json"
+    check_file "$UI_DIR/package.json"
+    install_node_project "$API_DIR" "API"
+    install_node_project "$UI_DIR" "UI"
 
     cd "$ROOT_DIR" || fail "Cannot return to ROOT_DIR"
 }
@@ -320,7 +392,7 @@ install_firered_requirements() {
 install_comfyui() {
     log "Installing/updating ComfyUI for Wan 2.2 workflows"
     clone_or_pull "ComfyUI" "https://github.com/comfyanonymous/ComfyUI.git" "$COMFY_DIR"
-    mkdir -p "$COMFY_INPUT_DIR" "$COMFY_OUTPUT_DIR" "$COMFY_DIR/models/diffusion_models" "$COMFY_DIR/models/loras" "$COMFY_DIR/models/text_encoders" "$COMFY_DIR/models/vae"
+    mkdir -p "$COMFY_INPUT_DIR" "$COMFY_OUTPUT_DIR" "$COMFY_DIR/models/diffusion_models" "$COMFY_DIR/models/loras" "$COMFY_DIR/models/text_encoders" "$COMFY_DIR/models/vae" "$COMFY_CHECKPOINT_DIR"
     create_comfy_venv
     "$COMFY_PIP" install --cache-dir "$PIP_CACHE_DIR" --index-url "$TORCH_INDEX_URL" "torch>=2.7" "torchvision>=0.22" "torchaudio>=2.7" >>"$LOG_FILE" 2>&1 || fail "ComfyUI Torch install failed"
     if [[ -f "$COMFY_DIR/requirements.txt" ]]; then
@@ -425,6 +497,12 @@ download_comfy_wan_models() {
     download_hf_file "Comfy-Org/Wan_2.1_ComfyUI_repackaged" "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors" "$COMFY_DIR/models/text_encoders" || fail "Wan text encoder download failed"
 }
 
+download_comfy_ltx_models() {
+    log "Checking ComfyUI LTX-2.3 FLF2V models"
+    download_hf_file "Lightricks/LTX-2.3-fp8" "ltx-2.3-22b-distilled-fp8.safetensors" "$COMFY_CHECKPOINT_DIR" || fail "LTX checkpoint download failed"
+    download_hf_file "Comfy-Org/ltx-2" "split_files/text_encoders/gemma_3_12B_it_fp4_mixed.safetensors" "$COMFY_DIR/models/text_encoders" || fail "LTX text encoder download failed"
+}
+
 patch_pipeline_config_paths() {
     log "Updating pipeline config paths for this ROOT_DIR"
     "$PY" - <<PY >>"$LOG_FILE" 2>&1
@@ -481,6 +559,7 @@ download_models() {
     download_depth_and_refinement_models
     download_firered_model
     download_comfy_wan_models
+    download_comfy_ltx_models
 }
 
 download_bert() {
@@ -626,9 +705,20 @@ write_env_files() {
     cat >"$API_DIR/.env" <<EOF
 NODE_ENV=development
 PORT=$API_PORT
-MONGODB_URL=mongodb://localhost:27017/kone
+MONGODB_URL=mongodb://localhost:$MONGODB_PORT/kone
 JWT_SECRET=local_guest_secret
 LOGIC_URL=http://localhost:$BACKEND_PORT
+COMFY_AUTOSTART=true
+COMFY_ROOT=$VDOTEST_DIR
+COMFY_URL=http://localhost:8188
+COMFY_RUNNER=$VDOTEST_DIR/run_i2v_api.py
+COMFY_START_SCRIPT=$VDOTEST_DIR/scripts/start_comfy_logged.sh
+COMFY_PYTHON=$COMFY_PY
+FIRERED_PYTHON=$FIRERED_PY
+FIRERED_IMAGE_EDIT_SCRIPT=$ROOT_DIR/fire_red_image_edit.py
+FIRERED_MODEL_PATH=$FIRERED_MODEL_DIR
+FIRERED_SERVICE_URL=http://127.0.0.1:8010/edit
+FIRERED_SERVICE_TIMEOUT=900
 EOF
 
     cat >"$UI_DIR/.env" <<EOF
@@ -646,6 +736,8 @@ run_checks() {
     printf "============================================================\n"
 
     check_file "$PY"
+    check_file "$ROOT_DIR/fire_red_image_edit.py"
+    check_file "$ROOT_DIR/firered_service.py"
     check_file "$PIPELINE_DIR/requirements.txt"
     check_file "$API_DIR/package.json"
     check_file "$UI_DIR/package.json"
@@ -671,6 +763,7 @@ run_checks() {
     check_dir "$COMFY_DIR/models/loras"
     check_dir "$COMFY_DIR/models/text_encoders"
     check_dir "$COMFY_DIR/models/vae"
+    check_dir "$COMFY_CHECKPOINT_DIR"
 
     check_file "$BERT_DIR/config.json"
     check_file "$DINO_WEIGHT"
@@ -695,6 +788,8 @@ run_checks() {
     check_file "$COMFY_DIR/models/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors"
     check_file "$COMFY_DIR/models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
     check_file "$COMFY_DIR/models/vae/wan_2.1_vae.safetensors"
+    check_file "$COMFY_CHECKPOINT_DIR/ltx-2.3-22b-distilled-fp8.safetensors"
+    check_file "$COMFY_DIR/models/text_encoders/gemma_3_12B_it_fp4_mixed.safetensors"
 
     log "Checking Python version"
     "$PY" --version >>"$LOG_FILE" 2>&1 || fail "Python version check failed"
@@ -703,6 +798,7 @@ run_checks() {
     "$PY" -c 'import torch; print("torch:", torch.__version__, "cuda:", torch.cuda.is_available())' >"$LOG_DIR/torch_check.txt" 2>>"$LOG_FILE" || fail "Torch import check failed"
     cat "$LOG_DIR/torch_check.txt"
     cat "$LOG_DIR/torch_check.txt" >>"$LOG_FILE"
+    "$PY" -c 'import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)' >>"$LOG_FILE" 2>&1 || fail "Main Python environment cannot access CUDA"
 
     log "Checking core backend imports"
     "$PY" -c "import cv2, PIL, numpy, yaml, fastapi, uvicorn, psutil, imageio_ffmpeg; print(True)" >"$LOG_DIR/core_import_check.txt" 2>>"$LOG_FILE" || fail "Core backend import check failed"
@@ -745,6 +841,7 @@ PY
     cat "$LOG_DIR/firered_import_check.txt"
     cat "$LOG_DIR/firered_import_check.txt" >>"$LOG_FILE"
     grep -Fq "True" "$LOG_DIR/firered_import_check.txt" || fail "FireRed import check failed"
+    "$FIRERED_PY" -c 'import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)' >>"$LOG_FILE" 2>&1 || fail "FireRed Python environment cannot access CUDA"
 
     log "Checking ComfyUI imports"
     "$COMFY_PY" -c "import torch, aiohttp, yaml, PIL, safetensors; print(True)" >"$LOG_DIR/comfy_import_check.txt" 2>>"$LOG_FILE" || fail "ComfyUI import check failed"
@@ -775,7 +872,7 @@ start_api() {
     cd "$API_DIR" || fail "Cannot cd into API dir"
     export NODE_ENV="development"
     export PORT="$API_PORT"
-    export MONGODB_URL="mongodb://localhost:27017/kone"
+    export MONGODB_URL="mongodb://localhost:$MONGODB_PORT/kone"
     export JWT_SECRET="local_guest_secret"
     export LOGIC_URL="http://localhost:$BACKEND_PORT"
     export NPM_CONFIG_CACHE
@@ -897,6 +994,7 @@ EOF
 
 main_setup() {
     create_dirs
+    install_system_dependencies
 
     log "============================================================"
     log "KONE FULL SETUP STARTED"
@@ -915,7 +1013,9 @@ main_setup() {
     require_cmd node
     require_cmd npm
     require_cmd ffmpeg
-    check_optional mongod
+    require_cmd mongod
+    require_cmd nvidia-smi
+    check_optional git-lfs
 
     create_venv
     upgrade_pip
