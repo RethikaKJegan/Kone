@@ -35,11 +35,11 @@ export HF_HOME=/root/Kone/firered_hf_cache
 export HF_HUB_CACHE=/root/Kone/firered_hf_cache/hub
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=false
-export CUDA_VISIBLE_DEVICES=0,1
+export CUDA_VISIBLE_DEVICES=0
 export PYTHONUNBUFFERED=1
 
 export PYTHONPATH=/root/Kone/elevator_mod_pipeline/src:/root/Kone:/root/Kone/GroundingDINO:/root/Kone/sam2_src:/root/Kone/lama
 
-exec python3 -m uvicorn server:app \
+exec /root/Kone/.venv/bin/python -m uvicorn server:app \
     --host 0.0.0.0 \
     --port 8001

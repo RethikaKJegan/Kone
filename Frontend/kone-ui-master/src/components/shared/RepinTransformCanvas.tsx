@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { semanticComponentKey } from '../../lib/constants'
 import type { ComponentKey, ComponentPin, RepinTransform } from '../../types'
 
@@ -279,7 +280,118 @@ function layerBox(transform: RepinTransform, imageSize: { width: number; height:
     const y = bbox.height > 0 ? ((point.y - bbox.y) / bbox.height) * 100 : 0
     return String(round(x)) + '% ' + String(round(y)) + '%'
   }).join(', ')
-  return { bbox, relativePolygon }
+  return { bbox, relativePolygon, points: clampedPoints }
+}
+
+function solveLinearSystem(matrix: number[][], vector: number[]) {
+  const size = vector.length
+  const augmented = matrix.map((row, index) => [...row, vector[index]])
+
+  for (let column = 0; column < size; column += 1) {
+    let pivot = column
+    for (let row = column + 1; row < size; row += 1) {
+      if (Math.abs(augmented[row][column]) > Math.abs(augmented[pivot][column])) pivot = row
+    }
+    if (Math.abs(augmented[pivot][column]) < 1e-9) return null
+    if (pivot !== column) [augmented[column], augmented[pivot]] = [augmented[pivot], augmented[column]]
+
+    const divisor = augmented[column][column]
+    for (let item = column; item <= size; item += 1) augmented[column][item] /= divisor
+
+    for (let row = 0; row < size; row += 1) {
+      if (row === column) continue
+      const factor = augmented[row][column]
+      for (let item = column; item <= size; item += 1) {
+        augmented[row][item] -= factor * augmented[column][item]
+      }
+    }
+  }
+
+  return augmented.map(row => row[size])
+}
+
+function homographyFromRectToQuad(width: number, height: number, points: QuadPoints) {
+  if (width <= 1 || height <= 1) return null
+  const source = [
+    { x: 0, y: 0 },
+    { x: width, y: 0 },
+    { x: width, y: height },
+    { x: 0, y: height },
+  ]
+  const matrix: number[][] = []
+  const vector: number[] = []
+
+  points.forEach((point, index) => {
+    const { x, y } = source[index]
+    matrix.push([x, y, 1, 0, 0, 0, -point.x * x, -point.x * y])
+    vector.push(point.x)
+    matrix.push([0, 0, 0, x, y, 1, -point.y * x, -point.y * y])
+    vector.push(point.y)
+  })
+
+  const solved = solveLinearSystem(matrix, vector)
+  if (!solved || solved.some(value => !Number.isFinite(value))) return null
+  const [a, b, c, d, e, f, g, h] = solved
+  return [a, b, c, d, e, f, g, h, 1]
+}
+
+function cssMatrix3dFromHomography(matrix: number[]) {
+  const [a, b, c, d, e, f, g, h, i] = matrix
+  return `matrix3d(${[
+    a, d, 0, g,
+    b, e, 0, h,
+    0, 0, 1, 0,
+    c, f, 0, i,
+  ].map(value => Number(value.toFixed(10))).join(',')})`
+}
+
+function hasPerspectiveShape(points: QuadPoints, tolerance = 0.5) {
+  const xs = points.map(point => point.x)
+  const ys = points.map(point => point.y)
+  const rect = [
+    { x: Math.min(...xs), y: Math.min(...ys) },
+    { x: Math.max(...xs), y: Math.min(...ys) },
+    { x: Math.max(...xs), y: Math.max(...ys) },
+    { x: Math.min(...xs), y: Math.max(...ys) },
+  ]
+  return points.some((point, index) => Math.hypot(point.x - rect[index].x, point.y - rect[index].y) > tolerance)
+}
+
+function projectiveLayerStyle(points: QuadPoints, imageSize: { width: number; height: number }, viewportSize: { width: number; height: number }) {
+  if (viewportSize.width <= 1 || viewportSize.height <= 1 || imageSize.width <= 1 || imageSize.height <= 1) return null
+  const cssPoints = points.map(point => ({
+    x: (point.x / imageSize.width) * viewportSize.width,
+    y: (point.y / imageSize.height) * viewportSize.height,
+  })) as QuadPoints
+  if (!hasPerspectiveShape(cssPoints)) return null
+
+  const xs = cssPoints.map(point => point.x)
+  const ys = cssPoints.map(point => point.y)
+  const x1 = Math.min(...xs)
+  const y1 = Math.min(...ys)
+  const x2 = Math.max(...xs)
+  const y2 = Math.max(...ys)
+  const width = x2 - x1
+  const height = y2 - y1
+  const localPoints = cssPoints.map(point => ({ x: point.x - x1, y: point.y - y1 })) as QuadPoints
+  const homography = homographyFromRectToQuad(width, height, localPoints)
+  if (!homography) return null
+
+  return {
+    wrapperStyle: {
+      left: `${x1}px`,
+      top: `${y1}px`,
+      width: `${width}px`,
+      height: `${height}px`,
+      overflow: 'visible',
+    } satisfies CSSProperties,
+    imageStyle: {
+      transform: cssMatrix3dFromHomography(homography),
+      transformOrigin: '0 0',
+      backfaceVisibility: 'hidden',
+      willChange: 'transform',
+    } satisfies CSSProperties,
+  }
 }
 
 export function RepinTransformCanvas({ imageUrl, transform, label, componentImageUrl, staticLayers = [], eraserEnabled = false, eraserBrushSize = 32, previewOnly = false, showLabel = true, onErase, onEditStart, onChange }: Props) {
@@ -289,6 +401,7 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
   const lastEraserPointRef = useRef<QuadPoint | null>(null)
   const dragRef = useRef<{ mode: DragMode; startX: number; startY: number; start: RepinTransform } | null>(null)
   const [imageSize, setImageSize] = useState({ width: transform.imageWidth || 1000, height: transform.imageHeight || 750 })
+  const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 })
 
   const normalized = useMemo(() => normalizeTransformForCanvas(transform, imageSize), [transform, imageSize])
 
@@ -419,6 +532,26 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
   }
 
   useEffect(() => {
+    const element = containerRef.current
+    if (!element) return
+
+    const updateViewportSize = () => {
+      const rect = element.getBoundingClientRect()
+      setViewportSize({ width: rect.width, height: rect.height })
+    }
+
+    updateViewportSize()
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateViewportSize)
+      return () => window.removeEventListener('resize', updateViewportSize)
+    }
+
+    const observer = new ResizeObserver(updateViewportSize)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
     const handleMove = (event: PointerEvent) => {
       const drag = dragRef.current
       const point = pointFromEvent(event)
@@ -495,6 +628,7 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
 
   const points = normalized.points ?? pointsFromRect(normalized)
   const bbox = boundingBoxFromPoints(points, imageSize)
+  const activeProjectiveLayer = projectiveLayerStyle(points, imageSize, viewportSize)
   const polygonPoints = points.map(point => `${(point.x / imageSize.width) * 100},${(point.y / imageSize.height) * 100}`).join(' ')
   const relativePolygon = points.map(point => {
     const x = bbox.width > 0 ? ((point.x - bbox.x) / bbox.width) * 100 : 0
@@ -530,20 +664,22 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
         {staticLayers.map(layer => {
           if (!layer.componentImageUrl) return null
           const box = layerBox(layer.transform, imageSize)
+          const projectiveLayer = projectiveLayerStyle(box.points, imageSize, viewportSize)
           return (
             <div
               key={layer.transform.componentKey + ":" + layer.label}
-              className={layer.onSelect ? "absolute cursor-pointer overflow-hidden" : "pointer-events-none absolute overflow-hidden"}
+              className={layer.onSelect ? "absolute cursor-pointer" : "pointer-events-none absolute"}
               onPointerDown={event => {
                 if (!layer.onSelect || eraserEnabled || previewOnly) return
                 layer.onSelect()
                 beginDrag(event, 'move', normalizeTransformForCanvas(layer.transform, imageSize))
               }}
-              style={{
+              style={projectiveLayer?.wrapperStyle ?? {
                 left: String((box.bbox.x / imageSize.width) * 100) + "%",
                 top: String((box.bbox.y / imageSize.height) * 100) + "%",
                 width: String((box.bbox.width / imageSize.width) * 100) + "%",
                 height: String((box.bbox.height / imageSize.height) * 100) + "%",
+                overflow: 'hidden',
                 clipPath: "polygon(" + box.relativePolygon + ")",
               }}
             >
@@ -552,7 +688,7 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
                 alt={layer.label}
                 className="h-full w-full object-fill"
                 draggable={false}
-                style={{ transform: 'rotate(' + finiteNumber(layer.transform.rotation, 0) + 'deg)', transformOrigin: 'center' }}
+                style={projectiveLayer?.imageStyle ?? { transform: 'rotate(' + finiteNumber(layer.transform.rotation, 0) + 'deg)', transformOrigin: 'center' }}
               />
             </div>
           )
@@ -560,12 +696,13 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
 
         {componentImageUrl ? (
           <div
-            className="pointer-events-none absolute overflow-hidden"
-            style={{
+            className="pointer-events-none absolute"
+            style={activeProjectiveLayer?.wrapperStyle ?? {
               left: `${(bbox.x / imageSize.width) * 100}%`,
               top: `${(bbox.y / imageSize.height) * 100}%`,
               width: `${(bbox.width / imageSize.width) * 100}%`,
               height: `${(bbox.height / imageSize.height) * 100}%`,
+              overflow: 'hidden',
               clipPath: `polygon(${relativePolygon})`,
             }}
           >
@@ -574,7 +711,7 @@ export function RepinTransformCanvas({ imageUrl, transform, label, componentImag
               alt={label}
               className="h-full w-full object-fill"
               draggable={false}
-              style={{ transform: 'rotate(' + finiteNumber(normalized.rotation, 0) + 'deg)', transformOrigin: 'center' }}
+              style={activeProjectiveLayer?.imageStyle ?? { transform: 'rotate(' + finiteNumber(normalized.rotation, 0) + 'deg)', transformOrigin: 'center' }}
               onLoad={event => rememberAssetAspectRatio(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight)}
             />
           </div>

@@ -181,7 +181,7 @@ create_dirs() {
     mkdir -p "$LOG_DIR" "$CACHE_DIR" "$HF_HOME" "$HUGGINGFACE_HUB_CACHE"
     mkdir -p "$TORCH_HOME" "$PIP_CACHE_DIR" "$NPM_CONFIG_CACHE" "$MPLCONFIGDIR" "$WEIGHTS_DIR"
     mkdir -p "$ROOT_DIR/models" "$FIRERED_HF_HOME" "$FIRERED_HF_HUB_CACHE"
-    mkdir -p "$VDOTEST_DIR" "$COMFY_WORKFLOW_DIR" "$COMFY_INPUT_DIR" "$COMFY_OUTPUT_DIR"
+    mkdir -p "$VDOTEST_DIR" "$COMFY_WORKFLOW_DIR"
 }
 
 create_venv() {

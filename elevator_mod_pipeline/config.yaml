@@ -28,7 +28,7 @@ input_validation:
     exposure_min: 0.3
     composition_min: 0.24
     technical_defects_min: 0.35
-    geometric_defects_min: 0.10
+    geometric_defects_min: 0.1
     min_short_side: 300
   thresholds:
     pass: 0.58
@@ -73,7 +73,7 @@ segmentation:
   fallback_to_boxes: true
 geometry:
   enabled: true
-  depth_model_id: depth-anything/Depth-Anything-V2-Base-hf
+  depth_model_id: /root/Kone/models/depth-anything-v2-base-hf
   known_door_width_mm: 900
   max_plane_points: 4000
   ransac_iterations: 64
@@ -149,7 +149,7 @@ perspective_mod_placement:
   match_lighting: false
 refinement:
   enabled: false
-  model_id: runwayml/stable-diffusion-inpainting
+  model_id: /root/Kone/models/stable-diffusion-inpainting
   strength: 0.22
   guidance_scale: 6.5
   steps: 28
@@ -202,10 +202,10 @@ video:
       cartoon, CGI, flicker, unstable lighting
   comfy:
     url: http://127.0.0.1:8188
-    root_dir: /root/vdotest/ComfyUI
-    workflow_dir: /root/vdotest/workflows
-    input_dir: /root/vdotest/ComfyUI/input
-    output_dir: /root/vdotest/ComfyUI/output
+    root_dir: /root/Kone/vdotest/ComfyUI
+    workflow_dir: /root/Kone/vdotest/workflows
+    input_dir: /root/Kone/vdotest/ComfyUI/input
+    output_dir: /root/Kone/vdotest/ComfyUI/output
     i2v_workflow: wan22_14b_i2v.json
     flf2v_workflow: wan22_14b_flf2v.json
     quality_mode: best
@@ -214,8 +214,8 @@ video:
     height: 960
     length: 81
     fps: 16
-    high_noise_model: wan2.2_i2v_high_noise_14B_fp16.safetensors
-    low_noise_model: wan2.2_i2v_low_noise_14B_fp16.safetensors
+    high_noise_model: wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors
+    low_noise_model: wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors
     high_noise_lora: wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors
     low_noise_lora: wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors
     clip_name: umt5_xxl_fp8_e4m3fn_scaled.safetensors

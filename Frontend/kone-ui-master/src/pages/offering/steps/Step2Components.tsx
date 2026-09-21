@@ -21,7 +21,7 @@ const STEP2_GROUPS: CatalogGroup[] = [
   { id: 'interior-india', label: 'Elevator Interior - India', componentType: 'ceiling', variantGroup: 'Elevator Interior - India', kind: 'structure' },
   { id: 'interior-indonesia-singapore', label: 'Elevator Interior - Indonesia/Singapore', componentType: 'ceiling', variantGroup: 'Elevator Interior - Indonesia/Singapore', kind: 'structure' },
   { id: 'kds90', label: 'KDS90', componentType: 'kds', variantGroup: 'KDS90', kind: 'kds' },
-  { id: 'kds330-93', label: 'KDS330/93', componentType: 'kds', variantGroup: 'KDS330/93', kind: 'kds' },
+  { id: 'kds330-93', label: 'KDS330/93/96', componentType: 'kds', variantGroup: 'KDS330/93/96', kind: 'kds' },
   { id: 'dcs1020', label: 'DCS1020', componentType: 'dcs1020', variantGroup: 'DCS1020', kind: 'dcs' },
   { id: 'door', label: 'Door', componentType: 'door', variantGroup: 'Door', kind: 'structure' },
 ]

@@ -305,9 +305,9 @@ def patch_ui_workflow(
             text_index += 1
         elif class_type == "UNETLoader" and widgets:
             if "high" in str(widgets[0]).lower():
-                widgets[0] = comfy_cfg.get("high_noise_model", "wan2.2_i2v_high_noise_14B_fp16.safetensors")
+                widgets[0] = comfy_cfg.get("high_noise_model", "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors")
             elif "low" in str(widgets[0]).lower():
-                widgets[0] = comfy_cfg.get("low_noise_model", "wan2.2_i2v_low_noise_14B_fp16.safetensors")
+                widgets[0] = comfy_cfg.get("low_noise_model", "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors")
         elif class_type == "LoraLoaderModelOnly" and widgets:
             if "high" in str(widgets[0]).lower():
                 widgets[0] = comfy_cfg.get("high_noise_lora", "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors")
@@ -362,17 +362,17 @@ def subgraph_input_value(name: str, label: str, preset: dict[str, Any], comfy_cf
     if name in {"noise_seed", "seed"}:
         return int(preset.get("seed") if preset.get("seed") is not None else time.time() * 1000) % 1000000000
     if "low_noise" in lowered and "unet" in lowered:
-        return comfy_cfg.get("low_noise_model", "wan2.2_i2v_low_noise_14B_fp16.safetensors")
+        return comfy_cfg.get("low_noise_model", "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors")
     if "high_noise" in lowered and "unet" in lowered:
-        return comfy_cfg.get("high_noise_model", "wan2.2_i2v_high_noise_14B_fp16.safetensors")
+        return comfy_cfg.get("high_noise_model", "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors")
     if "low_noise" in lowered and "lora" in lowered:
         return comfy_cfg.get("low_noise_lora", "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors")
     if "high_noise" in lowered and "lora" in lowered:
         return comfy_cfg.get("high_noise_lora", "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors")
     if name == "unet_name":
-        return comfy_cfg.get("high_noise_model", "wan2.2_i2v_high_noise_14B_fp16.safetensors")
+        return comfy_cfg.get("high_noise_model", "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors")
     if name == "unet_name_1":
-        return comfy_cfg.get("low_noise_model", "wan2.2_i2v_low_noise_14B_fp16.safetensors")
+        return comfy_cfg.get("low_noise_model", "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors")
     if name == "lora_name":
         return comfy_cfg.get("high_noise_lora", "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors")
     if name == "lora_name_1":
@@ -622,8 +622,8 @@ def patch_numeric(inputs: dict[str, Any], node_id: str, preset: dict[str, Any], 
 
 def patch_models(inputs: dict[str, Any], node_id: str, comfy_cfg: dict[str, Any], debug: dict[str, Any]) -> None:
     model_keys = {
-        "high_noise_model": "wan2.2_i2v_high_noise_14B_fp16.safetensors",
-        "low_noise_model": "wan2.2_i2v_low_noise_14B_fp16.safetensors",
+        "high_noise_model": "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+        "low_noise_model": "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
         "high_noise_lora": "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors",
         "low_noise_lora": "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors",
         "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
@@ -653,6 +653,12 @@ def queue_prompt(base_url: str, workflow: dict[str, Any]) -> str:
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"ComfyUI rejected workflow at {base_url} "
+            f"(HTTP {exc.code}): {body}"
+        ) from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Could not submit workflow to ComfyUI at {base_url}: {exc}") from exc
     prompt_id = data.get("prompt_id")

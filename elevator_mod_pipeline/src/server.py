@@ -1148,20 +1148,29 @@ def _warp_component(component: Image.Image, transform: dict[str, Any], image_siz
         if target_w <= 1 or target_h <= 1:
             raise ValueError("Repin transform points are too small")
         component_rgba = _lci_internal_perspective_component(component, transform)
-        slot = component_rgba.resize((target_w, target_h), Image.Resampling.LANCZOS)
-        rotation = _clamp_float(transform.get("rotation"))
-        if abs(rotation) > 0.01:
-            rotated = slot.rotate(-rotation, expand=True, resample=Image.Resampling.BICUBIC)
-            clipped_slot = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
-            clipped_slot.paste(rotated, ((target_w - rotated.width) // 2, (target_h - rotated.height) // 2), rotated)
-            slot = clipped_slot
-        polygon_mask = Image.new("L", (target_w, target_h), 0)
-        ImageDraw.Draw(polygon_mask).polygon(
-            [(int(round(point[0] - x1)), int(round(point[1] - y1))) for point in quad_points],
-            fill=255,
+        src_points = np.array(
+            [
+                [0, 0],
+                [max(1, component_rgba.width - 1), 0],
+                [max(1, component_rgba.width - 1), max(1, component_rgba.height - 1)],
+                [0, max(1, component_rgba.height - 1)],
+            ],
+            dtype=np.float32,
         )
-        slot.putalpha(ImageChops.multiply(slot.getchannel("A"), polygon_mask))
-        return slot, (x1, y1, x2, y2)
+        dst_points = np.array(
+            [[point[0] - x1, point[1] - y1] for point in quad_points],
+            dtype=np.float32,
+        )
+        matrix = cv2.getPerspectiveTransform(src_points, dst_points)
+        warped_array = cv2.warpPerspective(
+            np.asarray(component_rgba),
+            matrix,
+            (target_w, target_h),
+            flags=cv2.INTER_CUBIC,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0, 0),
+        )
+        return Image.fromarray(warped_array, "RGBA"), (x1, y1, x2, y2)
 
     x1, y1, x2, y2 = _transform_box_px(transform, image_size)
     target_w, target_h = x2 - x1, y2 - y1
